@@ -1,0 +1,45 @@
+{
+  "name": "manga-voice-studio",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Self-hosted веб-инструмент для автоматической генерации озвученных видео из изображений манги/комиксов",
+  "engines": {
+    "node": ">=20.9.0"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "desktop": "electron electron/main.js",
+    "desktop:dev": "concurrently \"npm run dev -- -H 0.0.0.0 -p 3000\" \"wait-on http://localhost:3000 && electron electron/main.js\"",
+    "desktop:build": "next build && electron-builder"
+  },
+  "dependencies": {
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "idb": "^8.0.3",
+    "lucide-react": "^1.48.0",
+    "mediabunny": "^1.61.0",
+    "next": "16.3.7",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "tailwind-merge": "^3.7.0",
+    "zod": "^4.6.5",
+    "zustand": "^5.0.15"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "concurrently": "^8.2.2",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8",
+    "eslint": "^9",
+    "eslint-config-next": "16.3.7",
+    "tailwindcss": "^4",
+    "typescript": "^5",
+    "wait-on": "^8.0.0"
+  }
+}
