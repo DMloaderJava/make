@@ -10,23 +10,8 @@ const nextConfig: NextConfig = {
     };
     return config;
   },
-  async headers() {
-    return [
-      {
-        source: '/:path*',
-        headers: [
-          {
-            key: 'Cross-Origin-Embedder-Policy',
-            value: 'credentialless',
-          },
-          {
-            key: 'Cross-Origin-Opener-Policy',
-            value: 'same-origin',
-          },
-        ],
-      },
-    ];
-  },
+  // COOP/COEP are intentionally omitted: this app does not require cross-origin isolation,
+  // and browsers ignore COOP on non-secure HTTP origins.
 };
 
 export default nextConfig;

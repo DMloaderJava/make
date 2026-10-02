@@ -18,8 +18,9 @@ export const metadata: Metadata = {
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
+  // Browser extensions may add attributes to <html> before React hydrates.
   return (
-    <html lang="ru" className="h-full antialiased dark">
+    <html lang="ru" className="h-full antialiased dark" suppressHydrationWarning>
       <body className="min-h-full flex flex-col bg-[#0B0B0C] text-[#F5F5F7] font-sans" style={{ fontFamily: "Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif" }}>
         <MigrationRunner />
         <main className="flex-1 flex flex-col min-h-0">{children}</main>
