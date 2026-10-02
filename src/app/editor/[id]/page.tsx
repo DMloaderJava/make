@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useMemo, useCallback } from 'react';
-import { useParams, useRouter } from 'next/navigation';
+import { useParams } from 'next/navigation';
 import { getProjectWithImages, saveProject, Project } from '@/lib/storage/db';
 import { Preview } from '@/components/studio/Preview';
 import { Timeline } from '@/components/studio/Timeline';
@@ -31,16 +31,30 @@ function getEditorAudioContext(): AudioContext {
   return editorAudioContext;
 }
 
+async function getAudioDuration(blob: Blob): Promise<number> {
+  try {
+    const ctx = getEditorAudioContext();
+    const ab = await blob.arrayBuffer();
+    const dec = await ctx.decodeAudioData(ab.slice(0));
+    if (isFinite(dec.duration) && dec.duration > 0) return dec.duration;
+    return 2;
+  } catch {
+    return 2;
+  }
+}
+
 export default function EditorPage() {
   const params = useParams();
-  const router = useRouter();
   const id = params.id as string;
 
   const [project, setProject] = useState<Project | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const [loadResult, setLoadResult] = useState<{ id: string; attempt: number; error?: string } | null>(null);
+  const isProjectLoading = !loadResult || loadResult.id !== id || loadResult.attempt !== loadAttempt;
+  const projectLoadError = isProjectLoading ? null : loadResult.error ?? null;
   const [images, setImages] = useState<string[]>([]);
   const [currentPanelIdx, setCurrentPanelIdx] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
-  const [duration, setDuration] = useState(0);
   const [audioDurations, setAudioDurations] = useState<Map<number, number>>(new Map());
   const [audioBlobs, setAudioBlobs] = useState<Map<number, Blob>>(new Map());
   const [audioFull, setAudioFull] = useState<Map<number, { blob: Blob; duration: number }>>(new Map());
@@ -59,18 +73,106 @@ export default function EditorPage() {
   const [preferredBackend, setPreferredBackend] = useState<'auto' | 'webcodecs' | 'canvas'>('auto');
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'unsaved'>('saved');
 
-  useEffect(() => {
-    loadProject();
-    isOPFSSupported().then(() => {});
-    checkCapabilities().then(setBackendCaps);
-  }, [id]);
+  const duration = useMemo(() => {
+    if (!project) return 0;
+    const timeline = buildTimeline(project.panels, audioDurations, project.voiceAssignments, project.introDuration, project.outroDuration);
+    return calculateTotalDuration(timeline, project.introDuration, project.outroDuration);
+  }, [project, audioDurations]);
 
   useEffect(() => {
-    if (project) {
-      const tl = buildTimeline(project.panels, audioDurations, project.voiceAssignments, project.introDuration, project.outroDuration);
-      setDuration(calculateTotalDuration(tl, project.introDuration, project.outroDuration));
-    }
-  }, [project, audioDurations]);
+    let cancelled = false;
+    const attempt = loadAttempt;
+
+    const loadProject = async () => {
+      try {
+        if (!id) {
+          await Promise.resolve();
+          if (!cancelled) setLoadResult({ id, attempt, error: 'Не удалось определить ID проекта.' });
+          return;
+        }
+
+        const result = await getProjectWithImages(id);
+        if (cancelled) return;
+        if (!result) {
+          setLoadResult({
+            id,
+            attempt,
+            error: `Проект «${id}» не найден в локальном хранилище. Возможно, он был удалён или открыт в другом браузере/профиле.`,
+          });
+          return;
+        }
+
+        const { project: loadedProject, imageDataUrls: urls } = result;
+        const durations = new Map<number, number>();
+        const blobs = new Map<number, Blob>();
+        const full = new Map<number, { blob: Blob; duration: number }>();
+
+        for (const panel of loadedProject.panels) {
+          if (cancelled) return;
+          try {
+            const blob = await loadProjectAudio(loadedProject.id, panel.id);
+            if (blob) {
+              const duration = await getAudioDuration(blob);
+              durations.set(panel.id, duration);
+              blobs.set(panel.id, blob);
+              full.set(panel.id, { blob, duration });
+            } else {
+              durations.set(panel.id, loadedProject.audioDurations?.[panel.id] || estimateDuration(panel.dialogue));
+            }
+          } catch {
+            durations.set(panel.id, loadedProject.audioDurations?.[panel.id] || estimateDuration(panel.dialogue));
+          }
+        }
+
+        let loadedIntroAudio: Blob | null = null;
+        let loadedOutroAudio: Blob | null = null;
+        try {
+          loadedIntroAudio = await loadProjectIntroAudio(loadedProject.id);
+          loadedOutroAudio = await loadProjectOutroAudio(loadedProject.id);
+        } catch {}
+
+        if (cancelled) return;
+        setProject(loadedProject);
+        setImages(urls);
+        setAudioDurations(durations);
+        setAudioBlobs(blobs);
+        setAudioFull(full);
+        setIntroAudio(loadedIntroAudio);
+        setOutroAudio(loadedOutroAudio);
+        setCurrentPanelIdx(0);
+        setCurrentTime(0);
+        setIsPlaying(false);
+        setAudioProgress('');
+
+        const cost = estimateTotalCost(loadedProject.panels, loadedProject.intro, loadedProject.outro, loadedProject.settings.ttsProvider);
+        setCostEstimate({ characters: cost.characters, cost: cost.estimatedCost });
+
+        if (loadedProject.panels.length > 0) {
+          setSelectedId(loadedProject.panels[0].id);
+        } else {
+          setSelectedId('intro');
+        }
+        setLoadResult({ id, attempt });
+      } catch (error) {
+        if (!cancelled) {
+          const message = error instanceof Error ? error.message : String(error);
+          setLoadResult({ id, attempt, error: `Не удалось загрузить проект: ${message || 'неизвестная ошибка'}` });
+        }
+      }
+    };
+
+    void loadProject();
+    void isOPFSSupported().catch(() => {});
+    void checkCapabilities()
+      .then((capabilities) => {
+        if (!cancelled) setBackendCaps(capabilities);
+      })
+      .catch((error) => console.warn('Не удалось проверить возможности экспорта', error));
+
+    return () => {
+      cancelled = true;
+    };
+  }, [id, loadAttempt]);
 
   useEffect(() => {
     if (!project) return;
@@ -131,69 +233,6 @@ export default function EditorPage() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [duration, currentTime]);
-
-  const loadProject = async () => {
-    const result = await getProjectWithImages(id);
-    if (!result) {
-      router.push('/');
-      return;
-    }
-    const { project: p, imageDataUrls: urls } = result;
-    setProject(p);
-    setImages(urls);
-
-    const durations = new Map<number, number>();
-    const blobs = new Map<number, Blob>();
-    const full = new Map<number, { blob: Blob; duration: number }>();
-
-    for (const panel of p.panels) {
-      try {
-        const blob = await loadProjectAudio(p.id, panel.id);
-        if (blob) {
-          const dur = await getDuration(blob);
-          durations.set(panel.id, dur);
-          blobs.set(panel.id, blob);
-          full.set(panel.id, { blob, duration: dur });
-        } else {
-          durations.set(panel.id, p.audioDurations?.[panel.id] || estimateDuration(panel.dialogue));
-        }
-      } catch {
-        durations.set(panel.id, p.audioDurations?.[panel.id] || estimateDuration(panel.dialogue));
-      }
-    }
-
-    try {
-      const intro = await loadProjectIntroAudio(p.id);
-      if (intro) setIntroAudio(intro);
-      const outro = await loadProjectOutroAudio(p.id);
-      if (outro) setOutroAudio(outro);
-    } catch {}
-
-    setAudioDurations(durations);
-    setAudioBlobs(blobs);
-    setAudioFull(full);
-    const cost = estimateTotalCost(p.panels, p.intro, p.outro, p.settings.ttsProvider);
-    setCostEstimate({ characters: cost.characters, cost: cost.estimatedCost });
-
-    if (p.panels.length > 0) {
-      setSelectedId(p.panels[0].id);
-      setCurrentPanelIdx(0);
-    } else {
-      setSelectedId('intro');
-    }
-  };
-
-  const getDuration = async (blob: Blob): Promise<number> => {
-    try {
-      const ctx = getEditorAudioContext();
-      const ab = await blob.arrayBuffer();
-      const dec = await ctx.decodeAudioData(ab.slice(0));
-      if (isFinite(dec.duration) && dec.duration > 0) return dec.duration;
-      return 2;
-    } catch {
-      return 2;
-    }
-  };
 
   const handleSave = async () => {
     if (!project) return;
@@ -412,19 +451,53 @@ export default function EditorPage() {
     }
   }, [project, tl]);
 
-  if (!project) {
-    return <div className="flex-1 flex items-center justify-center bg-[#0B0B0C]"><Loader2 className="w-6 h-6 animate-spin text-[#8A8A93]" /></div>;
-  }
+  const selectedPanel = project && selectedId !== null && typeof selectedId === 'number'
+    ? project.panels.find(p => p.id === selectedId) ?? null
+    : null;
+  const selectedIndex = project && selectedPanel
+    ? project.panels.findIndex(p => p.id === selectedPanel.id)
+    : -1;
 
-  const selectedPanel = selectedId !== null && typeof selectedId === 'number' ? project.panels.find(p => p.id === selectedId) : null;
-  const selectedIndex = selectedPanel ? project.panels.findIndex(p => p.id === selectedPanel.id) : -1;
-
+  // Keep this hook unconditional: the page renders once before the async project load completes.
   const contextValue = useMemo(() => {
+    if (!project) return null;
     return selectedId === 'intro' ? { type: 'intro' as const, text: project.intro, duration: project.introDuration }
       : selectedId === 'outro' ? { type: 'outro' as const, text: project.outro, duration: project.outroDuration }
       : selectedPanel ? { type: 'panel' as const, data: selectedPanel, index: selectedIndex }
       : null;
-  }, [selectedId, project.intro, project.introDuration, project.outro, project.outroDuration, selectedPanel, selectedIndex]);
+  }, [project, selectedId, selectedPanel, selectedIndex]);
+
+  if (isProjectLoading) {
+    return (
+      <div className="flex-1 flex flex-col items-center justify-center gap-3 bg-[#0B0B0C] text-[#8A8A93]" role="status" aria-live="polite">
+        <Loader2 className="w-6 h-6 animate-spin" />
+        <span className="text-sm">Загрузка проекта...</span>
+      </div>
+    );
+  }
+
+  if (projectLoadError || !project) {
+    return (
+      <div className="flex-1 flex items-center justify-center bg-[#0B0B0C] px-4">
+        <div className="w-full max-w-lg rounded-[16px] border border-[#26262C] bg-[#16161A] p-6 text-center" role="alert">
+          <h1 className="text-lg font-medium">Не удалось открыть проект</h1>
+          <p className="mt-2 text-sm text-[#A1A1AA]">{projectLoadError || 'Проект не найден в локальном хранилище.'}</p>
+          <div className="mt-5 flex items-center justify-center gap-3">
+            <button
+              type="button"
+              onClick={() => setLoadAttempt(attempt => attempt + 1)}
+              className="h-9 rounded-[6px] bg-[#E8B44C] px-4 text-sm font-medium text-[#0B0B0C] hover:bg-[#B88A2E] transition-colors"
+            >
+              Повторить
+            </button>
+            <Link href="/" className="h-9 rounded-[6px] border border-[#26262C] px-4 text-sm text-[#F5F5F7] hover:bg-[#1E1E23] transition-colors flex items-center">
+              К проектам
+            </Link>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex-1 bg-[#0B0B0C] flex flex-col min-h-0">
