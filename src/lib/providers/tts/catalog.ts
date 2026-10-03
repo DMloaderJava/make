@@ -1,4 +1,4 @@
-import { TTSProvider } from './types';
+import { TTSProvider, TTSOptions } from './types';
 import { geminiTTS } from './gemini';
 import { elevenLabsTTS } from './elevenlabs';
 import { speechifyTTS } from './speechify';
@@ -35,4 +35,15 @@ export const TTS_PROVIDERS: TTSProvider[] = [
 
 export function getTTSProvider(id: string): TTSProvider | undefined {
   return TTS_PROVIDERS.find(p => p.id === id);
+}
+
+/**
+ * Чем синтезировать звук на сервере. Возвращает null, если это небезопасно:
+ * клиентская generate() ходит через прокси, а серверной реализации нет —
+ * иначе получилась бы рекурсия /api/tts → /api/tts.
+ */
+export function getServerGenerate(provider: TTSProvider): ((text: string, options: TTSOptions) => Promise<ArrayBuffer>) | null {
+  if (provider.serverGenerate) return provider.serverGenerate;
+  if (provider.proxyClientSide) return null;
+  return provider.generate;
 }

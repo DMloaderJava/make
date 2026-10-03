@@ -9,6 +9,9 @@ export const pollyTTS: TTSProvider = {
   freeTier: true,
   languages: ['ru', 'en', 'multi'],
   baseUrl: 'https://polly.eu-central-1.amazonaws.com',
+  // Клиент ходит в /api/tts (там AWS SDK и SigV4), поэтому серверу запрещено
+  // звать эту generate() — ветка polly в route.ts идёт через SDK напрямую.
+  proxyClientSide: true,
 
   async generate(text: string, { voice = 'Maxim', apiKey, language = 'ru-RU' }: TTSOptions): Promise<ArrayBuffer> {
     // aws-ключи хранятся как JSON-строка; проверяем её отдельно,

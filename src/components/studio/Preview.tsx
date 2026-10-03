@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { PanelData } from '@/lib/pipeline/extractPanels';
 import { SyncTimeline } from '@/lib/storage/db';
-import { STRIP_DEFAULTS, createStripScene, resolveStripViewport } from '@/lib/pipeline/mangaStrip';
+import { STRIP_DEFAULTS, createStripSceneFromMedia, pageIndexAtScroll, resolveStripViewport } from '@/lib/pipeline/mangaStrip';
 
 interface PreviewProps {
   images: string[];
@@ -74,24 +74,15 @@ export function Preview({
   const stripScene = useMemo(() => {
     if (renderMode !== 'strip' || images.length === 0) return null;
     const ratio = FRAME_H / EXPORT_FRAME_H;
-    const sizes = images.map(src => {
-      const img = loaded.get(src);
-      return { width: img?.naturalWidth || 1000, height: img?.naturalHeight || 1400 };
-    });
-    return createStripScene({
-      sizes,
-      images: images.map(src => loaded.get(src) ?? null),
+    return createStripSceneFromMedia({
+      images,
+      loaded,
       timeline,
       panels: panels.map(p => ({ id: p.id, imageIndex: p.imageIndex })),
-      options: {
-        frameWidth: FRAME_W,
-        frameHeight: FRAME_H,
-        viewport: resolveStripViewport(EXPORT_FRAME_H, stripViewport) * ratio,
-        gap: (stripGap ?? STRIP_DEFAULTS.gap) * ratio,
-        transition: STRIP_DEFAULTS.transition,
-        kenBurnsAmount: STRIP_DEFAULTS.kenBurnsAmount,
-        highlight: false,
-      },
+      frameWidth: FRAME_W,
+      frameHeight: FRAME_H,
+      viewport: resolveStripViewport(EXPORT_FRAME_H, stripViewport) * ratio,
+      gap: (stripGap ?? STRIP_DEFAULTS.gap) * ratio,
     });
   }, [renderMode, images, loaded, timeline, panels, stripViewport, stripGap]);
 
@@ -115,7 +106,14 @@ export function Preview({
         showProgress: true,
         progress: duration > 0 && isFinite(duration) ? currentTime / duration : 0,
       });
-      if (currentPanel) drawDialogue(ctx, w, h, currentPanel.dialogue, currentPanel.character);
+      // Плашку с репликой показываем, только если её страница сейчас на экране:
+      // иначе имя/текст «висят» на посторонней странице при скролле.
+      if (currentPanel) {
+        const visiblePage = pageIndexAtScroll(stripScene.layout, stripScene.scrollAt(currentTime));
+        if (currentPanel.imageIndex === visiblePage) {
+          drawDialogue(ctx, w, h, currentPanel.dialogue, currentPanel.character);
+        }
+      }
       return;
     }
 

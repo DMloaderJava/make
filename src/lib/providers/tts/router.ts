@@ -9,9 +9,9 @@
  * Возвращаем ещё и корректный MIME (gemini/qwen — не mp3).
  */
 
-import { CORS_BLOCKED_PROVIDERS } from './cors';
+import { mustUseProxy } from './cors';
 import { getTTSProvider } from './catalog';
-import { resolveAudioMime } from './mime';
+import { providerMimeType, resolveAudioMime } from './mime';
 
 export interface GenerateTTSRequest {
   providerId: string;
@@ -28,20 +28,12 @@ export interface GenerateTTSResult {
   mimeType: string;
 }
 
-/** Провайдеры, которые обязаны идти через серверный прокси. */
-export function mustUseProxy(providerId: string): boolean {
-  if (CORS_BLOCKED_PROVIDERS.has(providerId)) return true;
-  // Эти ребята умеют auth/streaming, который стабильнее на сервере,
-  // плюс их серверные ветки уже реализованы в /api/tts
-  return ['playht', 'resemble', 'murf', 'fish', 'hume', 'speechify', 'polly'].includes(providerId);
-}
-
 /**
- * MIME по провайдеру. Реальный тип контейнера может отличаться от ожидаемого,
- * поэтому для уже полученных байтов используйте resolveAudioMime(providerId, buffer).
+ * MIME по провайдеру (без анализа байтов). Для уже полученного буфера
+ * используйте resolveAudioMime(providerId, buffer) — сигнатура важнее таблицы.
  */
 export function mimeTypeForProvider(providerId: string): string {
-  return resolveAudioMime(providerId, new ArrayBuffer(0));
+  return providerMimeType(providerId);
 }
 
 export async function generateTTS(req: GenerateTTSRequest): Promise<GenerateTTSResult> {

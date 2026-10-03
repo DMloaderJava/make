@@ -1,12 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { pcmToWav } from '@/lib/providers/tts/wav';
 import { resolveAudioMime } from '@/lib/providers/tts/mime';
-
-/**
- * Провайдеры, чья клиентская реализация сама ходит в /api/tts.
- * Их НЕЛЬЗЯ отдавать в общую серверную ветку — получится запрос сервера к себе.
- */
-const PROXY_ONLY_PROVIDERS = new Set(['polly']);
+import { mustUseProxy } from '@/lib/providers/tts/cors';
+import { getServerGenerate } from '@/lib/providers/tts/catalog';
 
 export const runtime = 'nodejs';
 export const maxDuration = 60;
@@ -251,15 +247,26 @@ export async function POST(req: NextRequest) {
         // Раньше здесь был 400 «use client-side» → эти провайдеры падали на CORS.
         // Теперь выполняем их запрос на сервере (в Node те же fetch/atob) и
         // возвращаем аудио клиенту.
-        if (PROXY_ONLY_PROVIDERS.has(providerId)) {
-          return NextResponse.json({ error: `${providerId} must be handled by its own branch (proxy loop guard)` }, { status: 500 });
-        }
+        //
+        // Антирекурсивный guard — структурный, а не списочный: если у провайдера
+        // нет серверной реализации и клиентская ходит через прокси, честно
+        // отвечаем 501, вместо «сервер вызывает сам себя до таймаута».
         const { TTS_PROVIDERS } = await import('@/lib/providers/tts');
         const provider = TTS_PROVIDERS.find(p => p.id === providerId);
         if (!provider) {
           return NextResponse.json({ error: `Provider ${providerId} not found` }, { status: 404 });
         }
-        const buffer = await provider.generate(text, {
+        const serverGenerate = getServerGenerate(provider);
+        if (!serverGenerate) {
+          return NextResponse.json(
+            {
+              error: `${providerId}: нет серверной реализации синтеза (клиентская ходит через /api/tts). Добавьте serverGenerate провайдеру или отдельную ветку в route.ts.`,
+              code: 'no_server_generate',
+            },
+            { status: 501 }
+          );
+        }
+        const buffer = await serverGenerate(text, {
           apiKey,
           voice: voice || '',
           language: language || 'ru',
@@ -273,7 +280,12 @@ export async function POST(req: NextRequest) {
       }
 
       default: {
-        return NextResponse.json({ error: `Provider ${providerId} not implemented in proxy, use client-side` }, { status: 400 });
+        // Здесь же ловим будущие провайдеры, которым прокси обязателен по политике:
+        // молчаливая рекурсия «сервер → /api/tts → сервер» невозможна.
+        const hint = mustUseProxy(providerId)
+          ? `Provider ${providerId} требует прокси, но серверной ветки нет — добавьте её в route.ts`
+          : `Provider ${providerId} not implemented in proxy, use client-side`;
+        return NextResponse.json({ error: hint, code: mustUseProxy(providerId) ? 'no_server_branch' : 'not_implemented' }, { status: 400 });
       }
     }
   } catch (e: any) {

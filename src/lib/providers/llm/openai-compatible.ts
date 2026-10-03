@@ -34,6 +34,10 @@ export function buildResponseFormat(
  * Провайдер мог не переварить json_schema, хотя формально она «OpenAI-совместима»:
  * тогда 400 прилетает именно на response_format. Запоминаем рабочий режим,
  * чтобы не платить тремя запросами за каждый вызов, и деградируем мягко.
+ *
+ * Ключ — «провайдер|модель»: у одного и того же провайдера gpt-4o понимает
+ * json_schema, а меньшая модель может нет. Кэш на провайдера целиком приводил бы
+ * к тому, что вторая модель всегда платит за лишние попытки.
  */
 const responseFormatModes = new Map<string, ResponseFormatMode>();
 
@@ -57,8 +61,10 @@ async function postChatCompletion(params: {
   label?: string;
 }): Promise<Response> {
   const { configId, name, url, apiKey, body, responseFormat, label = '' } = params;
+  const model = typeof body.model === 'string' ? body.model : '';
+  const cacheKey = `${configId}|${model}`;
 
-  const known = responseFormatModes.get(configId);
+  const known = responseFormatModes.get(cacheKey);
   const candidates: ResponseFormatMode[] = known
     ? known === 'none' ? ['none'] : [known, 'none']
     : ['schema', 'object', 'none'];
@@ -81,7 +87,7 @@ async function postChatCompletion(params: {
     });
 
     if (response.ok) {
-      responseFormatModes.set(configId, responseFormatBody ? mode : 'none');
+      responseFormatModes.set(cacheKey, responseFormatBody ? mode : 'none');
       return response;
     }
 
@@ -93,8 +99,10 @@ async function postChatCompletion(params: {
       throw new Error(`${name}${label} error: ${response.status} — ${errText.slice(0, 500)}`);
     }
 
+    // NB: каждый повтор — это повторная отправка промпта (для vision — с картинками),
+    // поэтому рабочий режим запоминается, и следующий вызов идёт сразу в него.
     console.warn(
-      `[llm:${configId}] response_format=${mode} отклонён (${response.status}) — пробую ${mode === 'schema' ? 'json_object' : 'без response_format'}`
+      `[llm:${cacheKey}] response_format=${mode} отклонён (${response.status}) — пробую ${mode === 'schema' ? 'json_object' : 'без response_format'}`
     );
   }
 

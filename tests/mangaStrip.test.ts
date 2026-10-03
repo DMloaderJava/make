@@ -164,6 +164,73 @@ test('buildScrollKeyframes: панель может быть выключена 
   assert.equal(value, sampleScroll(keys, 0), 'без проезда окно стоит на месте');
 });
 
+test('buildScrollKeyframes: ПОСЛЕДНЯЯ длинная страница не откатывается наверх', () => {
+  const layout = computeStripLayout(PAGES, { ...FRAME, viewport: 1080, gap: 24 });
+  // Последняя страница — длинный вебтун (slotIndex: 1), после неё панелей нет.
+  const keys = buildScrollKeyframes([{ slotIndex: 1, start: 0, end: 10 }], layout, {
+    transition: 0.8,
+    panInside: true,
+  });
+
+  const bottom = clampScroll(layout.slots[1].y + layout.slots[1].height - FRAME.frameHeight, layout);
+  const center = targetScrollForSlot(layout, 1);
+  assert.notEqual(bottom, center, 'низ и центр длинной страницы — разные позиции');
+
+  assert.equal(sampleScroll(keys, 9.2), bottom, 'к концу озвучки окно у низа страницы');
+  assert.equal(sampleScroll(keys, 10), bottom, 'и остаётся там, а не прыгает в центр');
+  assert.equal(sampleScroll(keys, 12), bottom, 'после конца интервала позиция не меняется');
+});
+
+test('buildScrollKeyframes: короткая последняя страница остаётся центрированной', () => {
+  // 1000×600 при ширине ленты 1920 даёт высоту 1152 > 1080 — берём заведомо низкую.
+  const short = computeStripLayout([{ width: 1000, height: 400 }], { ...FRAME, viewport: 1080, gap: 0 });
+  assert.ok(short.slots[0].height < FRAME.frameHeight, 'страница ниже кадра');
+  const keys = buildScrollKeyframes([{ slotIndex: 0, start: 0, end: 5 }], short, { panInside: true });
+  assert.equal(sampleScroll(keys, 5), targetScrollForSlot(short, 0), 'позиция = центр страницы');
+});
+
+test('computeStripLayout: minSlotHeight не масштабируется дважды', () => {
+  const panorama = [{ width: 10000, height: 10 }];
+  const normal = computeStripLayout(panorama, { ...FRAME, viewport: 1080, gap: 0 });
+  const zoomed = computeStripLayout(panorama, { ...FRAME, viewport: 720, gap: 0 });
+
+  assert.equal(normal.scale, 1);
+  assert.equal(normal.slots[0].height, 240, 'при scale=1 минимум = 240');
+
+  assert.equal(zoomed.scale, 1.5);
+  assert.equal(zoomed.slots[0].height, 360, 'при scale=1.5 минимум = 240×1.5 = 360, а не 540');
+});
+
+test('createStripSceneFromMedia: работает без imageIndex в таймлайне, если переданы panels', async () => {
+  const { createStripSceneFromMedia } = await import('../src/lib/pipeline/mangaStrip');
+  const scene = createStripSceneFromMedia({
+    images: ['a', 'b'],
+    loaded: new Map(),
+    timeline: [{ panelId: 1, audioStart: 0, audioEnd: 4 }],
+    panels: [{ id: 1, imageIndex: 0 }],
+    frameWidth: 1920,
+    frameHeight: 1080,
+  });
+  assert.ok(scene, 'сцена создаётся');
+  assert.equal(scene!.keyframes.length > 1, true, 'спаны построены по panels, а не пустые');
+  assert.ok(scene!.layout.slots.length === 2);
+});
+
+test('createStripSceneFromMedia: imageIndex из таймлайна приоритетнее panels', async () => {
+  const { createStripSceneFromMedia } = await import('../src/lib/pipeline/mangaStrip');
+  const scene = createStripSceneFromMedia({
+    images: ['a', 'b'],
+    loaded: new Map(),
+    timeline: [{ panelId: 1, imageIndex: 1, audioStart: 0, audioEnd: 4 }],
+    panels: [{ id: 1, imageIndex: 0 }],
+    frameWidth: 1920,
+    frameHeight: 1080,
+  });
+  assert.ok(scene);
+  // сцена должна уехать ко второй странице
+  assert.ok(scene!.keyframes.some(k => k.y > 0), 'есть отличная от нуля позиция скролла');
+});
+
 test('sampleScroll: пустые ключи и время до первого', () => {
   assert.equal(sampleScroll([], 5), 0);
   assert.equal(sampleScroll([{ time: 2, y: 100, ease: 'linear' }], 0), 100);

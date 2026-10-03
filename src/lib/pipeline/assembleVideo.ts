@@ -7,8 +7,8 @@
 
 import { SyncTimeline } from '../storage/db';
 import { getKenBurnsParams } from './buildTimeline';
-import { schedulePlacements, type AudioPlacement } from './audioMix';
-import { STRIP_DEFAULTS, createStripScene, resolveStripViewport, type StripScene } from './mangaStrip';
+import { createPlacementScheduler, userFacingOverlaps, type AudioPlacement, type PlacementScheduler } from './audioMix';
+import { createStripSceneFromMedia, type StripScene } from './mangaStrip';
 
 export interface AssembleOptions {
   images: string[]; // data URLs
@@ -21,6 +21,8 @@ export interface AssembleOptions {
   introDuration: number;
   outroDuration: number;
   srtContent: string;
+  /** Предупреждения об обрезанных репликах (текстом, для UI). */
+  onAudioTrimmed?: (messages: string[]) => void;
   backgroundMusic?: Blob;
   musicVolume?: number;
   width?: number;
@@ -32,6 +34,8 @@ export interface AssembleOptions {
   stripViewport?: number;
   /** Отступ между страницами ленты, px. */
   stripGap?: number;
+  /** Панели проекта: нужны ленте, если в таймлайне нет imageIndex. */
+  panels?: Array<{ id: number; imageIndex: number }>;
 }
 
 // Honest implementation using Canvas + MediaRecorder - fixed Promise antipattern
@@ -69,23 +73,16 @@ export async function assembleVideoWithCanvas(
     : options.introDuration;
 
   // Режим ленты: сцена один раз, рендер кадра — по времени.
-  const stripScene: StripScene | null = options.renderMode === 'strip' && options.images.length > 0
-    ? createStripScene({
-        sizes: options.images.map(src => {
-          const img = loadedImages.get(src);
-          return { width: img?.naturalWidth || 1000, height: img?.naturalHeight || 1400 };
-        }),
-        images: options.images.map(src => loadedImages.get(src) ?? null),
+  const stripScene: StripScene | null = options.renderMode === 'strip'
+    ? createStripSceneFromMedia({
+        images: options.images,
+        loaded: loadedImages,
         timeline: options.timeline,
-        options: {
-          frameWidth: width,
-          frameHeight: height,
-          viewport: resolveStripViewport(height, options.stripViewport),
-          gap: options.stripGap ?? STRIP_DEFAULTS.gap,
-          transition: STRIP_DEFAULTS.transition,
-          kenBurnsAmount: STRIP_DEFAULTS.kenBurnsAmount,
-          highlight: false,
-        },
+        panels: options.panels,
+        frameWidth: width,
+        frameHeight: height,
+        viewport: options.stripViewport,
+        gap: options.stripGap,
       })
     : null;
 
@@ -107,22 +104,27 @@ export async function assembleVideoWithCanvas(
   let audioContext: AudioContext | null = null;
   let audioDestination: MediaStreamAudioDestinationNode | null = null;
   let audioStartedAt: number | null = null;
+  let scheduler: PlacementScheduler | null = null;
   const leadIn = placements.length > 0 ? 0.25 : 0;
 
   if (placements.length > 0) {
     try {
       audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
       audioDestination = audioContext.createMediaStreamDestination();
-      // Фрагменты планируются в графе по одному — гигантского микса в память нет,
-      // источники обрезаются по длительности (перекрытия не тянут звук вправо).
-      const scheduled = await schedulePlacements(audioContext, audioDestination, placements, {
+      // Планировщик с опережением: в графе живут только ближайшие секунды,
+      // а не все 50 источников с декодированными буферами (иначе снова сотни МБ).
+      scheduler = await createPlacementScheduler(audioContext, audioDestination, placements, {
         sampleRate: 44100,
         channels: 2,
         startAt: audioContext.currentTime + leadIn,
+        lookahead: 4,
       });
-      if (scheduled.scheduled > 0) {
-        audioStartedAt = scheduled.startedAt;
-        timelineDuration = Math.max(timelineDuration, scheduled.duration);
+      if (scheduler) {
+        audioStartedAt = scheduler.startedAt;
+        timelineDuration = Math.max(timelineDuration, scheduler.duration);
+        // Обрезка панельных реплик — это то, о чём пользователю надо сказать явно.
+        const warnings = userFacingOverlaps(scheduler.overlaps);
+        if (warnings.length > 0) options.onAudioTrimmed?.(warnings);
       } else {
         audioContext = null;
         audioDestination = null;
@@ -135,9 +137,13 @@ export async function assembleVideoWithCanvas(
   }
 
   /**
-   * Мастер-клок: часы AudioContext. Раньше кадры велись по performance.now(),
-   * а звук стартовал позже (planning latency, decode) — и к концу ролика
-   * картинка и звук разъезжались на секунды. Теперь видео следует за звуком.
+   * Мастер-клок: время кадра считается от момента старта аудио
+   * (`audioStartedAt` уже включает leadIn-задержку планирования).
+   *
+   * Раньше здесь дополнительно вычитался leadIn — и первые 0.25 с видео
+   * оставались неотрисованными, пока звук уже играл (A/V разъезжался в другую
+   * сторону). Теперь коррекция одна и только в одном месте: запись стартует
+   * ровно в момент старта аудио.
    */
   const mediaClock = (fallbackStart: number): number => {
     if (audioContext && audioStartedAt !== null) {
@@ -166,10 +172,12 @@ export async function assembleVideoWithCanvas(
     const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 5000000 });
     recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
     recorder.onstop = () => {
+      try { scheduler?.dispose(); } catch {}
       try { audioContext?.close(); } catch {}
       resolve(new Blob(chunks, { type: mimeType || 'video/webm' }));
     };
     recorder.onerror = (e) => {
+      try { scheduler?.dispose(); } catch {}
       try { audioContext?.close(); } catch {}
       reject(e);
     };

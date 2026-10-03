@@ -18,6 +18,7 @@ import { formatSEOPackage, generateSEO, generateFallbackSEO } from '@/lib/pipeli
 import { generateAllAudio } from '@/lib/pipeline/generateAudio';
 import { concatenateAudioBlobs } from '@/lib/pipeline/assembleVideo';
 import { renderVideo, checkCapabilities, BackendCapabilities } from '@/lib/pipeline/videoEncoder';
+import type { AudioPlacement } from '@/lib/pipeline/audioMix';
 import { loadProjectAudio, loadProjectIntroAudio, loadProjectOutroAudio, isOPFSSupported } from '@/lib/storage/opfs';
 import { estimateTotalCost } from '@/lib/validators';
 import { downloadBlob, formatTime } from '@/lib/utils';
@@ -76,6 +77,8 @@ export default function EditorPage() {
   const [outroAudio, setOutroAudio] = useState<Blob | null>(null);
   const [isGeneratingAudio, setIsGeneratingAudio] = useState(false);
   const [audioProgress, setAudioProgress] = useState('');
+  // Обрезанные реплики/сдвиги аудио при экспорте — то, что нельзя показывать только в консоли.
+  const [audioWarnings, setAudioWarnings] = useState<string[]>([]);
   const [audioDone, setAudioDone] = useState(0);
   // Число панелей в текущем прогоне: при точечной переозвучке это НЕ project.panels.length,
   // иначе полоса показывала 2% вместо 20%.
@@ -541,16 +544,23 @@ export default function EditorPage() {
         // Точные позиции аудио на таймлайне: интро с 0, панели со своих audioStart,
         // аутро — после последней панели. Это чинит рассинхрон (раньше дорожка
         // склеивалась подряд, без пауз 0.3s между панелями).
-        const audioPlacements: Array<{ start: number; blob: Blob }> = [];
-        if (introAudio) audioPlacements.push({ start: 0, blob: introAudio });
+        const audioPlacements: AudioPlacement[] = [];
+        if (introAudio) audioPlacements.push({ start: 0, blob: introAudio, role: 'intro', label: 'Интро' });
         for (const p of project.panels) {
           const seg = tl.find(t => t.panelId === p.id);
           const b = audioBlobs.get(p.id) || await loadProjectAudio(project.id, p.id);
-          if (b && seg) audioPlacements.push({ start: seg.audioStart, blob: b });
+          if (b && seg) {
+            audioPlacements.push({
+              start: seg.audioStart,
+              blob: b,
+              role: 'panel',
+              label: `Панель ${p.id}${p.character ? ` · ${p.character}` : ''}`,
+            });
+          }
         }
         if (outroAudio) {
           const lastEnd = tl.length > 0 ? tl[tl.length - 1].audioEnd : project.introDuration;
-          audioPlacements.push({ start: lastEnd, blob: outroAudio });
+          audioPlacements.push({ start: lastEnd, blob: outroAudio, role: 'outro', label: 'Аутро' });
         }
 
         if (audioPlacements.length === 0) {
@@ -573,6 +583,8 @@ export default function EditorPage() {
           renderMode: renderSettings.renderMode,
           stripViewport: renderSettings.stripViewport,
           stripGap: renderSettings.stripGap,
+          panels: project.panels.map(p => ({ id: p.id, imageIndex: p.imageIndex })),
+          onAudioTrimmed: (messages) => setAudioWarnings(messages),
           preferredBackend: preferredBackend === 'auto' ? undefined : preferredBackend
         });
 
@@ -682,6 +694,29 @@ export default function EditorPage() {
         <div className="h-0.5 w-full bg-[#16161A]" role="progressbar" aria-label="Озвучка">
           {/* раньше считалось от audioBlobs.size (обновлялся один раз в конце) — полоса стояла на 0% */}
           <div className="h-full bg-[#E8B44C] transition-all duration-300" style={{ width: `${(audioDone / Math.max(1, audioTotal || project.panels.length)) * 100}%` }} />
+        </div>
+      )}
+
+      {audioWarnings.length > 0 && (
+        <div className="border-b border-[#3A2E14] bg-[#1E1A10] px-4 py-2">
+          <div className="max-w-[960px] mx-auto flex items-start gap-3">
+            <span className="text-[13px] leading-5 text-[#E8B44C]">⚠</span>
+            <div className="flex-1 space-y-0.5">
+              <p className="text-[12px] font-medium text-[#E8B44C]">Аудио подогнано под таймлайн</p>
+              {audioWarnings.map((line, i) => (
+                <p key={i} className="text-[11px] leading-4 text-[#C9B27A]">{line}</p>
+              ))}
+              <p className="text-[11px] leading-4 text-[#8A8A93]">
+                Проверьте длину реплик или сдвиньте паузы — иначе конец фразы может не прозвучать.
+              </p>
+            </div>
+            <button
+              onClick={() => setAudioWarnings([])}
+              className="h-6 px-2 rounded-[6px] border border-[#3A2E14] text-[11px] text-[#C9B27A] hover:bg-[#262010] transition-colors"
+            >
+              Понятно
+            </button>
+          </div>
         </div>
       )}
 

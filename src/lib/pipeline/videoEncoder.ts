@@ -8,7 +8,7 @@
 import { SyncTimeline } from '../storage/db';
 import { getKenBurnsParams } from './buildTimeline';
 import { appendPlacements, type AudioPlacement } from './audioMix';
-import { STRIP_DEFAULTS, createStripScene, resolveStripViewport, type StripScene } from './mangaStrip';
+import { createStripSceneFromMedia, type StripScene } from './mangaStrip';
 
 export interface RenderOptions {
   images: string[]; // data URLs
@@ -30,6 +30,10 @@ export interface RenderOptions {
   stripViewport?: number;
   /** Отступ между страницами ленты, px. */
   stripGap?: number;
+  /** Панели проекта: нужны ленте, если в таймлайне нет imageIndex. */
+  panels?: Array<{ id: number; imageIndex: number }>;
+  /** Предупреждения об обрезанных репликах (текстом, для UI). */
+  onAudioTrimmed?: (messages: string[]) => void;
   onProgress?: (progress: number) => void;
 }
 
@@ -152,6 +156,8 @@ export class CanvasMediaRecorderBackend implements RenderBackend {
       renderMode: options.renderMode,
       stripViewport: options.stripViewport,
       stripGap: options.stripGap,
+      panels: options.panels,
+      onAudioTrimmed: options.onAudioTrimmed,
       onProgress: options.onProgress
     });
   }
@@ -223,23 +229,16 @@ export class WebCodecsBackend implements RenderBackend {
       : options.introDuration;
 
     // Режим ленты: сцена строится один раз и рендерит каждый кадр по своему времени.
-    const stripScene: StripScene | null = options.renderMode === 'strip' && options.images.length > 0
-      ? createStripScene({
-          sizes: options.images.map(src => {
-            const img = loadedImages.get(src);
-            return { width: img?.naturalWidth || 1000, height: img?.naturalHeight || 1400 };
-          }),
-          images: options.images.map(src => loadedImages.get(src) ?? null),
+    const stripScene: StripScene | null = options.renderMode === 'strip'
+      ? createStripSceneFromMedia({
+          images: options.images,
+          loaded: loadedImages,
           timeline: options.timeline,
-          options: {
-            frameWidth: options.width,
-            frameHeight: options.height,
-            viewport: resolveStripViewport(options.height, options.stripViewport),
-            gap: options.stripGap ?? STRIP_DEFAULTS.gap,
-            transition: STRIP_DEFAULTS.transition,
-            kenBurnsAmount: STRIP_DEFAULTS.kenBurnsAmount,
-            highlight: false,
-          },
+          panels: options.panels,
+          frameWidth: options.width,
+          frameHeight: options.height,
+          viewport: options.stripViewport,
+          gap: options.stripGap,
         })
       : null;
 
@@ -282,7 +281,11 @@ export class WebCodecsBackend implements RenderBackend {
         bitrate: 128000,
       });
       output.addAudioTrack(audioSource);
-      const appended = await appendPlacements(audioSource, placements, { sampleRate: 44100, channels: 2 });
+      const appended = await appendPlacements(audioSource, placements, {
+        sampleRate: 44100,
+        channels: 2,
+        onTrim: options.onAudioTrimmed,
+      });
       if (appended.duration > 0) {
         mixedDuration = appended.duration;
       } else {

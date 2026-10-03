@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { packStarts } from '../src/lib/pipeline/audioMix';
+import { formatOverlaps, packStarts, userFacingOverlaps } from '../src/lib/pipeline/audioMix';
 
 test('packStarts: без наложений ничего не меняет', () => {
   const result = packStarts([
@@ -76,4 +76,45 @@ test('packStarts: пустой список', () => {
   assert.deepEqual(result.placements, []);
   assert.equal(result.totalDuration, 0);
   assert.deepEqual(result.overlaps, []);
+});
+
+test('packStarts: обрезка реплики панели — warning, интро/аутро — info', () => {
+  const result = packStarts([
+    { start: 0, duration: 12, label: 'Интро', role: 'intro' as const },
+    { start: 8, duration: 5, label: 'panel-1', role: 'panel' as const },
+  ]);
+
+  assert.equal(result.overlaps.length, 1);
+  assert.equal(result.overlaps[0].kind, 'trim');
+  assert.equal(result.overlaps[0].severity, 'info', 'служебное интро обрезается без паники');
+  assert.ok(Math.abs(result.overlaps[0].trimmedBy - 4) < 1e-6, 'обрезано 4 секунды');
+
+  const panelCase = packStarts([
+    { start: 0, duration: 9, label: 'panel-1', role: 'panel' as const },
+    { start: 6, duration: 3, label: 'panel-2', role: 'panel' as const },
+  ]);
+  assert.equal(panelCase.overlaps[0].severity, 'warning', 'потеря конца реплики — предупреждение');
+});
+
+test('formatOverlaps/userFacingOverlaps: текст для UI только про панели', () => {
+  const overlaps = packStarts([
+    { start: 0, duration: 12, label: 'Интро', role: 'intro' as const },
+    { start: 8, duration: 4, label: 'Панель 1 · Кадзума', role: 'panel' as const },
+  ]).overlaps;
+
+  const all = formatOverlaps(overlaps);
+  assert.equal(all.length, 1);
+  assert.match(all[0], /Интро/);
+
+  const warnings = userFacingOverlaps(overlaps);
+  assert.deepEqual(warnings, [], 'обрезка интро пользователю не показывается');
+
+  const panelOverlap = packStarts([
+    { start: 0, duration: 9, label: 'Панель 1 · Кадзума', role: 'panel' as const },
+    { start: 6, duration: 3, label: 'Панель 2', role: 'panel' as const },
+  ]).overlaps;
+  const text = userFacingOverlaps(panelOverlap);
+  assert.equal(text.length, 1);
+  assert.match(text[0], /Панель 1/);
+  assert.match(text[0], /3\.0 с/);
 });

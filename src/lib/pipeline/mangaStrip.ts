@@ -87,14 +87,16 @@ export function computeStripLayout(
   const scale = frameHeight / viewport;
   const width = frameWidth * scale;
 
-  const minSlotHeight = options.minSlotHeight ?? DEFAULT_MIN_SLOT * scale;
-  const maxSlotHeight = options.maxSlotHeight ?? DEFAULT_MAX_SLOT * scale;
+  // Масштаб применяется ровно один раз (раньше minSlotHeight умножался дважды,
+  // из-за чего при viewport < кадра минимум «раздувался» в scale² раз).
+  const minSlotHeight = (options.minSlotHeight ?? DEFAULT_MIN_SLOT) * scale;
+  const maxSlotHeight = (options.maxSlotHeight ?? DEFAULT_MAX_SLOT) * scale;
 
   const slots: StripSlot[] = [];
   let y = 0;
   sizes.forEach((size, index) => {
     const sourceAspect = size.height / Math.max(1, size.width);
-    const height = Math.min(maxSlotHeight, Math.max(minSlotHeight * scale, width * sourceAspect));
+    const height = Math.min(maxSlotHeight, Math.max(minSlotHeight, width * sourceAspect));
     slots.push({ index, x: 0, y, width, height, sourceAspect });
     y += height + gap;
   });
@@ -186,13 +188,18 @@ export function buildScrollKeyframes(
     const transitionLength = Math.min(transition, Math.max(0, duration - minHold));
     const transitionStart = Math.max(span.start, span.end - transitionLength);
 
-    if (slot.height > layout.frameHeight + 1 && panInside) {
+    // Куда окно придёт к концу интервала: для длинной страницы это её низ
+    // (страница прочитана до конца), иначе — центр.
+    const longPage = slot.height > layout.frameHeight + 1;
+    const top = clampScroll(slot.y, layout);
+    const bottom = clampScroll(slot.y + slot.height - layout.frameHeight, layout);
+    const endY = longPage && panInside && bottom > top ? bottom : target;
+
+    if (longPage && panInside && bottom > top) {
       // Страница длиннее кадра: медленно проезжаем её сверху вниз, пока звучит
       // озвучка (вебтун-чтение), и только потом уходим к следующей.
-      const top = clampScroll(slot.y, layout);
-      const bottom = clampScroll(slot.y + slot.height - layout.frameHeight, layout);
       keys.push({ time: span.start, y: top, ease: 'linear' });
-      keys.push({ time: transitionStart, y: bottom > top ? bottom : top, ease: 'linear' });
+      keys.push({ time: transitionStart, y: bottom, ease: 'linear' });
     } else {
       keys.push({ time: span.start, y: target, ease: 'linear' });
       keys.push({ time: transitionStart, y: target, ease: 'linear' });
@@ -202,8 +209,9 @@ export function buildScrollKeyframes(
       // Переход к следующей странице — на «хвосте» интервала, с мягким сглаживанием.
       keys.push({ time: span.end, y: targetScrollForSlot(layout, next.slotIndex), ease: 'easeInOut' });
     } else {
-      // Последняя страница: окно остаётся на месте до конца ролика.
-      keys.push({ time: span.end, y: target, ease: 'linear' });
+      // Последняя страница: окно остаётся ТАМ ЖЕ, где закончился проезд,
+      // а не откатывается к центру (иначе на длинном вебтуне — рывок вверх).
+      keys.push({ time: span.end, y: endY, ease: 'linear' });
     }
   });
 
@@ -445,4 +453,50 @@ export function createStripScene(params: {
       });
     },
   };
+}
+
+export interface StripMediaOptions {
+  /** data-URL'ы или OPFS-ключи страниц (как в options.images бэкендов). */
+  images: string[];
+  /** Уже загруженные изображения по тому же ключу. */
+  loaded: Map<string, HTMLImageElement>;
+  timeline: Array<{ panelId: number; imageIndex?: number; audioStart: number; audioEnd: number }>;
+  panels?: Array<{ id: number; imageIndex: number }>;
+  frameWidth: number;
+  frameHeight: number;
+  /** Сколько px ленты помещается в кадр (по умолчанию — высота кадра). */
+  viewport?: number;
+  /** Отступ между страницами, px. */
+  gap?: number;
+}
+
+/**
+ * Единственная точка сборки сцены ленты для превью и обоих бэкендов экспорта.
+ * Раньше сборка была продублирована в assembleVideo и videoEncoder — баг в
+ * одной ветке не воспроизводился в другой. Теперь параметры и значения по
+ * умолчанию (Ken Burns, отсутствие подсветки) заданы здесь.
+ */
+export function createStripSceneFromMedia(media: StripMediaOptions): StripScene | null {
+  if (media.images.length === 0) return null;
+
+  const sizes = media.images.map(src => {
+    const img = media.loaded.get(src);
+    return { width: img?.naturalWidth || 1000, height: img?.naturalHeight || 1400 };
+  });
+
+  return createStripScene({
+    sizes,
+    images: media.images.map(src => media.loaded.get(src) ?? null),
+    timeline: media.timeline,
+    panels: media.panels,
+    options: {
+      frameWidth: media.frameWidth,
+      frameHeight: media.frameHeight,
+      viewport: resolveStripViewport(media.frameHeight, media.viewport),
+      gap: media.gap ?? STRIP_DEFAULTS.gap,
+      transition: STRIP_DEFAULTS.transition,
+      kenBurnsAmount: STRIP_DEFAULTS.kenBurnsAmount,
+      highlight: false,
+    },
+  });
 }

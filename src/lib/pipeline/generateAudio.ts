@@ -107,12 +107,15 @@ export function legacyAudioIsFresh(
   panelId: number,
   currentText: string
 ): boolean {
-  // Снимка нет (первый запуск после обновления) — доверяем существующему файлу,
-  // а не переозвучиваем весь проект: снимок будет записан этим же прогоном.
-  if (!previousTexts) return true;
+  // Снимка нет — это «неизвестно», а не «свежо»: так выглядит первый запуск
+  // после обновления, в том числе когда текст правили под старой версией.
+  // Возвращаем false → файл без .sig не переиспользуется вслепую; запрос уходит
+  // в TaskQueue, где первым делом проверяется общий TTS-кэш по тексту/голосу,
+  // так что при неизменной реплике генерация не оплачивается повторно.
+  if (!previousTexts) return false;
   const prev = previousTexts[panelId];
-  // Панели в снимке нет — файл появился раньше панели: используем как есть.
-  if (typeof prev !== 'string') return true;
+  // Панели нет в снимке — она появилась после генерации, файл ей не принадлежит.
+  if (typeof prev !== 'string') return false;
   return prev === currentText;
 }
 
@@ -208,14 +211,26 @@ export async function generateAllAudio(options: AudioGenerationOptions): Promise
     }
   }
 
+  // Прогресс считает ВСЕ шаги прогона: панели (в т.ч. точечно выбранные) плюс
+  // интро и аутро. Иначе полоса «доходила» до конца до генерации интро и
+  // показывала 1/N при переозвучке одной панели из пятидесяти.
+  const introStep = options.intro ? 1 : 0;
+  const outroStep = options.outro ? 1 : 0;
+  const totalSteps = targetPanels.length + introStep + outroStep;
+  let completedSteps = 0;
+  const reportProgress = (currentId: string) => {
+    options.onProgress?.(completedSteps, totalSteps, currentId);
+  };
+
   const queue = new TaskQueue({
     concurrency: 2,
     retryDelay: 1500,
     maxRetries: 3,
     rateLimit: { maxRequests: 5, perMs: 10000 },
     persistKey: `tts-${options.projectId}`, // Persist progress, OPFS cache makes re-run fast
-    onProgress: (completed, total, currentId) => {
-      options.onProgress?.(completed, total, currentId);
+    onProgress: (completed, _total, currentId) => {
+      completedSteps = completed;
+      reportProgress(currentId);
     }
   });
 
@@ -359,6 +374,9 @@ export async function generateAllAudio(options: AudioGenerationOptions): Promise
       );
     } catch (e) {
       console.error('Intro generation failed', e);
+    } finally {
+      completedSteps = targetPanels.length + introStep;
+      reportProgress('intro');
     }
   }
 
@@ -395,6 +413,9 @@ export async function generateAllAudio(options: AudioGenerationOptions): Promise
       );
     } catch (e) {
       console.error('Outro generation failed', e);
+    } finally {
+      completedSteps = targetPanels.length + introStep + outroStep;
+      reportProgress('outro');
     }
   }
 
