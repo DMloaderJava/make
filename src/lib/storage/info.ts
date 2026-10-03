@@ -170,10 +170,13 @@ export async function clearAllInfo(): Promise<void> {
     }
   }
 
-  // IDB
+  // IDB: сначала закрываем своё соединение (dbPromise в db.ts), иначе
+  // deleteDatabase блокируется открытым соединением и данные остаются.
   if (typeof indexedDB !== 'undefined') {
-    try { indexedDB.deleteDatabase(INFO_IDB_NAME); } catch {}
-    try { indexedDB.deleteDatabase(OLD_IDB_NAME); } catch {}
+    const { closeDB } = await import('./db');
+    await closeDB().catch(() => {});
+    await deleteDatabaseAsync(INFO_IDB_NAME);
+    await deleteDatabaseAsync(OLD_IDB_NAME);
   }
 
   // OPFS
@@ -184,6 +187,20 @@ export async function clearAllInfo(): Promise<void> {
       await deleteOPFSPath([old]);
     }
   }
+}
+
+/** deleteDatabase с ожиданием результата (успех/блокировка). */
+function deleteDatabaseAsync(name: string): Promise<void> {
+  return new Promise((resolve) => {
+    try {
+      const req = indexedDB.deleteDatabase(name);
+      req.onsuccess = () => resolve();
+      req.onerror = () => resolve();
+      req.onblocked = () => resolve(); // не подвисаем, просто сообщаем наверх
+    } catch {
+      resolve();
+    }
+  });
 }
 
 /** Оценка размера по каждому слою. */

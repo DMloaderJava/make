@@ -7,10 +7,13 @@
 
 import { SyncTimeline } from '../storage/db';
 import { getKenBurnsParams } from './buildTimeline';
+import { mixAudioPlacements, type AudioPlacement } from './audioMix';
 
 export interface AssembleOptions {
   images: string[]; // data URLs
   audioBlobs: Blob[]; // in order of timeline + intro/outro
+  /** Точное размещение аудио на таймлайне (приоритетнее audioBlobs). */
+  audioPlacements?: AudioPlacement[];
   timeline: SyncTimeline[];
   introText: string;
   outroText: string;
@@ -52,26 +55,87 @@ export async function assembleVideoWithCanvas(
     }
   }
 
-  const stream = canvas.captureStream(options.fps || 30);
+  const fps = options.fps || 30;
+
+  let timelineDuration = options.timeline.length > 0
+    ? options.timeline[options.timeline.length - 1].audioEnd + options.outroDuration
+    : options.introDuration + options.outroDuration;
+
+  // --- АУДИО ---
+  // Раньше canvas-фолбэк писал видео вообще без звуковой дорожки.
+  // Теперь микшируем фрагменты (с рересемплингом и паузами) и добавляем
+  // дорожку в MediaStream через MediaStreamAudioDestinationNode.
+  const placements: AudioPlacement[] = options.audioPlacements?.length
+    ? options.audioPlacements
+    : options.audioBlobs.map((blob, i) => ({
+        start: i === 0 ? 0 : options.timeline[i - 1]?.audioStart ?? 0,
+        blob,
+      }));
+
+  let audioContext: AudioContext | null = null;
+  let audioBufferSource: AudioBufferSourceNode | null = null;
+  let audioDestination: MediaStreamAudioDestinationNode | null = null;
+  let mixedAudio: Awaited<ReturnType<typeof mixAudioPlacements>> = null;
+
+  if (placements.length > 0) {
+    try {
+      mixedAudio = await mixAudioPlacements(placements, timelineDuration, { sampleRate: 44100, channels: 2 });
+    } catch (e) {
+      console.warn('Не удалось смикшировать аудио, экспортирую без звука', e);
+    }
+    if (mixedAudio) {
+      timelineDuration = Math.max(timelineDuration, mixedAudio.duration);
+      try {
+        audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+        audioDestination = audioContext.createMediaStreamDestination();
+        audioBufferSource = audioContext.createBufferSource();
+        audioBufferSource.buffer = mixedAudio.buffer;
+        audioBufferSource.connect(audioDestination);
+      } catch (e) {
+        console.warn('Web Audio недоступен, экспорт без звука', e);
+        audioContext = null;
+        audioDestination = null;
+      }
+    }
+  }
+
+  const videoStream = canvas.captureStream(fps);
+  const stream = audioDestination
+    ? new MediaStream([...videoStream.getVideoTracks(), ...audioDestination.stream.getAudioTracks()])
+    : videoStream;
+
   const chunks: BlobPart[] = [];
-  const mimeTypes = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm', 'video/mp4'];
+  const mimeTypes = audioDestination
+    ? ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm']
+    : ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
   let mimeType = '';
   for (const mt of mimeTypes) {
     if (MediaRecorder.isTypeSupported(mt)) { mimeType = mt; break; }
   }
 
+  const totalDuration = timelineDuration;
+
   return new Promise<Blob>((resolve, reject) => {
     const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 5000000 });
     recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
-    recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType || 'video/webm' }));
-    recorder.onerror = (e) => reject(e);
+    recorder.onstop = () => {
+      try { audioBufferSource?.stop(); } catch {}
+      try { audioContext?.close(); } catch {}
+      resolve(new Blob(chunks, { type: mimeType || 'video/webm' }));
+    };
+    recorder.onerror = (e) => {
+      try { audioContext?.close(); } catch {}
+      reject(e);
+    };
     recorder.start(100);
 
-    const totalDuration = options.timeline.length > 0
-      ? options.timeline[options.timeline.length - 1].audioEnd + options.outroDuration
-      : options.introDuration + options.outroDuration;
-    const fps = options.fps || 30;
-    let currentTime = 0;
+    // Небольшая задержка, чтобы рекордер и аудио стартовали вместе
+    const leadIn = audioBufferSource ? 0.25 : 0;
+    const startedAt = performance.now() + leadIn * 1000;
+    if (audioBufferSource && audioContext) {
+      try { audioBufferSource.start(audioContext.currentTime + leadIn); } catch {}
+    }
+
     let frameCount = 0;
 
     const renderFrame = (time: number) => {
@@ -81,22 +145,21 @@ export async function assembleVideoWithCanvas(
       else if (options.timeline.length > 0 && time < options.timeline[options.timeline.length - 1].audioEnd) renderPanel(ctx, width, height, options, time, loadedImages);
       else renderOutro(ctx, width, height, options, time, loadedImages);
       if (options.srtContent) renderSubtitle(ctx, width, height, options.srtContent, time);
-      if (totalDuration > 0) {
-        ctx.fillStyle = '#6366f1';
-        ctx.fillRect(0, height - 4, (time / totalDuration) * width, 4);
-      }
+      // NB: полоса прогресса больше не рисуется — она попадала в готовое видео
     };
 
+    // MediaRecorder пишет в реальном времени, поэтому кадры ведём по стенным часам,
+    // а не «наращиванием времени на 1/fps» (иначе при медленном рендере A/V разъезжались).
     const animate = () => {
-      if (currentTime >= totalDuration) { recorder.stop(); return; }
-      renderFrame(currentTime);
-      currentTime += 1 / fps;
+      const time = (performance.now() - startedAt) / 1000;
+      if (time >= totalDuration) { renderFrame(totalDuration); recorder.stop(); return; }
+      if (time >= 0) renderFrame(time);
       frameCount++;
-      if (frameCount % 10 === 0) options.onProgress?.(currentTime / totalDuration);
+      if (frameCount % 10 === 0) options.onProgress?.(Math.max(0, time / totalDuration));
       requestAnimationFrame(animate);
     };
-    animate();
-    setTimeout(() => { if (recorder.state === 'recording') recorder.stop(); }, (totalDuration + 5) * 1000);
+    requestAnimationFrame(animate);
+    setTimeout(() => { if (recorder.state === 'recording') recorder.stop(); }, (totalDuration + leadIn + 5) * 1000);
   });
 }
 

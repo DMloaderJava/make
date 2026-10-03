@@ -105,8 +105,10 @@ export async function extractPanels(
     try {
       resultText = await llm.vision(imageBase64, VISION_SYSTEM_PROMPT, {
         ...options,
-        // For providers that support json_schema
-        ...(useStructured ? { responseFormat: VISION_JSON_SCHEMA } as any : {})
+        // json_schema/json_object — теперь реально уходит в тело запроса
+        // (см. buildResponseFormat в openai-compatible.ts).
+        // strict: false, т.к. схема не помечена additionalProperties: false.
+        ...(useStructured ? { responseFormat: { name: 'vision_result', schema: VISION_JSON_SCHEMA, strict: false } } : {})
       });
     } catch (e) {
       // Fallback to chat with image

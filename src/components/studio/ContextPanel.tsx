@@ -19,9 +19,11 @@ interface ContextPanelProps {
   onGenerateIntro?: () => void;
   onGenerateOutro?: () => void;
   generating?: boolean;
+  onRegeneratePanel?: (panelId: number) => void;
+  regenerating?: boolean;
 }
 
-export function ContextPanel({ selected, onUpdatePanel, onUpdateIntro, onUpdateOutro, voiceAssignments, onVoiceChange, onGenerateIntro, onGenerateOutro, generating }: ContextPanelProps) {
+export function ContextPanel({ selected, onUpdatePanel, onUpdateIntro, onUpdateOutro, voiceAssignments, onVoiceChange, onGenerateIntro, onGenerateOutro, generating, onRegeneratePanel, regenerating }: ContextPanelProps) {
   const [voices, setVoices] = useState<Voice[]>([]);
 
   useEffect(() => {
@@ -131,7 +133,21 @@ export function ContextPanel({ selected, onUpdatePanel, onUpdateIntro, onUpdateO
     <div className="w-full bg-[#16161A] rounded-[10px] border border-[#26262C] p-4 space-y-3">
       <div className="flex items-center justify-between">
         <h4 className="text-[13px] font-medium">Панель {selected.index + 1} · {panel.character} · {panel.emotion}</h4>
-        <span className="font-mono text-[11px] text-[#8A8A93]">{panel.type}</span>
+        <div className="flex items-center gap-2">
+          <span className="font-mono text-[11px] text-[#8A8A93]">{panel.type}</span>
+          {onRegeneratePanel && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => onRegeneratePanel(panel.id)}
+              disabled={regenerating}
+              title="Удалить кэш аудио панели и озвучить заново (текст/голос будут применены)"
+              className="h-7 text-[11px] bg-[#0B0B0C] border-[#26262C] hover:bg-[#1E1E23]"
+            >
+              ↻ Переозвучить
+            </Button>
+          )}
+        </div>
       </div>
 
       <Textarea

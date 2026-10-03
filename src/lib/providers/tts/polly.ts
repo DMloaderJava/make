@@ -11,34 +11,30 @@ export const pollyTTS: TTSProvider = {
   baseUrl: 'https://polly.eu-central-1.amazonaws.com',
 
   async generate(text: string, { voice = 'Maxim', apiKey, language = 'ru-RU' }: TTSOptions): Promise<ArrayBuffer> {
-    // apiKey here is expected to be JSON stringified AWS credentials or just key that our proxy understands
-    // For MVP, we try direct Polly REST API with Bearer-like? Actually Polly needs AWS SigV4.
-    // We'll route through our own proxy that expects apiKey as AWS credentials JSON: {accessKeyId, secretAccessKey, region}
-    // If apiKey is simple string, we fallback to mock error with instruction
+    // aws-ключи хранятся как JSON-строка; проверяем её отдельно,
+    // иначе любая ошибка прокси (500 и т.п.) превращалась в «нужны AWS-credentials».
+    let creds: { accessKeyId?: string };
     try {
-      const creds = JSON.parse(apiKey);
-      if (!creds.accessKeyId) throw new Error('invalid');
-      // Call our proxy
-      const res = await fetch('/api/tts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          providerId: 'polly',
-          text,
-          voice,
-          apiKey, // will be parsed server-side
-          language
-        })
-      });
-      if (!res.ok) {
-        const err = await res.text();
-        throw new Error(`Polly proxy error: ${res.status} ${err}`);
-      }
-      return res.arrayBuffer();
-    } catch (e) {
-      // If apiKey is not JSON, try to use it as if it's already proxied or throw helpful error
+      creds = JSON.parse(apiKey);
+    } catch {
       throw new Error('Polly требует AWS credentials в формате JSON: {"accessKeyId":"...","secretAccessKey":"...","region":"eu-central-1"}. Вставь в поле ключа.');
     }
+    if (!creds?.accessKeyId) {
+      throw new Error('Polly: в JSON-ключе нет accessKeyId.');
+    }
+
+    const res = await fetch('/api/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ providerId: 'polly', text, voice, apiKey, language }),
+    });
+
+    if (!res.ok) {
+      const err = await res.text().catch(() => res.statusText);
+      throw new Error(`Polly proxy error: ${res.status} — ${err.slice(0, 300)}`);
+    }
+
+    return res.arrayBuffer();
   },
 
   async getVoices(): Promise<Voice[]> {

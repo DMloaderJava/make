@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { pcmToWav } from '@/lib/providers/tts/wav';
 
 export const runtime = 'nodejs';
 export const maxDuration = 60;
@@ -96,8 +97,13 @@ export async function POST(req: NextRequest) {
         const data = await res.json();
         const base64Audio = data.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
         if (!base64Audio) return NextResponse.json({ error: 'No audio data from Gemini' }, { status: 500 });
-        const binary = Buffer.from(base64Audio, 'base64');
-        return new NextResponse(binary, { headers: { 'Content-Type': 'audio/wav' } });
+        const pcm = Buffer.from(base64Audio, 'base64');
+        // Gemini TTS → raw L16 PCM 24kHz mono: оборачиваем в WAV, иначе клиент не декодирует
+        const wav = pcmToWav(
+          pcm.buffer.slice(pcm.byteOffset, pcm.byteOffset + pcm.byteLength) as ArrayBuffer,
+          { sampleRate: 24000, channels: 1, bitsPerSample: 16 }
+        );
+        return new NextResponse(wav, { headers: { 'Content-Type': 'audio/wav' } });
       }
 
       case 'polly': {
@@ -234,10 +240,24 @@ export async function POST(req: NextRequest) {
       case 'fish':
       case 'hume':
       case 'speechify': {
-        return NextResponse.json({
-          error: `Provider ${providerId} requires client-side direct call (CORS may need browser). Use preview in VoicesModal`,
-          hint: 'Try client-side generation'
-        }, { status: 400 });
+        // Раньше здесь был 400 «use client-side» → эти провайдеры падали на CORS.
+        // Теперь выполняем их запрос на сервере (в Node те же fetch/atob) и
+        // возвращаем аудио клиенту.
+        const { TTS_PROVIDERS } = await import('@/lib/providers/tts');
+        const provider = TTS_PROVIDERS.find(p => p.id === providerId);
+        if (!provider) {
+          return NextResponse.json({ error: `Provider ${providerId} not found` }, { status: 404 });
+        }
+        const buffer = await provider.generate(text, {
+          apiKey,
+          voice: voice || '',
+          language: language || 'ru',
+          speed,
+          model,
+        });
+        return new NextResponse(buffer, {
+          headers: { 'Content-Type': providerId === 'speechify' ? 'audio/mpeg' : 'audio/mpeg' },
+        });
       }
 
       default: {
@@ -252,7 +272,7 @@ export async function POST(req: NextRequest) {
 export async function GET() {
   return NextResponse.json({
     status: 'TTS proxy ready',
-    providers: ['elevenlabs', 'openai', 'gemini', 'polly', 'azure', 'google-cloud', 'cartesia', 'deepgram', 'qwen'],
-    note: 'Some providers require client-side due to complex auth'
+    providers: ['elevenlabs', 'openai', 'gemini', 'polly', 'azure', 'google-cloud', 'cartesia', 'deepgram', 'qwen', 'playht', 'resemble', 'murf', 'fish', 'hume', 'speechify'],
+    note: 'PCM-провайдеры (gemini) оборачиваются в WAV на сервере'
   });
 }

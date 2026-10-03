@@ -19,9 +19,9 @@ echo ""
 echo "[1/3] Установка зависимостей..."
 if [ -f "package-lock.json" ]; then
     echo "  Найден package-lock.json — использую npm ci"
-    npm ci --legacy-peer-deps
+    npm ci --legacy-peer-deps --no-audit --no-fund
 else
-    npm install --legacy-peer-deps
+    npm install --legacy-peer-deps --no-audit --no-fund
 fi
 
 echo ""

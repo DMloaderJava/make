@@ -7,10 +7,13 @@
 
 import { SyncTimeline } from '../storage/db';
 import { getKenBurnsParams } from './buildTimeline';
+import { mixAudioPlacements, type AudioPlacement } from './audioMix';
 
 export interface RenderOptions {
   images: string[]; // data URLs
   audioBlobs: Blob[];
+  /** Точное размещение аудио на таймлайне (приоритетнее audioBlobs). */
+  audioPlacements?: AudioPlacement[];
   timeline: SyncTimeline[];
   introText: string;
   outroText: string;
@@ -129,6 +132,7 @@ export class CanvasMediaRecorderBackend implements RenderBackend {
     return assembleVideoWithCanvas({
       images: options.images,
       audioBlobs: options.audioBlobs,
+      audioPlacements: options.audioPlacements,
       timeline: options.timeline,
       introText: options.introText,
       outroText: options.outroText,
@@ -221,43 +225,30 @@ export class WebCodecsBackend implements RenderBackend {
       codec: 'avc',
       bitrate: 5_000_000,
     });
-    output.addVideoTrack(canvasSource, { framerate: options.fps });
+    // mediabunny ждёт metadata.frameRate (camelCase), 'framerate' молча игнорировался
+    output.addVideoTrack(canvasSource, { frameRate: options.fps });
 
-    // Audio source - mix all audio blobs
+    // Audio: раскладываем фрагменты по таймлайну (рересемплинг + паузы между панелями).
+    // Если размещения не передали (старые вызовы) — склеиваем подряд, как раньше.
     let audioSource: any = null;
     let mixedDuration: number | null = null;
-    if (options.audioBlobs.length > 0) {
-      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-      const buffers: AudioBuffer[] = [];
-      for (const blob of options.audioBlobs) {
-        try {
-          const ab = await blob.arrayBuffer();
-          const buf = await audioContext.decodeAudioData(ab.slice(0));
-          buffers.push(buf);
-        } catch {}
-      }
+    if (options.audioPlacements?.length || options.audioBlobs.length > 0) {
+      const placements: AudioPlacement[] = options.audioPlacements?.length
+        ? options.audioPlacements
+        : options.audioBlobs.map((blob, i) => ({
+            start: i === 0 ? 0 : options.timeline[i - 1]?.audioStart ?? 0,
+            blob,
+          }));
 
-      if (buffers.length > 0) {
-        const totalLength = buffers.reduce((acc, b) => acc + b.length, 0);
-        const mixed = audioContext.createBuffer(2, totalLength, 44100);
-        let offset = 0;
-        for (const buf of buffers) {
-          for (let ch = 0; ch < Math.min(2, buf.numberOfChannels); ch++) {
-            mixed.getChannelData(ch).set(buf.getChannelData(ch), offset);
-          }
-          offset += buf.length;
-        }
-        mixedDuration = mixed.duration; // actual audio buffer duration
-
+      const mixed = await mixAudioPlacements(placements, timelineDuration, { sampleRate: 44100, channels: 2 });
+      if (mixed) {
+        mixedDuration = mixed.duration;
         audioSource = new AudioBufferSource({
           codec: 'aac',
           bitrate: 128000,
         });
         output.addAudioTrack(audioSource);
-        try {
-          // @ts-ignore
-          await audioSource.add(mixed, { timestamp: 0 });
-        } catch {}
+        await audioSource.add(mixed.buffer);
       }
     }
 
@@ -291,11 +282,14 @@ export class WebCodecsBackend implements RenderBackend {
         this.renderSubtitleFrame(ctx, options, time);
       }
 
-      // Add frame to video track
+      // Add frame to video track.
+      // ВАЖНО: mediabunny принимает timestamp/duration в СЕКУНДАХ, а не в микросекундах —
+      // раньше здесь было time*1e6, из-за чего первый кадр получал длительность ~33333 c.
       try {
-        // @ts-ignore
-        await canvasSource.add(time * 1e6, (time + 1/fps) * 1e6);
-      } catch {}
+        await canvasSource.add(time, 1 / fps);
+      } catch (e) {
+        throw new Error(`Не удалось закодировать кадр t=${time.toFixed(2)}s: ${(e as Error).message}`);
+      }
 
       if (frame % 10 === 0) {
         options.onProgress?.(time / totalDuration);

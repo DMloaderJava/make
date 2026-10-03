@@ -234,6 +234,65 @@ export async function loadProjectAudio(projectId: string, panelId: number): Prom
   }
 }
 
+// --- Подпись аудио: позволяет понять, что сохранённый файл устарел ---
+// Раньше loadProjectAudio всегда возвращал старый файл, поэтому правки текста
+// и смена голоса не применялись при повторной озвучке.
+
+export async function saveProjectAudioSignature(
+  projectId: string,
+  slot: ProjectAudioSlot,
+  signature: string
+): Promise<void> {
+  await writeFile(['projects', projectId, 'audio'], `${slot}.sig`, signature);
+}
+
+export async function getProjectAudioSignature(
+  projectId: string,
+  slot: ProjectAudioSlot
+): Promise<string | null> {
+  try {
+    if (!(await fileExists(['projects', projectId, 'audio'], `${slot}.sig`))) return null;
+    const blob = await readFile(['projects', projectId, 'audio'], `${slot}.sig`);
+    return (await blob.text()).trim();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Возвращает сохранённое аудио панели, только если его подпись совпадает
+ * с ожидаемой. Если .sig нет (аудио сохранено до появления подписей) —
+ * считаем файл устаревшим: повторная генерация обычно попадает в общий
+ * TTS-кэш (он ключуется текстом/голосом/провайдером) и стоит 0.
+ */
+export async function loadFreshProjectAudio(
+  projectId: string,
+  slot: ProjectAudioSlot,
+  expectedSignature: string
+): Promise<Blob | null> {
+  const blob = slot === 'intro'
+    ? await loadProjectIntroAudio(projectId)
+    : slot === 'outro'
+      ? await loadProjectOutroAudio(projectId)
+      : await loadProjectAudio(projectId, slot);
+  if (!blob) return null;
+  const stored = await getProjectAudioSignature(projectId, slot);
+  if (!stored || stored !== expectedSignature) return null;
+  return blob;
+}
+
+export type ProjectAudioSlot = number | 'intro' | 'outro';
+
+function audioFileName(slot: ProjectAudioSlot): string {
+  return `${slot}.mp3`;
+}
+
+/** Удаляет аудио (и подпись) — используется кнопкой «↻ Переозвучить». */
+export async function deleteProjectAudio(projectId: string, slot: ProjectAudioSlot): Promise<void> {
+  await deleteFile(['projects', projectId, 'audio'], audioFileName(slot));
+  await deleteFile(['projects', projectId, 'audio'], `${slot}.sig`);
+}
+
 export async function saveProjectIntroAudio(projectId: string, blob: Blob): Promise<void> {
   await writeFile(['projects', projectId, 'audio'], `intro.mp3`, blob);
 }

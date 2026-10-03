@@ -13,9 +13,11 @@ interface TimelineProps {
   onSelectIntro: () => void;
   onSelectOutro: () => void;
   selectedId: number | 'intro' | 'outro' | null;
+  introDuration?: number;
+  outroDuration?: number;
 }
 
-export function Timeline({ panels, timeline, currentTime, duration, onSeek, onSelectPanel, onSelectIntro, onSelectOutro, selectedId }: TimelineProps) {
+export function Timeline({ panels, timeline, currentTime, duration, onSeek, onSelectPanel, onSelectIntro, onSelectOutro, selectedId, introDuration = 8, outroDuration = 5 }: TimelineProps) {
   const formatTime = (s: number) => {
     if (!isFinite(s) || s <= 0) return '00:00';
     const m = Math.floor(s / 60);
@@ -58,7 +60,7 @@ export function Timeline({ panels, timeline, currentTime, duration, onSeek, onSe
             className={`relative h-full rounded-[6px] flex items-center justify-center px-2 text-[11px] font-medium transition-colors duration-[150ms] ${
               selectedId === 'intro' ? 'bg-[#E8B44C] text-[#0B0B0C]' : 'bg-[#1E1E23] text-[#8A8A93] hover:bg-[#26262C] hover:text-[#F5F5F7]'
             }`}
-            style={{ width: `${Math.max(8, (8 / safeDuration) * 100)}%` }}
+            style={{ width: `${Math.max(6, (introDuration / safeDuration) * 100)}%` }}
           >
             Интро
           </button>
@@ -89,7 +91,7 @@ export function Timeline({ panels, timeline, currentTime, duration, onSeek, onSe
             className={`relative h-full rounded-[6px] flex items-center justify-center px-2 text-[11px] font-medium transition-colors duration-[150ms] ${
               selectedId === 'outro' ? 'bg-[#E8B44C] text-[#0B0B0C]' : 'bg-[#1E1E23] text-[#8A8A93] hover:bg-[#26262C] hover:text-[#F5F5F7]'
             }`}
-            style={{ width: `${Math.max(6, (5 / safeDuration) * 100)}%` }}
+            style={{ width: `${Math.max(6, (outroDuration / safeDuration) * 100)}%` }}
           >
             Аутро
           </button>

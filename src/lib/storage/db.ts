@@ -65,6 +65,12 @@ export interface Project {
     ttsProvider: string;
     llmProvider: string;
     visionModel: string;
+    /** Модель TTS для проекта (например eleven_multilingual_v2). */
+    ttsModel?: string;
+    /** Язык озвучки проекта: 'ru' | 'en' | ... */
+    ttsLanguage?: string;
+    /** Скорость речи (1.0 — обычная). */
+    ttsSpeed?: number;
     backgroundMusic?: string;
     musicVolume: number;
   };
@@ -97,6 +103,17 @@ export async function getDB(): Promise<IDBPDatabase> {
     }
   });
   return dbPromise;
+}
+
+/** Закрывает открытое соединение (нужно перед clearAllInfo/deleteDatabase). */
+export async function closeDB(): Promise<void> {
+  if (dbPromise) {
+    try {
+      const db = await dbPromise;
+      db.close();
+    } catch {}
+    dbPromise = null;
+  }
 }
 
 export async function saveProject(project: Project): Promise<void> {

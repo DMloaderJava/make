@@ -1,11 +1,32 @@
 /**
  * Audio generation with OPFS cache, retry, fallback, cost estimation
  * Fixed: singleton AudioContext to avoid leak (Chrome limit ~6 contexts)
+ *
+ * v1.4 fixes:
+ * - CORS-провайдеры идут через /api/tts (см. providers/tts/router.ts)
+ * - голос по умолчанию берётся у провайдера, а не хардкод 'Puck'
+ * - MIME по провайдеру (gemini → wav, а не mp3)
+ * - подпись аудио: правка текста/голоса инвалидирует OPFS-аудио панели
+ * - onlyPanelIds: точечная переозвучка выбранных панелей
  */
 
 import { getTTSProvider, TTS_PROVIDERS } from '../providers/tts';
+import { generateTTS, mimeTypeForProvider } from '../providers/tts/router';
+import { resolveVoice } from '../providers/tts/voice-resolver';
 import { getAllKeys } from '../storage/local';
-import { getTTSCacheKey, saveTTSCache, loadTTSCache, saveProjectAudio, loadProjectAudio, saveProjectIntroAudio, saveProjectOutroAudio, loadProjectIntroAudio, loadProjectOutroAudio } from '../storage/opfs';
+import {
+  getTTSCacheKey,
+  saveTTSCache,
+  loadTTSCache,
+  saveProjectAudio,
+  saveProjectIntroAudio,
+  saveProjectOutroAudio,
+  loadProjectIntroAudio,
+  loadProjectOutroAudio,
+  saveProjectAudioSignature,
+  loadFreshProjectAudio,
+  hashSHA256,
+} from '../storage/opfs';
 import { TaskQueue } from './taskQueue';
 import { estimateTotalCost } from '../validators';
 
@@ -22,6 +43,10 @@ export interface AudioGenerationOptions {
   onProgress?: (completed: number, total: number, current: string) => void;
   onCostEstimate?: (estimate: { characters: number; cost: string }) => void;
   allowCrossProviderFallback?: boolean; // default false to avoid unexpected charges
+  /** Если задано — переозвучиваются только эти панели, остальное берётся из кэша. */
+  onlyPanelIds?: number[];
+  /** Перегенерировать intro/outro (по умолчанию они берутся из кэша). */
+  regenerateIntroOutro?: boolean;
 }
 
 export interface AudioGenerationResult {
@@ -52,47 +77,90 @@ export async function closeSharedAudioContext(): Promise<void> {
   }
 }
 
+/** Подпись аудио: меняется текст/голос/провайдер/модель/язык → аудио устарело. */
+export async function buildAudioSignature(params: {
+  text: string;
+  voice: string;
+  provider: string;
+  model?: string;
+  speed?: number;
+  language?: string;
+}): Promise<string> {
+  return hashSHA256(
+    [params.provider, params.voice, params.model || '', params.speed ?? 1, params.language || '', params.text].join('|')
+  );
+}
+
 export async function generateAllAudio(options: AudioGenerationOptions): Promise<AudioGenerationResult> {
   const keys = getAllKeys();
   const ttsProvider = getTTSProvider(options.ttsProviderId);
-  
+
   if (!ttsProvider) throw new Error(`TTS provider ${options.ttsProviderId} not found`);
-  
+
   const apiKey = keys[options.ttsProviderId];
   if (!apiKey) throw new Error(`No API key for ${options.ttsProviderId}. Add in settings.`);
 
-  const costEstimate = estimateTotalCost(options.panels, options.intro || '', options.outro || '', options.ttsProviderId);
+  const language = options.language || 'ru';
+  const mimeType = mimeTypeForProvider(options.ttsProviderId);
+
+  // Панели, которые реально надо переозвучить
+  const targetPanels = options.onlyPanelIds
+    ? options.panels.filter(p => options.onlyPanelIds!.includes(p.id))
+    : options.panels;
+
+  const costEstimate = estimateTotalCost(targetPanels, options.intro || '', options.outro || '', options.ttsProviderId);
   options.onCostEstimate?.({ characters: costEstimate.characters, cost: costEstimate.estimatedCost });
 
   const panelAudios = new Map<number, { blob: Blob; duration: number }>();
   const durations = new Map<number, number>();
-  
+
   let introAudio: Blob | null = null;
   let outroAudio: Blob | null = null;
 
-  // Load persisted project audio first (OPFS project files), then fallback to shared TTS cache
-  if (options.intro) {
-    introAudio = await loadProjectIntroAudio(options.projectId);
+  // Голос по умолчанию — от самого провайдера (не хардкод 'Puck')
+  const introVoice = await resolveVoice(
+    options.ttsProviderId,
+    apiKey,
+    Object.values(options.voiceAssignments).find(v => !!v)
+  );
+
+  // intro/outro: сначала «свежий» кэш проекта (подпись совпала), потом общий TTS-кэш
+  if (options.intro && !options.regenerateIntroOutro) {
+    const introSig = await buildAudioSignature({
+      text: options.intro,
+      voice: introVoice,
+      provider: options.ttsProviderId,
+      model: options.model,
+      language,
+    });
+    introAudio = await loadFreshProjectAudio(options.projectId, 'intro', introSig);
     if (!introAudio) {
       const introKey = await getTTSCacheKey({
         text: options.intro,
-        voice: Object.values(options.voiceAssignments)[0] || 'Puck',
+        voice: introVoice,
         provider: options.ttsProviderId,
         model: options.model,
-        language: options.language || 'ru'
+        language,
       });
       introAudio = await loadTTSCache(introKey);
     }
   }
-  if (options.outro) {
-    outroAudio = await loadProjectOutroAudio(options.projectId);
+  if (options.outro && !options.regenerateIntroOutro) {
+    const outroSig = await buildAudioSignature({
+      text: options.outro,
+      voice: introVoice,
+      provider: options.ttsProviderId,
+      model: options.model,
+      language,
+    });
+    outroAudio = await loadFreshProjectAudio(options.projectId, 'outro', outroSig);
     if (!outroAudio) {
       const outroKey = await getTTSCacheKey({
         text: options.outro,
-        voice: Object.values(options.voiceAssignments)[0] || 'Puck',
+        voice: introVoice,
         provider: options.ttsProviderId,
         model: options.model,
-        language: options.language || 'ru'
+        language,
       });
       outroAudio = await loadTTSCache(outroKey);
     }
@@ -111,13 +179,24 @@ export async function generateAllAudio(options: AudioGenerationOptions): Promise
 
   const allowFallback = options.allowCrossProviderFallback === true;
 
-  for (const panel of options.panels) {
-    const voiceId = options.voiceAssignments[panel.character] || Object.values(options.voiceAssignments)[0] || 'Puck';
-    
+  for (const panel of targetPanels) {
+    const explicitVoice = options.voiceAssignments[panel.character];
     queue.add({
       id: `panel-${panel.id}`,
       fn: async () => {
-        const persisted = await loadProjectAudio(options.projectId, panel.id);
+        // 1. Общий TTS-кэш по тексту/голосу/провайдеру
+        const voiceId = await resolveVoice(options.ttsProviderId, apiKey, explicitVoice);
+        const signature = await buildAudioSignature({
+          text: panel.dialogue,
+          voice: voiceId,
+          provider: options.ttsProviderId,
+          model: options.model,
+          speed: options.speed,
+          language,
+        });
+
+        // 2. Аудио проекта — только если подпись совпадает (иначе текст/голос менялись)
+        const persisted = await loadFreshProjectAudio(options.projectId, panel.id, signature);
         if (persisted) {
           const duration = await getAudioDuration(persisted);
           return { blob: persisted, duration };
@@ -129,29 +208,33 @@ export async function generateAllAudio(options: AudioGenerationOptions): Promise
           provider: options.ttsProviderId,
           model: options.model,
           speed: options.speed,
-          language: options.language || 'ru'
+          language,
         });
 
         const cached = await loadTTSCache(cacheKey);
         if (cached) {
           const duration = await getAudioDuration(cached);
           await saveProjectAudio(options.projectId, panel.id, cached);
+          await saveProjectAudioSignature(options.projectId, panel.id, signature);
           return { blob: cached, duration };
         }
 
-        const buffer = await ttsProvider.generate(panel.dialogue, {
+        const { buffer } = await generateTTS({
+          providerId: options.ttsProviderId,
+          text: panel.dialogue,
           apiKey,
           voice: voiceId,
           model: options.model,
           speed: options.speed,
-          language: options.language || 'ru'
+          language,
         });
 
-        const blob = new Blob([buffer], { type: 'audio/mpeg' });
+        const blob = new Blob([buffer], { type: mimeType });
         const duration = await getAudioDuration(blob);
 
         await saveTTSCache(cacheKey, blob);
         await saveProjectAudio(options.projectId, panel.id, blob);
+        await saveProjectAudioSignature(options.projectId, panel.id, signature);
 
         return { blob, duration };
       },
@@ -161,16 +244,17 @@ export async function generateAllAudio(options: AudioGenerationOptions): Promise
           const fallbackKey = keys[fallbackProvider.id];
           if (!fallbackKey) throw new Error(`No key for fallback ${fallbackProvider.id}`);
 
-          const voices = await fallbackProvider.getVoices(fallbackKey);
-          const voice = voices[0]?.id || voiceId;
+          const voice = await resolveVoice(fallbackProvider.id, fallbackKey);
 
-          const buffer = await fallbackProvider.generate(panel.dialogue, {
+          const { buffer } = await generateTTS({
+            providerId: fallbackProvider.id,
+            text: panel.dialogue,
             apiKey: fallbackKey,
             voice,
-            language: options.language || 'ru'
+            language,
           });
 
-          const blob = new Blob([buffer], { type: 'audio/mpeg' });
+          const blob = new Blob([buffer], { type: mimeTypeForProvider(fallbackProvider.id) });
           const duration = await getAudioDuration(blob);
 
           await saveProjectAudio(options.projectId, panel.id, blob);
@@ -182,7 +266,7 @@ export async function generateAllAudio(options: AudioGenerationOptions): Promise
 
   const results = await queue.run();
 
-  for (const panel of options.panels) {
+  for (const panel of targetPanels) {
     const result = results.get(`panel-${panel.id}`);
     if (result?.success && result.data) {
       const { blob, duration } = result.data as { blob: Blob; duration: number };
@@ -197,22 +281,35 @@ export async function generateAllAudio(options: AudioGenerationOptions): Promise
 
   if (options.intro && !introAudio) {
     try {
-      const voiceId = Object.values(options.voiceAssignments)[0] || 'Puck';
-      const buffer = await ttsProvider.generate(options.intro, {
+      const { buffer } = await generateTTS({
+        providerId: options.ttsProviderId,
+        text: options.intro,
         apiKey,
-        voice: voiceId,
-        language: options.language || 'ru'
+        voice: introVoice,
+        model: options.model,
+        language,
       });
-      introAudio = new Blob([buffer], { type: 'audio/mpeg' });
+      introAudio = new Blob([buffer], { type: mimeType });
       const cacheKey = await getTTSCacheKey({
         text: options.intro,
-        voice: voiceId,
+        voice: introVoice,
         provider: options.ttsProviderId,
         model: options.model,
-        language: options.language || 'ru'
+        language,
       });
       await saveTTSCache(cacheKey, introAudio);
       await saveProjectIntroAudio(options.projectId, introAudio);
+      await saveProjectAudioSignature(
+        options.projectId,
+        'intro',
+        await buildAudioSignature({
+          text: options.intro,
+          voice: introVoice,
+          provider: options.ttsProviderId,
+          model: options.model,
+          language,
+        })
+      );
     } catch (e) {
       console.error('Intro generation failed', e);
     }
@@ -220,22 +317,35 @@ export async function generateAllAudio(options: AudioGenerationOptions): Promise
 
   if (options.outro && !outroAudio) {
     try {
-      const voiceId = Object.values(options.voiceAssignments)[0] || 'Puck';
-      const buffer = await ttsProvider.generate(options.outro, {
+      const { buffer } = await generateTTS({
+        providerId: options.ttsProviderId,
+        text: options.outro,
         apiKey,
-        voice: voiceId,
-        language: options.language || 'ru'
+        voice: introVoice,
+        model: options.model,
+        language,
       });
-      outroAudio = new Blob([buffer], { type: 'audio/mpeg' });
+      outroAudio = new Blob([buffer], { type: mimeType });
       const cacheKey = await getTTSCacheKey({
         text: options.outro,
-        voice: voiceId,
+        voice: introVoice,
         provider: options.ttsProviderId,
         model: options.model,
-        language: options.language || 'ru'
+        language,
       });
       await saveTTSCache(cacheKey, outroAudio);
       await saveProjectOutroAudio(options.projectId, outroAudio);
+      await saveProjectAudioSignature(
+        options.projectId,
+        'outro',
+        await buildAudioSignature({
+          text: options.outro,
+          voice: introVoice,
+          provider: options.ttsProviderId,
+          model: options.model,
+          language,
+        })
+      );
     } catch (e) {
       console.error('Outro generation failed', e);
     }

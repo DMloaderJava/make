@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from 'react';
-import { Character } from '@/lib/storage/db';
+import { Character, Project } from '@/lib/storage/db';
 import { TTS_PROVIDERS, Voice, getTTSProvider } from '@/lib/providers/tts';
 import { getAllKeys } from '@/lib/storage/local';
 import { Button } from '@/components/ui/button';
@@ -16,12 +16,39 @@ interface VoicesModalProps {
   onChange: (assignments: Record<string, string>) => void;
   onCharactersChange?: (chars: Character[]) => void;
   onPanelsRename?: (renameMap: Record<string, string>) => void;
+  /** Настройки проекта: выбор провайдера/модели/языка озвучки на проект. */
+  settings?: Project['settings'];
+  onSettingsChange?: (settings: Partial<Project['settings']>) => void;
 }
 
-export function VoicesModal({ open, onClose, characters, assignments, onChange, onCharactersChange, onPanelsRename }: VoicesModalProps) {
+const TTS_MODEL_HINTS: Record<string, string> = {
+  elevenlabs: 'eleven_multilingual_v2',
+  openai: 'tts-1-hd',
+  gemini: 'gemini-2.5-flash-preview-tts',
+  cartesia: 'sonic-3',
+  qwen: 'qwen3-tts-flash',
+  azure: '',
+  polly: '',
+  'google-cloud': '',
+};
+
+export function VoicesModal({ open, onClose, characters, assignments, onChange, onCharactersChange, onPanelsRename, settings, onSettingsChange }: VoicesModalProps) {
   const [voicesByProvider, setVoicesByProvider] = useState<Record<string, Voice[]>>({});
-  const [selectedProvider, setSelectedProvider] = useState('gemini');
+  const [selectedProvider, setSelectedProvider] = useState(settings?.ttsProvider || 'gemini');
   const [loadingPreview, setLoadingPreview] = useState<string | null>(null);
+  const [model, setModel] = useState(settings?.ttsModel || '');
+  const [language, setLanguage] = useState(settings?.ttsLanguage || 'ru');
+
+  // Провайдер проекта мог измениться извне — синхронизируем при открытии
+  useEffect(() => {
+    if (!open) return;
+    if (settings?.ttsProvider && settings.ttsProvider !== selectedProvider) {
+      setSelectedProvider(settings.ttsProvider);
+    }
+    setModel(settings?.ttsModel || '');
+    setLanguage(settings?.ttsLanguage || 'ru');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -39,6 +66,21 @@ export function VoicesModal({ open, onClose, characters, assignments, onChange, 
     };
     load();
   }, [open]);
+
+  /** Смена провайдера: голоса старого провайдера невалидны → сбрасываем назначения. */
+  const handleProviderChange = (nextProvider: string) => {
+    const hasAssignments = Object.values(assignments).some(Boolean);
+    if (hasAssignments && nextProvider !== selectedProvider) {
+      const ok = confirm(
+        'Сменить провайдера озвучки? Назначенные голоса относятся к прошлому провайдеру и будут сброшены.'
+      );
+      if (!ok) return;
+      onChange({});
+    }
+    setSelectedProvider(nextProvider);
+    setModel(settings?.ttsModel && nextProvider === selectedProvider ? settings.ttsModel : (TTS_MODEL_HINTS[nextProvider] || ''));
+    onSettingsChange?.({ ttsProvider: nextProvider, ttsModel: TTS_MODEL_HINTS[nextProvider] || '', ttsLanguage: language });
+  };
 
   const handleMerge = () => {
     const { merged: normalized, renameMap } = normalizeCharactersWithMap(characters.map(c => ({ name: c.name, appearance: c.appearance })));
@@ -81,7 +123,8 @@ export function VoicesModal({ open, onClose, characters, assignments, onChange, 
             text: 'Привет! Это тест голоса для манги.',
             voice: voiceId,
             apiKey,
-            language: 'ru'
+            language,
+            model: model || undefined
           })
         });
         if (!res.ok) {
@@ -96,7 +139,7 @@ export function VoicesModal({ open, onClose, characters, assignments, onChange, 
       } else {
         const provider = getTTSProvider(selectedProvider);
         if (!provider) throw new Error('Provider not found');
-        const buf = await provider.generate('Привет! Это тест голоса для манги.', { apiKey, voice: voiceId, language: 'ru' });
+        const buf = await provider.generate('Привет! Это тест голоса для манги.', { apiKey, voice: voiceId, language, model: model || undefined });
         blob = new Blob([buf], { type: getAudioMimeType(selectedProvider) });
       }
       const url = URL.createObjectURL(blob);
@@ -136,12 +179,50 @@ export function VoicesModal({ open, onClose, characters, assignments, onChange, 
         <div className="p-5 space-y-4 max-h-[70vh] overflow-y-auto">
           <div id="voice-preview-container" className="hidden p-2 rounded-[10px] bg-[#0B0B0C] border border-[#26262C]"></div>
           <div className="flex gap-2">
-            <select value={selectedProvider} onChange={(e) => setSelectedProvider(e.target.value)} className="flex h-8 w-full rounded-[6px] border border-[#26262C] bg-[#0B0B0C] px-2 text-xs">
+            <select value={selectedProvider} onChange={(e) => handleProviderChange(e.target.value)} className="flex h-8 w-full rounded-[6px] border border-[#26262C] bg-[#0B0B0C] px-2 text-xs">
               {TTS_PROVIDERS.map(p => <option key={p.id} value={p.id}>{p.name} {p.freeTier ? 'FREE' : ''}</option>)}
             </select>
             <Button variant="outline" size="sm" onClick={handleMerge} className="h-8 text-xs bg-[#0B0B0C] border-[#26262C] whitespace-nowrap">
               Объединить
             </Button>
+          </div>
+
+          {/* Провайдер/модель/язык озвучки — на проект, а не только глобально в /settings */}
+          <div className="grid grid-cols-3 gap-2">
+            <div className="space-y-1">
+              <label className="text-[10px] text-[#8A8A93]">Модель TTS</label>
+              <input
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                onBlur={() => onSettingsChange?.({ ttsModel: model.trim() })}
+                placeholder={TTS_MODEL_HINTS[selectedProvider] || 'по умолчанию'}
+                className="w-full h-8 rounded-[6px] bg-[#0B0B0C] border border-[#26262C] px-2 text-[11px] text-[#F5F5F7] placeholder:text-[#8A8A93]/50"
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="text-[10px] text-[#8A8A93]">Язык</label>
+              <select
+                value={language}
+                onChange={(e) => { setLanguage(e.target.value); onSettingsChange?.({ ttsLanguage: e.target.value }); }}
+                className="w-full h-8 rounded-[6px] bg-[#0B0B0C] border border-[#26262C] px-2 text-[11px] text-[#F5F5F7]"
+              >
+                <option value="ru">ru</option>
+                <option value="en">en</option>
+                <option value="multi">multi</option>
+              </select>
+            </div>
+            <div className="space-y-1">
+              <label className="text-[10px] text-[#8A8A93]">Скорость</label>
+              <input
+                type="number"
+                step="0.05"
+                min="0.5"
+                max="2"
+                defaultValue={settings?.ttsSpeed ?? 1}
+                onBlur={(e) => onSettingsChange?.({ ttsSpeed: Number(e.target.value) || 1 })}
+                className="w-full h-8 rounded-[6px] bg-[#0B0B0C] border border-[#26262C] px-2 text-[11px] text-[#F5F5F7]"
+              />
+            </div>
           </div>
 
           {characters.length === 0 ? (

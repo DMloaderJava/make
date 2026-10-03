@@ -1,4 +1,31 @@
-import { LLMProvider, LLMOptions, Message } from './types';
+import { LLMProvider, LLMOptions, Message, ResponseFormatSchema } from './types';
+
+/**
+ * Провайдеры, у которых нет json_schema, но есть json_object.
+ * Остальные (OpenAI/OpenRouter/Groq/Together/Mistral/...) поддерживают json_schema.
+ */
+const JSON_OBJECT_ONLY_PROVIDERS = new Set(['custom', 'cloudflare', 'deepinfra', 'novita', 'siliconflow', 'zhipu', 'moonshot', '01ai', 'huggingface', 'cohere']);
+
+/** Собирает response_format для OpenAI-совместимого тела запроса. */
+export function buildResponseFormat(
+  providerId: string,
+  responseFormat?: ResponseFormatSchema
+): Record<string, unknown> | undefined {
+  if (!responseFormat) return undefined;
+
+  if (JSON_OBJECT_ONLY_PROVIDERS.has(providerId)) {
+    return { type: 'json_object' };
+  }
+
+  return {
+    type: 'json_schema',
+    json_schema: {
+      name: responseFormat.name || 'response',
+      schema: responseFormat.schema,
+      strict: responseFormat.strict ?? false,
+    },
+  };
+}
 
 export function createOpenAICompatibleProvider(config: {
   id: string;
@@ -80,6 +107,9 @@ export function createOpenAICompatibleProvider(config: {
           messages: openAIMessages,
           temperature: options.temperature ?? 0.7,
           max_tokens: options.maxTokens ?? 4000,
+          ...(buildResponseFormat(config.id, options.responseFormat)
+            ? { response_format: buildResponseFormat(config.id, options.responseFormat) }
+            : {}),
         })
       });
 
@@ -150,6 +180,9 @@ export function createOpenAICompatibleProvider(config: {
           messages,
           temperature: 0.2,
           max_tokens: options.maxTokens ?? 4000,
+          ...(buildResponseFormat(config.id, options.responseFormat)
+            ? { response_format: buildResponseFormat(config.id, options.responseFormat) }
+            : {}),
         })
       });
 
