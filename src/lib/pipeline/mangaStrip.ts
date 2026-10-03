@@ -173,10 +173,44 @@ export function buildScrollKeyframes(
   const ordered = [...spans].sort((a, b) => a.start - b.start);
   if (ordered.length === 0) return [{ time: 0, y: 0, ease: 'linear' }];
 
+  const isLong = (slot: StripSlot): boolean => slot.height > layout.frameHeight + 1;
+
+  /** Куда окно приходит, когда страница начинает звучать. */
+  const entryY = (slotIndex: number): number => {
+    const slot = layout.slots[slotIndex];
+    if (!slot) return 0;
+    // Длинную страницу читаем с верха, короткую — с центра.
+    return isLong(slot) && panInside ? clampScroll(slot.y, layout) : targetScrollForSlot(layout, slotIndex);
+  };
+
+  /** Где окно оказывается к концу звучания страницы. */
+  const exitY = (slotIndex: number): number => {
+    const slot = layout.slots[slotIndex];
+    if (!slot) return 0;
+    const top = clampScroll(slot.y, layout);
+    const bottom = clampScroll(slot.y + slot.height - layout.frameHeight, layout);
+    return isLong(slot) && panInside && bottom > top ? bottom : targetScrollForSlot(layout, slotIndex);
+  };
+
   const keys: ScrollKeyframe[] = [];
 
-  // До первой страницы окно уже стоит на её цели — иначе ролик начинается с рывка.
-  keys.push({ time: 0, y: targetScrollForSlot(layout, ordered[0].slotIndex), ease: 'linear' });
+  /**
+   * Ключ с тем же временем не должен затирать уже стоящий easing: на стыке двух
+   * длинных страниц переход (easeInOut) и старт следующей страницы совпадают по
+   * времени, и «последний победил» превращал плавный переход в резкий linear.
+   */
+  const pushKey = (time: number, y: number, ease: StripEase): void => {
+    const last = keys[keys.length - 1];
+    if (last && Math.abs(last.time - time) < 1e-4) {
+      if (Math.abs(last.y - y) < 1e-3) return; // то же время и та же позиция — оставляем прежний ease
+      keys[keys.length - 1] = { time, y, ease };
+      return;
+    }
+    keys.push({ time, y, ease });
+  };
+
+  // До первой страницы окно уже стоит в точке входа — иначе ролик начинается с рывка.
+  pushKey(0, entryY(ordered[0].slotIndex), 'linear');
 
   ordered.forEach((span, i) => {
     const slot = layout.slots[span.slotIndex];
@@ -184,34 +218,28 @@ export function buildScrollKeyframes(
     const duration = Math.max(0, span.end - span.start);
     if (!slot || duration <= 0) return;
 
-    const target = targetScrollForSlot(layout, span.slotIndex);
     const transitionLength = Math.min(transition, Math.max(0, duration - minHold));
     const transitionStart = Math.max(span.start, span.end - transitionLength);
 
-    // Куда окно придёт к концу интервала: для длинной страницы это её низ
-    // (страница прочитана до конца), иначе — центр.
-    const longPage = slot.height > layout.frameHeight + 1;
-    const top = clampScroll(slot.y, layout);
-    const bottom = clampScroll(slot.y + slot.height - layout.frameHeight, layout);
-    const endY = longPage && panInside && bottom > top ? bottom : target;
-
-    if (longPage && panInside && bottom > top) {
-      // Страница длиннее кадра: медленно проезжаем её сверху вниз, пока звучит
-      // озвучка (вебтун-чтение), и только потом уходим к следующей.
-      keys.push({ time: span.start, y: top, ease: 'linear' });
-      keys.push({ time: transitionStart, y: bottom, ease: 'linear' });
+    if (isLong(slot) && panInside) {
+      // Страница длиннее кадра: пока звучит озвучка — медленно проезжаем её
+      // сверху вниз (вебтун-чтение).
+      pushKey(span.start, entryY(span.slotIndex), 'linear');
+      pushKey(transitionStart, exitY(span.slotIndex), 'linear');
     } else {
-      keys.push({ time: span.start, y: target, ease: 'linear' });
-      keys.push({ time: transitionStart, y: target, ease: 'linear' });
+      const target = targetScrollForSlot(layout, span.slotIndex);
+      pushKey(span.start, target, 'linear');
+      pushKey(transitionStart, target, 'linear');
     }
 
     if (next) {
       // Переход к следующей странице — на «хвосте» интервала, с мягким сглаживанием.
-      keys.push({ time: span.end, y: targetScrollForSlot(layout, next.slotIndex), ease: 'easeInOut' });
+      // Ведём в точку входа следующей страницы (для длинной это её верх).
+      pushKey(span.end, entryY(next.slotIndex), 'easeInOut');
     } else {
       // Последняя страница: окно остаётся ТАМ ЖЕ, где закончился проезд,
       // а не откатывается к центру (иначе на длинном вебтуне — рывок вверх).
-      keys.push({ time: span.end, y: endY, ease: 'linear' });
+      pushKey(span.end, exitY(span.slotIndex), 'linear');
     }
   });
 

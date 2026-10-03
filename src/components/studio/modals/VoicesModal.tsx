@@ -32,6 +32,8 @@ export function VoicesModal({ open, onClose, characters, assignments, onChange, 
   const [loadingPreview, setLoadingPreview] = useState<string | null>(null);
   const [model, setModel] = useState(settings?.ttsModel || '');
   const [language, setLanguage] = useState(settings?.ttsLanguage || 'ru');
+  // Скорость держим строкой: пустое поле при наборе «1.» не должно превращаться в 0.
+  const [speed, setSpeed] = useState(String(settings?.ttsSpeed ?? 1));
 
   // Провайдер проекта мог измениться извне — синхронизируем при открытии
   useEffect(() => {
@@ -41,6 +43,7 @@ export function VoicesModal({ open, onClose, characters, assignments, onChange, 
     }
     setModel(settings?.ttsModel || '');
     setLanguage(settings?.ttsLanguage || 'ru');
+    setSpeed(String(settings?.ttsSpeed ?? 1));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
@@ -63,17 +66,22 @@ export function VoicesModal({ open, onClose, characters, assignments, onChange, 
 
   /** Смена провайдера: голоса старого провайдера невалидны → сбрасываем назначения. */
   const handleProviderChange = (nextProvider: string) => {
+    if (nextProvider === selectedProvider) return; // тот же провайдер — ничего не меняем
+
     const hasAssignments = Object.values(assignments).some(Boolean);
-    if (hasAssignments && nextProvider !== selectedProvider) {
+    if (hasAssignments) {
       const ok = confirm(
         'Сменить провайдера озвучки? Назначенные голоса относятся к прошлому провайдеру и будут сброшены.'
       );
       if (!ok) return;
       onChange({});
     }
+
     setSelectedProvider(nextProvider);
-    setModel(settings?.ttsModel && nextProvider === selectedProvider ? settings.ttsModel : (defaultModelFor(nextProvider)));
-    onSettingsChange?.({ ttsProvider: nextProvider, ttsModel: defaultModelFor(nextProvider), ttsLanguage: language });
+    // Модель предыдущего провайдера к новому отношения не имеет — берём дефолт каталога.
+    const nextModel = defaultModelFor(nextProvider);
+    setModel(nextModel);
+    onSettingsChange?.({ ttsProvider: nextProvider, ttsModel: nextModel, ttsLanguage: language });
   };
 
   const handleMerge = () => {
@@ -212,8 +220,9 @@ export function VoicesModal({ open, onClose, characters, assignments, onChange, 
                 step="0.05"
                 min="0.5"
                 max="2"
-                defaultValue={settings?.ttsSpeed ?? 1}
-                onBlur={(e) => onSettingsChange?.({ ttsSpeed: Number(e.target.value) || 1 })}
+                value={speed}
+                onChange={(e) => setSpeed(e.target.value)}
+                onBlur={() => onSettingsChange?.({ ttsSpeed: Number(speed) || 1 })}
                 className="w-full h-8 rounded-[6px] bg-[#0B0B0C] border border-[#26262C] px-2 text-[11px] text-[#F5F5F7]"
               />
             </div>

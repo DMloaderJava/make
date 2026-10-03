@@ -36,7 +36,22 @@ export function mimeTypeForProvider(providerId: string): string {
   return providerMimeType(providerId);
 }
 
+/**
+ * generateTTS — клиентский путь: он ходит в /api/tts и в браузерные API.
+ * На сервере его вызов означал бы рекурсию (сервер → /api/tts → сервер),
+ * поэтому падаем сразу и громко, а не после таймаута.
+ */
+export function assertClientContext(): void {
+  if (typeof window === 'undefined') {
+    throw new Error(
+      'generateTTS() — клиентский путь. На сервере используйте getServerGenerate(provider) или serverGenerate у провайдера.'
+    );
+  }
+}
+
 export async function generateTTS(req: GenerateTTSRequest): Promise<GenerateTTSResult> {
+  assertClientContext();
+
   if (mustUseProxy(req.providerId)) {
     const res = await fetch('/api/tts', {
       method: 'POST',

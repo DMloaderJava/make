@@ -231,6 +231,32 @@ test('createStripSceneFromMedia: imageIndex из таймлайна приори
   assert.ok(scene!.keyframes.some(k => k.y > 0), 'есть отличная от нуля позиция скролла');
 });
 
+test('стык двух ДЛИННЫХ страниц: переход сохраняет easeInOut и не теряет плавность', () => {
+  const layout = computeStripLayout(PAGES, { ...FRAME, viewport: 1080, gap: 24 });
+  const keys = buildScrollKeyframes(
+    [
+      { slotIndex: 0, start: 0, end: 6 },
+      { slotIndex: 1, start: 6, end: 12 },
+    ],
+    layout,
+    { transition: 1, panInside: true }
+  );
+
+  const junction = keys.find(k => Math.abs(k.time - 6) < 1e-4);
+  assert.ok(junction, 'ключ на стыке есть');
+  assert.equal(junction!.ease, 'easeInOut', 'стык длинных страниц — мягкий переход, а не замена на linear');
+
+  // Движение на стыке не мгновенное: середина перехода лежит между страницами
+  const before = sampleScroll(keys, 5);
+  const mid = sampleScroll(keys, 5.5);
+  const after = sampleScroll(keys, 6);
+  assert.ok(mid > before && mid < after, `плавное движение: ${before} → ${mid} → ${after}`);
+
+  // И сам переход ведёт в верх следующей (длинной) страницы, а не в её центр
+  const top2 = clampScroll(layout.slots[1].y, layout);
+  assert.ok(Math.abs(after - top2) < 1e-6, 'приходим к верху длинной страницы');
+});
+
 test('sampleScroll: пустые ключи и время до первого', () => {
   assert.equal(sampleScroll([], 5), 0);
   assert.equal(sampleScroll([{ time: 2, y: 100, ease: 'linear' }], 0), 100);

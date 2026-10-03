@@ -4,6 +4,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { TTS_PROVIDERS, getServerGenerate } from '../src/lib/providers/tts/catalog';
 import { mustUseProxy } from '../src/lib/providers/tts/cors';
+import { generateTTS, assertClientContext } from '../src/lib/providers/tts/router';
 
 const TTS_DIR = join(process.cwd(), 'src/lib/providers/tts');
 
@@ -52,6 +53,17 @@ test('getServerGenerate: без флага отдаёт generate(), с флаг�
   const proxied = TTS_PROVIDERS.find(p => p.proxyClientSide);
   assert.ok(proxied, 'polly помечен как проксируемый на клиенте');
   assert.equal(getServerGenerate(proxied!), null);
+});
+
+test('generateTTS на сервере падает сразу (структурный guard от рекурсии)', async () => {
+  // Тест выполняется в Node, где window нет — это ровно серверный контекст.
+  assert.throws(() => assertClientContext(), /клиентский путь/);
+
+  await assert.rejects(
+    () => generateTTS({ providerId: 'gemini', text: 'тест', apiKey: 'key' }),
+    /клиентский путь/,
+    'серверный вызов клиентского пути должен падать, а не уходить в /api/tts'
+  );
 });
 
 test('mustUseProxy покрывает и CORS-провайдеров, и «клиентских»', () => {

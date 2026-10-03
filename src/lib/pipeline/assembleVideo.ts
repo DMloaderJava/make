@@ -8,6 +8,7 @@
 import { SyncTimeline } from '../storage/db';
 import { getKenBurnsParams } from './buildTimeline';
 import { createPlacementScheduler, userFacingOverlaps, type AudioPlacement, type PlacementScheduler } from './audioMix';
+import { frameTime, startDelayMs } from './renderClock';
 import { createStripSceneFromMedia, type StripScene } from './mangaStrip';
 
 export interface AssembleOptions {
@@ -110,6 +111,10 @@ export async function assembleVideoWithCanvas(
   if (placements.length > 0) {
     try {
       audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      // Приостановленный контекст не двигает currentTime: мастер-клок замер бы
+      // на нуле, а звук не зазвучал. Экспорт всегда идёт после жеста пользователя,
+      // но resume() вызываем явно и не считаем ошибкой.
+      try { await audioContext.resume(); } catch {}
       audioDestination = audioContext.createMediaStreamDestination();
       // Планировщик с опережением: в графе живут только ближайшие секунды,
       // а не все 50 источников с декодированными буферами (иначе снова сотни МБ).
@@ -145,12 +150,12 @@ export async function assembleVideoWithCanvas(
    * сторону). Теперь коррекция одна и только в одном месте: запись стартует
    * ровно в момент старта аудио.
    */
-  const mediaClock = (fallbackStart: number): number => {
-    if (audioContext && audioStartedAt !== null) {
-      return Math.max(0, audioContext.currentTime - audioStartedAt);
-    }
-    return Math.max(0, (performance.now() - fallbackStart) / 1000);
-  };
+  const mediaClock = (fallbackStart: number): number => frameTime({
+    audioStartedAt,
+    ctxNow: audioContext ? audioContext.currentTime : 0,
+    wallNow: performance.now(),
+    fallbackStart,
+  });
 
   const videoStream = canvas.captureStream(fps);
   const stream = audioDestination
@@ -181,9 +186,7 @@ export async function assembleVideoWithCanvas(
       try { audioContext?.close(); } catch {}
       reject(e);
     };
-    recorder.start(100);
-
-    const fallbackStart = performance.now();
+    let fallbackStart = performance.now();
     let frameCount = 0;
 
     const renderFrame = (time: number) => {
@@ -199,15 +202,34 @@ export async function assembleVideoWithCanvas(
 
     // MediaRecorder пишет в реальном времени: кадры ведём по мастер-клоку
     // (AudioContext, если есть звук), а не «наращиванием 1/fps».
+    // Поправок на leadIn здесь НЕТ: он уже внутри audioStartedAt.
     const animate = () => {
-      const time = mediaClock(fallbackStart) - leadIn;
+      // Подкидываем планировщику фрагменты, до которых осталось меньше lookahead.
+      // Без этого вызова в графе не окажется ни одного источника — и WEBM будет немым.
+      scheduler?.tick();
+      const time = mediaClock(fallbackStart);
       if (time >= totalDuration) { renderFrame(totalDuration); recorder.stop(); return; }
       if (time >= 0) renderFrame(time);
       frameCount++;
       if (frameCount % 10 === 0) options.onProgress?.(Math.max(0, time / totalDuration));
       requestAnimationFrame(animate);
     };
-    requestAnimationFrame(animate);
+
+    // Запись стартует ровно тогда, когда начинает играть звук: иначе первые
+    // leadIn секунд видео шли бы без картинки, зато со звуком.
+    const beginRecording = () => {
+      if (recorder.state !== 'inactive') return;
+      scheduler?.tick();
+      renderFrame(0);
+      fallbackStart = performance.now();
+      recorder.start(100);
+      requestAnimationFrame(animate);
+    };
+
+    const delay = startDelayMs(audioStartedAt, audioContext ? audioContext.currentTime : null);
+    if (delay > 0) setTimeout(beginRecording, delay);
+    else beginRecording();
+
     setTimeout(() => { if (recorder.state === 'recording') recorder.stop(); }, (totalDuration + leadIn + 5) * 1000);
   });
 }

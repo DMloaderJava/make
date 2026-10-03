@@ -34,6 +34,56 @@ export interface AudioPlacement {
 /** Кэш длительностей: Blob → секунды. Живёт в рамках сессии экспорта. */
 const durationCache = new WeakMap<Blob, number>();
 
+/**
+ * Кэш декодированных буферов под ограниченный бюджет памяти.
+ *
+ * Зачем: раскладку нельзя построить, не узнав длительности, а длительность без
+ * декодирования не получить (MP3/OGG). Поэтому раньше каждый фрагмент
+ * декодировался дважды — на измерение и на рендер. Держим уже декодированные
+ * буферы, пока суммарный объём укладывается в бюджет; если ролик длиннее —
+ * переходим в режим «декодировать дважды», но с честно ограниченной памятью.
+ */
+const BUFFER_CACHE_BUDGET = 96 * 1024 * 1024; // 96 МБ PCM
+const bufferCache = new Map<Blob, { buffer: AudioBuffer; bytes: number }>();
+let bufferCacheBytes = 0;
+
+function audioBufferBytes(buffer: AudioBuffer): number {
+  return buffer.length * buffer.numberOfChannels * 4;
+}
+
+function cacheGet(blob: Blob): AudioBuffer | null {
+  const entry = bufferCache.get(blob);
+  if (!entry) return null;
+  // Освежаем порядок вытеснения (FIFO по факту использования)
+  bufferCache.delete(blob);
+  bufferCache.set(blob, entry);
+  return entry.buffer;
+}
+
+function cacheSet(blob: Blob, buffer: AudioBuffer): void {
+  const bytes = audioBufferBytes(buffer);
+  if (bytes > BUFFER_CACHE_BUDGET) return; // один фрагмент больше бюджета — не кэшируем
+  bufferCache.set(blob, { buffer, bytes });
+  bufferCacheBytes += bytes;
+  while (bufferCacheBytes > BUFFER_CACHE_BUDGET) {
+    const oldest = bufferCache.keys().next();
+    if (oldest.done) break;
+    const entry = bufferCache.get(oldest.value);
+    bufferCache.delete(oldest.value);
+    bufferCacheBytes -= entry ? entry.bytes : 0;
+  }
+}
+
+/** Сколько байт PCM сейчас удерживает кэш (для диагностики и тестов). */
+export function cachedBufferBytes(): number {
+  return bufferCacheBytes;
+}
+
+export function clearBufferCache(): void {
+  bufferCache.clear();
+  bufferCacheBytes = 0;
+}
+
 export interface PackOverlap {
   label?: string;
   requestedStart: number;
@@ -111,9 +161,17 @@ export async function decodeToTarget(
   sampleRate = 44100,
   channels = 2
 ): Promise<AudioBuffer | null> {
+  const cached = cacheGet(blob);
+  if (cached && cached.sampleRate === sampleRate && cached.numberOfChannels === channels) {
+    return cached;
+  }
+
   const decoded = await decodeAudioBlob(blob);
   if (!decoded) return null;
-  if (decoded.sampleRate === sampleRate && decoded.numberOfChannels === channels) return decoded;
+  if (decoded.sampleRate === sampleRate && decoded.numberOfChannels === channels) {
+    cacheSet(blob, decoded);
+    return decoded;
+  }
 
   try {
     const OfflineCtor = getOfflineCtor();
@@ -123,8 +181,11 @@ export async function decodeToTarget(
     src.buffer = decoded;
     src.connect(offline.destination);
     src.start(0);
-    return await offline.startRendering();
+    const resampled = await offline.startRendering();
+    cacheSet(blob, resampled);
+    return resampled;
   } catch {
+    cacheSet(blob, decoded);
     return decoded;
   }
 }
@@ -257,12 +318,13 @@ export function userFacingOverlaps(overlaps: PackOverlap[]): string[] {
 }
 
 /**
- * Измеряет длительности фрагментов, НЕ удерживая декодированные буферы.
+ * Измеряет длительности фрагментов.
  *
- * Раньше все буферы складывались в массив: для 50 панелей по 5 с это ~88 МБ
- * декодированного PCM только для того, чтобы построить раскладку. Теперь
- * декодируем по одному, запоминаем секунды в WeakMap (Blob → duration) и
- * отпускаем буфер — пик памяти равен одному фрагменту.
+ * Буферы не складываются в массив (раньше это давало ~88 МБ на 50 панелей),
+ * но и не выбрасываются сразу: то, что помещается в бюджет, остаётся в
+ * LRU-кэше, поэтому второй проход (рендер/выгрузка в muxer) обходится без
+ * повторного декодирования. При ролике длиннее бюджета — деградация до двух
+ * декодирований, зато память ограничена.
  */
 export async function measurePlacements(
   placements: AudioPlacement[],

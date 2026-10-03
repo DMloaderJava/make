@@ -39,7 +39,32 @@ export function buildResponseFormat(
  * json_schema, а меньшая модель может нет. Кэш на провайдера целиком приводил бы
  * к тому, что вторая модель всегда платит за лишние попытки.
  */
-const responseFormatModes = new Map<string, ResponseFormatMode>();
+const responseFormatModes = new Map<string, { mode: ResponseFormatMode; expiresAt: number }>();
+
+/** Схема-режим перепроверяем раз в 10 минут: провайдер мог починить json_schema. */
+const RESPONSE_FORMAT_TTL_MS = 10 * 60 * 1000;
+/** Потолок кэша: длинная сессия в Electron не должна расти бесконечно. */
+const RESPONSE_FORMAT_MAX_ENTRIES = 200;
+
+function getCachedMode(key: string): ResponseFormatMode | undefined {
+  const entry = responseFormatModes.get(key);
+  if (!entry) return undefined;
+  if (Date.now() > entry.expiresAt) {
+    responseFormatModes.delete(key);
+    return undefined;
+  }
+  return entry.mode;
+}
+
+function setCachedMode(key: string, mode: ResponseFormatMode): void {
+  // Полноценный schema — не деградация: держим долго и не перепроверяем.
+  const ttl = mode === 'schema' ? 24 * 60 * 60 * 1000 : RESPONSE_FORMAT_TTL_MS;
+  if (responseFormatModes.size >= RESPONSE_FORMAT_MAX_ENTRIES && !responseFormatModes.has(key)) {
+    const oldest = responseFormatModes.keys().next();
+    if (!oldest.done) responseFormatModes.delete(oldest.value);
+  }
+  responseFormatModes.set(key, { mode, expiresAt: Date.now() + ttl });
+}
 
 function looksLikeFormatRejection(status: number, body: string): boolean {
   if (status !== 400 && status !== 422) return false;
@@ -64,7 +89,7 @@ async function postChatCompletion(params: {
   const model = typeof body.model === 'string' ? body.model : '';
   const cacheKey = `${configId}|${model}`;
 
-  const known = responseFormatModes.get(cacheKey);
+  const known = getCachedMode(cacheKey);
   const candidates: ResponseFormatMode[] = known
     ? known === 'none' ? ['none'] : [known, 'none']
     : ['schema', 'object', 'none'];
@@ -87,7 +112,7 @@ async function postChatCompletion(params: {
     });
 
     if (response.ok) {
-      responseFormatModes.set(cacheKey, responseFormatBody ? mode : 'none');
+      setCachedMode(cacheKey, responseFormatBody ? mode : 'none');
       return response;
     }
 
@@ -101,6 +126,8 @@ async function postChatCompletion(params: {
 
     // NB: каждый повтор — это повторная отправка промпта (для vision — с картинками),
     // поэтому рабочий режим запоминается, и следующий вызов идёт сразу в него.
+    // Но деградация ('object'/'none') кэшируется с TTL: иначе разовый сбой
+    // провайдера навсегда лишал бы нас строгой схемы до перезагрузки вкладки.
     console.warn(
       `[llm:${cacheKey}] response_format=${mode} отклонён (${response.status}) — пробую ${mode === 'schema' ? 'json_object' : 'без response_format'}`
     );
