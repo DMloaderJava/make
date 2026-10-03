@@ -59,6 +59,12 @@ export interface Project {
   introDuration: number;
   outroDuration: number;
   audioDurations?: Record<number, number>; // panelId -> duration, persisted
+  /**
+   * Снимок текста каждой панели на момент последней генерации аудио.
+   * Нужен для мягкой миграции: у аудио до v1.3.2 нет .sig-подписи, и без снимка
+   * нельзя отличить «текст не менялся» от «менялся, но файл остался старым».
+   */
+  audioTexts?: Record<number, string>;
   srt: string;
   seoPackage: SEOPackage | null;
   settings: {

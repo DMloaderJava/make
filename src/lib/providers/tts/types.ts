@@ -22,6 +22,8 @@ export interface TTSProvider {
   description: string;
   freeTier: boolean;
   languages: string[];
+  /** Модель по умолчанию — единый источник для настроек и UI (раньше хардкодилась в VoicesModal). */
+  defaultModel?: string;
   getVoices(apiKey: string): Promise<Voice[]>;
   generate(text: string, options: TTSOptions): Promise<ArrayBuffer>;
   // For server proxy

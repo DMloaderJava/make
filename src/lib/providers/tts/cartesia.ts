@@ -5,10 +5,11 @@ export const cartesiaTTS: TTSProvider = {
   name: 'Cartesia Sonic 3',
   description: 'Free tier, 40ms latency · SSM architecture',
   freeTier: true,
-  languages: ['en', 'multi'],
+  languages: ['ru', 'en', 'multi'],
+  defaultModel: 'sonic-3',
   baseUrl: 'https://api.cartesia.ai',
 
-  async generate(text: string, { voice = '79a125e8-cd45-4c13-8a67-188112f4dd22', apiKey, speed = 1.0, language = 'ru' }: TTSOptions): Promise<ArrayBuffer> {
+  async generate(text: string, { voice = '79a125e8-cd45-4c13-8a67-188112f4dd22', apiKey, speed = 1.0, language = 'ru', model }: TTSOptions): Promise<ArrayBuffer> {
     const res = await fetch('https://api.cartesia.ai/tts/bytes', {
       method: 'POST',
       headers: {
@@ -17,7 +18,7 @@ export const cartesiaTTS: TTSProvider = {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model_id: 'sonic-3',
+        model_id: model || 'sonic-3',
         transcript: text,
         voice: { mode: 'id', id: voice },
         language,

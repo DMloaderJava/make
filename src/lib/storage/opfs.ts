@@ -260,15 +260,23 @@ export async function getProjectAudioSignature(
 }
 
 /**
- * Возвращает сохранённое аудио панели, только если его подпись совпадает
- * с ожидаемой. Если .sig нет (аудио сохранено до появления подписей) —
- * считаем файл устаревшим: повторная генерация обычно попадает в общий
- * TTS-кэш (он ключуется текстом/голосом/провайдером) и стоит 0.
+ * Возвращает сохранённое аудио слота, если его подпись совпадает с ожидаемой.
+ *
+ * Мягкая миграция: если подписи ещё нет (аудио создано до v1.3.2), файл НЕ
+ * выбрасывается вслепую — решение принимает вызывающая сторона через
+ * `legacyIsFresh`. Если она подтверждает, что текст не менялся (сравнение с
+ * сохранённым таймлайном), подпись просто дописывается — пользователь не
+ * платит за повторную генерацию.
+ *
+ * @param legacyIsFresh undefined → старое аудио считается устаревшим
+ *                      (безопасно: повтор обычно попадает в общий TTS-кэш);
+ *                      true → подпись дописывается, файл переиспользуется.
  */
 export async function loadFreshProjectAudio(
   projectId: string,
   slot: ProjectAudioSlot,
-  expectedSignature: string
+  expectedSignature: string,
+  legacyIsFresh?: boolean
 ): Promise<Blob | null> {
   const blob = slot === 'intro'
     ? await loadProjectIntroAudio(projectId)
@@ -276,9 +284,19 @@ export async function loadFreshProjectAudio(
       ? await loadProjectOutroAudio(projectId)
       : await loadProjectAudio(projectId, slot);
   if (!blob) return null;
+
   const stored = await getProjectAudioSignature(projectId, slot);
-  if (!stored || stored !== expectedSignature) return null;
-  return blob;
+
+  // Подписи нет (аудио из старой версии)
+  if (!stored) {
+    if (legacyIsFresh) {
+      await saveProjectAudioSignature(projectId, slot, expectedSignature);
+      return blob;
+    }
+    return null;
+  }
+
+  return stored === expectedSignature ? blob : null;
 }
 
 export type ProjectAudioSlot = number | 'intro' | 'outro';

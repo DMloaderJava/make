@@ -69,6 +69,9 @@ export default function EditorPage() {
   const [isGeneratingAudio, setIsGeneratingAudio] = useState(false);
   const [audioProgress, setAudioProgress] = useState('');
   const [audioDone, setAudioDone] = useState(0);
+  // Число панелей в текущем прогоне: при точечной переозвучке это НЕ project.panels.length,
+  // иначе полоса показывала 2% вместо 20%.
+  const [audioTotal, setAudioTotal] = useState(0);
   const [costEstimate, setCostEstimate] = useState<{ characters: number; cost: string } | null>(null);
   const [isGeneratingIntro, setIsGeneratingIntro] = useState(false);
   const [generatingSEO, setGeneratingSEO] = useState(false);
@@ -232,6 +235,11 @@ export default function EditorPage() {
     return () => cancelAnimationFrame(raf);
   }, [isPlaying, duration]);
 
+  // Актуальный handleSave для хоткеев: эффект ниже намеренно без deps,
+  // поэтому состояние берём из ref. Ref объявлен до эффекта — читать его
+  // в рендере-тайме (и в TDZ) больше не приходится.
+  const handleSaveRef = useRef<() => Promise<void>>(async () => {});
+
   // Hotkeys with input guard
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -274,7 +282,6 @@ export default function EditorPage() {
 
   // Хоткеи живут в эффекте без deps — держим актуальный handleSave в ref,
   // иначе Ctrl+S сохраняет устаревший снимок проекта.
-  const handleSaveRef = useRef(handleSave);
   useEffect(() => {
     handleSaveRef.current = handleSave;
   }, [handleSave]);
@@ -315,7 +322,7 @@ export default function EditorPage() {
     }
     setIsGeneratingIntro(true);
     try {
-      const text = await generateIntro(project.sceneDescription || project.panels.map(p => p.dialogue).join(' '), project.characters.map(c => c.name), provider, { apiKey, model, baseUrl, temperature: 0.8 } as any);
+      const text = await generateIntro(project.sceneDescription || project.panels.map(p => p.dialogue).join(' '), project.characters.map(c => c.name), provider, { apiKey, model, baseUrl, temperature: 0.8 });
       updateProject({ intro: text });
     } catch {
       updateProject({ intro: generateFallbackIntro(project.sceneDescription || '') });
@@ -335,13 +342,29 @@ export default function EditorPage() {
     }
     setIsGeneratingIntro(true);
     try {
-      const text = await generateOutro(settings.siteName, settings.ctaType, provider, { apiKey, model, baseUrl } as any);
+      const text = await generateOutro(settings.siteName, settings.ctaType, provider, { apiKey, model, baseUrl });
       updateProject({ outro: text });
     } catch {
       updateProject({ outro: generateFallbackOutro(settings.siteName) });
     } finally {
       setIsGeneratingIntro(false);
     }
+  };
+
+  /**
+   * Снимок текстов для мягкой миграции. Панели, которые сейчас переозвучиваются,
+   * исключаем, чтобы «Переозвучить» не вернуло старый файл без подписи.
+   */
+  const targetPreviousTexts = (excludeIds?: number[]): Record<number, string> | undefined => {
+    if (!project) return undefined;
+    const snapshot = project.audioTexts;
+    if (!snapshot) return undefined;
+    if (!excludeIds?.length) return snapshot;
+    const filtered: Record<number, string> = {};
+    for (const [id, text] of Object.entries(snapshot)) {
+      if (!excludeIds.includes(Number(id))) filtered[Number(id)] = text;
+    }
+    return filtered;
   };
 
   /** Общий путь: генерация (всех панелей или только выбранных) + обновление таймлайна. */
@@ -354,7 +377,8 @@ export default function EditorPage() {
 
     setIsGeneratingAudio(true);
     setAudioDone(0);
-    setAudioProgress('0/' + panels.length);
+    setAudioTotal(panels.length || project.panels.length);
+    setAudioProgress('0/' + (panels.length || project.panels.length));
 
     try {
       const result = await generateAllAudio({
@@ -368,8 +392,13 @@ export default function EditorPage() {
         language: project.settings.ttsLanguage || 'ru',
         speed: project.settings.ttsSpeed,
         onlyPanelIds,
+        // Снимок текстов прошлой генерации: аудио без .sig используется, только
+        // если текст не менялся. Для переозвучиваемых панелей снимок не даём —
+        // иначе «Переозвучить» вернуло бы старый файл из кэша.
+        previousTexts: targetPreviousTexts(onlyPanelIds),
         onProgress: (c, t) => {
           setAudioDone(c);
+          setAudioTotal(t);
           setAudioProgress(`${c}/${t}`);
         }
       });
@@ -395,7 +424,11 @@ export default function EditorPage() {
       const srt = generateSRT(tl, project.intro, project.outro, project.introDuration, project.outroDuration);
       const obj: Record<number, number> = {};
       newDur.forEach((v, k) => obj[k] = v);
-      updateProject({ timeline: tl, srt, audioDurations: obj });
+      // Обновляем снимок текстов для всех озвученных панелей (включая старые,
+      // которые остались в кэше) — это база для следующей мягкой миграции.
+      const audioTexts: Record<number, string> = { ...(project.audioTexts || {}) };
+      for (const panel of project.panels) audioTexts[panel.id] = panel.dialogue;
+      updateProject({ timeline: tl, srt, audioDurations: obj, audioTexts });
 
       setAudioProgress('Готово! Сохранено в OPFS.');
       setTimeout(() => setAudioProgress(''), 3000);
@@ -438,7 +471,7 @@ export default function EditorPage() {
         model: model || provider.defaultModel,
         baseUrl,
         temperature: 0.7,
-      } as any);
+      });
       updateProject({ seoPackage: seo });
     } catch (e) {
       console.warn('SEO generation failed, using fallback', e);
@@ -637,7 +670,7 @@ export default function EditorPage() {
       {isGeneratingAudio && (
         <div className="h-0.5 w-full bg-[#16161A]" role="progressbar" aria-label="Озвучка">
           {/* раньше считалось от audioBlobs.size (обновлялся один раз в конце) — полоса стояла на 0% */}
-          <div className="h-full bg-[#E8B44C] transition-all duration-300" style={{ width: `${(audioDone / Math.max(1, project.panels.length)) * 100}%` }} />
+          <div className="h-full bg-[#E8B44C] transition-all duration-300" style={{ width: `${(audioDone / Math.max(1, audioTotal || project.panels.length)) * 100}%` }} />
         </div>
       )}
 

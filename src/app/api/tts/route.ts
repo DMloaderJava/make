@@ -1,5 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { pcmToWav } from '@/lib/providers/tts/wav';
+import { resolveAudioMime } from '@/lib/providers/tts/mime';
+
+/**
+ * Провайдеры, чья клиентская реализация сама ходит в /api/tts.
+ * Их НЕЛЬЗЯ отдавать в общую серверную ветку — получится запрос сервера к себе.
+ */
+const PROXY_ONLY_PROVIDERS = new Set(['polly']);
 
 export const runtime = 'nodejs';
 export const maxDuration = 60;
@@ -148,7 +155,7 @@ export async function POST(req: NextRequest) {
           return NextResponse.json({ error: `Azure TTS error: ${err}` }, { status: res.status });
         }
         const buf = await res.arrayBuffer();
-        return new NextResponse(buf, { headers: { 'Content-Type': 'audio/mpeg' } });
+        return new NextResponse(buf, { headers: { 'Content-Type': resolveAudioMime('azure', buf) } });
       }
 
       case 'google-cloud': {
@@ -168,7 +175,8 @@ export async function POST(req: NextRequest) {
         const data = await res.json();
         if (!data.audioContent) return NextResponse.json({ error: 'No audioContent' }, { status: 500 });
         const binary = Buffer.from(data.audioContent, 'base64');
-        return new NextResponse(binary, { headers: { 'Content-Type': 'audio/mpeg' } });
+        const gBuf = binary.buffer.slice(binary.byteOffset, binary.byteOffset + binary.byteLength) as ArrayBuffer;
+        return new NextResponse(gBuf, { headers: { 'Content-Type': resolveAudioMime('google-cloud', gBuf) } });
       }
 
       case 'cartesia': {
@@ -207,7 +215,7 @@ export async function POST(req: NextRequest) {
           return NextResponse.json({ error: `Deepgram error: ${err}` }, { status: res.status });
         }
         const buf = await res.arrayBuffer();
-        return new NextResponse(buf, { headers: { 'Content-Type': 'audio/mpeg' } });
+        return new NextResponse(buf, { headers: { 'Content-Type': resolveAudioMime('cartesia', buf) } });
       }
 
       case 'qwen': {
@@ -243,6 +251,9 @@ export async function POST(req: NextRequest) {
         // Раньше здесь был 400 «use client-side» → эти провайдеры падали на CORS.
         // Теперь выполняем их запрос на сервере (в Node те же fetch/atob) и
         // возвращаем аудио клиенту.
+        if (PROXY_ONLY_PROVIDERS.has(providerId)) {
+          return NextResponse.json({ error: `${providerId} must be handled by its own branch (proxy loop guard)` }, { status: 500 });
+        }
         const { TTS_PROVIDERS } = await import('@/lib/providers/tts');
         const provider = TTS_PROVIDERS.find(p => p.id === providerId);
         if (!provider) {
@@ -255,8 +266,9 @@ export async function POST(req: NextRequest) {
           speed,
           model,
         });
+        // MIME по фактической сигнатуре: провайдеры не всегда отдают запрошенный формат
         return new NextResponse(buffer, {
-          headers: { 'Content-Type': providerId === 'speechify' ? 'audio/mpeg' : 'audio/mpeg' },
+          headers: { 'Content-Type': resolveAudioMime(providerId, buffer) },
         });
       }
 
@@ -273,6 +285,6 @@ export async function GET() {
   return NextResponse.json({
     status: 'TTS proxy ready',
     providers: ['elevenlabs', 'openai', 'gemini', 'polly', 'azure', 'google-cloud', 'cartesia', 'deepgram', 'qwen', 'playht', 'resemble', 'murf', 'fish', 'hume', 'speechify'],
-    note: 'PCM-провайдеры (gemini) оборачиваются в WAV на сервере'
+    note: 'Gemini (raw PCM) оборачивается в WAV; Content-Type остальных определяется по сигнатуре полученного аудио'
   });
 }

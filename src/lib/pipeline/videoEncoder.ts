@@ -7,7 +7,7 @@
 
 import { SyncTimeline } from '../storage/db';
 import { getKenBurnsParams } from './buildTimeline';
-import { mixAudioPlacements, type AudioPlacement } from './audioMix';
+import { appendPlacements, type AudioPlacement } from './audioMix';
 
 export interface RenderOptions {
   images: string[]; // data URLs
@@ -230,6 +230,8 @@ export class WebCodecsBackend implements RenderBackend {
 
     // Audio: раскладываем фрагменты по таймлайну (рересемплинг + паузы между панелями).
     // Если размещения не передали (старые вызовы) — склеиваем подряд, как раньше.
+    // mediabunny принимает буферы последовательно, поэтому паузы добиваются тишиной,
+    // а не предварительным «гигантским» миксом (10 мин стерео 44.1 кГц ≈ 212 МБ).
     let audioSource: any = null;
     let mixedDuration: number | null = null;
     if (options.audioPlacements?.length || options.audioBlobs.length > 0) {
@@ -240,15 +242,16 @@ export class WebCodecsBackend implements RenderBackend {
             blob,
           }));
 
-      const mixed = await mixAudioPlacements(placements, timelineDuration, { sampleRate: 44100, channels: 2 });
-      if (mixed) {
-        mixedDuration = mixed.duration;
-        audioSource = new AudioBufferSource({
-          codec: 'aac',
-          bitrate: 128000,
-        });
-        output.addAudioTrack(audioSource);
-        await audioSource.add(mixed.buffer);
+      audioSource = new AudioBufferSource({
+        codec: 'aac',
+        bitrate: 128000,
+      });
+      output.addAudioTrack(audioSource);
+      const appended = await appendPlacements(audioSource, placements, { sampleRate: 44100, channels: 2 });
+      if (appended.duration > 0) {
+        mixedDuration = appended.duration;
+      } else {
+        audioSource = null;
       }
     }
 

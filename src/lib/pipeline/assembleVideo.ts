@@ -7,7 +7,7 @@
 
 import { SyncTimeline } from '../storage/db';
 import { getKenBurnsParams } from './buildTimeline';
-import { mixAudioPlacements, type AudioPlacement } from './audioMix';
+import { schedulePlacements, type AudioPlacement } from './audioMix';
 
 export interface AssembleOptions {
   images: string[]; // data URLs
@@ -73,31 +73,46 @@ export async function assembleVideoWithCanvas(
       }));
 
   let audioContext: AudioContext | null = null;
-  let audioBufferSource: AudioBufferSourceNode | null = null;
   let audioDestination: MediaStreamAudioDestinationNode | null = null;
-  let mixedAudio: Awaited<ReturnType<typeof mixAudioPlacements>> = null;
+  let audioStartedAt: number | null = null;
+  const leadIn = placements.length > 0 ? 0.25 : 0;
 
   if (placements.length > 0) {
     try {
-      mixedAudio = await mixAudioPlacements(placements, timelineDuration, { sampleRate: 44100, channels: 2 });
-    } catch (e) {
-      console.warn('Не удалось смикшировать аудио, экспортирую без звука', e);
-    }
-    if (mixedAudio) {
-      timelineDuration = Math.max(timelineDuration, mixedAudio.duration);
-      try {
-        audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-        audioDestination = audioContext.createMediaStreamDestination();
-        audioBufferSource = audioContext.createBufferSource();
-        audioBufferSource.buffer = mixedAudio.buffer;
-        audioBufferSource.connect(audioDestination);
-      } catch (e) {
-        console.warn('Web Audio недоступен, экспорт без звука', e);
+      audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      audioDestination = audioContext.createMediaStreamDestination();
+      // Фрагменты планируются в графе по одному — гигантского микса в память нет,
+      // источники обрезаются по длительности (перекрытия не тянут звук вправо).
+      const scheduled = await schedulePlacements(audioContext, audioDestination, placements, {
+        sampleRate: 44100,
+        channels: 2,
+        startAt: audioContext.currentTime + leadIn,
+      });
+      if (scheduled.scheduled > 0) {
+        audioStartedAt = scheduled.startedAt;
+        timelineDuration = Math.max(timelineDuration, scheduled.duration);
+      } else {
         audioContext = null;
         audioDestination = null;
       }
+    } catch (e) {
+      console.warn('Web Audio недоступен, экспорт без звука', e);
+      audioContext = null;
+      audioDestination = null;
     }
   }
+
+  /**
+   * Мастер-клок: часы AudioContext. Раньше кадры велись по performance.now(),
+   * а звук стартовал позже (planning latency, decode) — и к концу ролика
+   * картинка и звук разъезжались на секунды. Теперь видео следует за звуком.
+   */
+  const mediaClock = (fallbackStart: number): number => {
+    if (audioContext && audioStartedAt !== null) {
+      return Math.max(0, audioContext.currentTime - audioStartedAt);
+    }
+    return Math.max(0, (performance.now() - fallbackStart) / 1000);
+  };
 
   const videoStream = canvas.captureStream(fps);
   const stream = audioDestination
@@ -119,7 +134,6 @@ export async function assembleVideoWithCanvas(
     const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 5000000 });
     recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
     recorder.onstop = () => {
-      try { audioBufferSource?.stop(); } catch {}
       try { audioContext?.close(); } catch {}
       resolve(new Blob(chunks, { type: mimeType || 'video/webm' }));
     };
@@ -129,13 +143,7 @@ export async function assembleVideoWithCanvas(
     };
     recorder.start(100);
 
-    // Небольшая задержка, чтобы рекордер и аудио стартовали вместе
-    const leadIn = audioBufferSource ? 0.25 : 0;
-    const startedAt = performance.now() + leadIn * 1000;
-    if (audioBufferSource && audioContext) {
-      try { audioBufferSource.start(audioContext.currentTime + leadIn); } catch {}
-    }
-
+    const fallbackStart = performance.now();
     let frameCount = 0;
 
     const renderFrame = (time: number) => {
@@ -148,10 +156,10 @@ export async function assembleVideoWithCanvas(
       // NB: полоса прогресса больше не рисуется — она попадала в готовое видео
     };
 
-    // MediaRecorder пишет в реальном времени, поэтому кадры ведём по стенным часам,
-    // а не «наращиванием времени на 1/fps» (иначе при медленном рендере A/V разъезжались).
+    // MediaRecorder пишет в реальном времени: кадры ведём по мастер-клоку
+    // (AudioContext, если есть звук), а не «наращиванием 1/fps».
     const animate = () => {
-      const time = (performance.now() - startedAt) / 1000;
+      const time = mediaClock(fallbackStart) - leadIn;
       if (time >= totalDuration) { renderFrame(totalDuration); recorder.stop(); return; }
       if (time >= 0) renderFrame(time);
       frameCount++;

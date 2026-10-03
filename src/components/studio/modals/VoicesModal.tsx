@@ -21,16 +21,10 @@ interface VoicesModalProps {
   onSettingsChange?: (settings: Partial<Project['settings']>) => void;
 }
 
-const TTS_MODEL_HINTS: Record<string, string> = {
-  elevenlabs: 'eleven_multilingual_v2',
-  openai: 'tts-1-hd',
-  gemini: 'gemini-2.5-flash-preview-tts',
-  cartesia: 'sonic-3',
-  qwen: 'qwen3-tts-flash',
-  azure: '',
-  polly: '',
-  'google-cloud': '',
-};
+/** Подсказка по модели — из каталога провайдеров, без второй карты хардкодов. */
+function defaultModelFor(providerId: string): string {
+  return getTTSProvider(providerId)?.defaultModel || '';
+}
 
 export function VoicesModal({ open, onClose, characters, assignments, onChange, onCharactersChange, onPanelsRename, settings, onSettingsChange }: VoicesModalProps) {
   const [voicesByProvider, setVoicesByProvider] = useState<Record<string, Voice[]>>({});
@@ -78,8 +72,8 @@ export function VoicesModal({ open, onClose, characters, assignments, onChange, 
       onChange({});
     }
     setSelectedProvider(nextProvider);
-    setModel(settings?.ttsModel && nextProvider === selectedProvider ? settings.ttsModel : (TTS_MODEL_HINTS[nextProvider] || ''));
-    onSettingsChange?.({ ttsProvider: nextProvider, ttsModel: TTS_MODEL_HINTS[nextProvider] || '', ttsLanguage: language });
+    setModel(settings?.ttsModel && nextProvider === selectedProvider ? settings.ttsModel : (defaultModelFor(nextProvider)));
+    onSettingsChange?.({ ttsProvider: nextProvider, ttsModel: defaultModelFor(nextProvider), ttsLanguage: language });
   };
 
   const handleMerge = () => {
@@ -195,7 +189,7 @@ export function VoicesModal({ open, onClose, characters, assignments, onChange, 
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
                 onBlur={() => onSettingsChange?.({ ttsModel: model.trim() })}
-                placeholder={TTS_MODEL_HINTS[selectedProvider] || 'по умолчанию'}
+                placeholder={defaultModelFor(selectedProvider) || 'по умолчанию'}
                 className="w-full h-8 rounded-[6px] bg-[#0B0B0C] border border-[#26262C] px-2 text-[11px] text-[#F5F5F7] placeholder:text-[#8A8A93]/50"
               />
             </div>

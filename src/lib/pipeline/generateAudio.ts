@@ -12,6 +12,7 @@
 
 import { getTTSProvider, TTS_PROVIDERS } from '../providers/tts';
 import { generateTTS, mimeTypeForProvider } from '../providers/tts/router';
+import { resolveAudioMime } from '../providers/tts/mime';
 import { resolveVoice } from '../providers/tts/voice-resolver';
 import { getAllKeys } from '../storage/local';
 import {
@@ -47,6 +48,12 @@ export interface AudioGenerationOptions {
   onlyPanelIds?: number[];
   /** Перегенерировать intro/outro (по умолчанию они берутся из кэша). */
   regenerateIntroOutro?: boolean;
+  /**
+   * Тексты панелей из сохранённого таймлайна (panelId → text).
+   * Нужны для мягкой миграции аудио без подписи: если текст совпадает,
+   * файл считается актуальным и не перегенерируется.
+   */
+  previousTexts?: Record<number, string>;
 }
 
 export interface AudioGenerationResult {
@@ -91,6 +98,24 @@ export async function buildAudioSignature(params: {
   );
 }
 
+/**
+ * Актуально ли старое аудио без подписи: сравниваем текст панели с текстом
+ * из сохранённого таймлайна (он фиксировался в момент генерации).
+ */
+export function legacyAudioIsFresh(
+  previousTexts: Record<number, string> | undefined,
+  panelId: number,
+  currentText: string
+): boolean {
+  // Снимка нет (первый запуск после обновления) — доверяем существующему файлу,
+  // а не переозвучиваем весь проект: снимок будет записан этим же прогоном.
+  if (!previousTexts) return true;
+  const prev = previousTexts[panelId];
+  // Панели в снимке нет — файл появился раньше панели: используем как есть.
+  if (typeof prev !== 'string') return true;
+  return prev === currentText;
+}
+
 export async function generateAllAudio(options: AudioGenerationOptions): Promise<AudioGenerationResult> {
   const keys = getAllKeys();
   const ttsProvider = getTTSProvider(options.ttsProviderId);
@@ -101,6 +126,7 @@ export async function generateAllAudio(options: AudioGenerationOptions): Promise
   if (!apiKey) throw new Error(`No API key for ${options.ttsProviderId}. Add in settings.`);
 
   const language = options.language || 'ru';
+  // базовый MIME на случай, если не получится определить по сигнатуре
   const mimeType = mimeTypeForProvider(options.ttsProviderId);
 
   // Панели, которые реально надо переозвучить
@@ -117,8 +143,24 @@ export async function generateAllAudio(options: AudioGenerationOptions): Promise
   let introAudio: Blob | null = null;
   let outroAudio: Blob | null = null;
 
+  // Резолв голоса — один раз на прогон (иначе для 50 панелей будет 50 запросов
+  // getVoices() к провайдеру, а это ещё и биллинг у части API).
+  const voiceCache = new Map<string, string>();
+  const resolveVoiceCached = async (
+    providerId: string,
+    key: string,
+    explicit?: string
+  ): Promise<string> => {
+    const cacheKey = `${providerId}|${explicit || '__default__'}`;
+    const hit = voiceCache.get(cacheKey);
+    if (hit) return hit;
+    const resolved = await resolveVoice(providerId, key, explicit);
+    voiceCache.set(cacheKey, resolved);
+    return resolved;
+  };
+
   // Голос по умолчанию — от самого провайдера (не хардкод 'Puck')
-  const introVoice = await resolveVoice(
+  const introVoice = await resolveVoiceCached(
     options.ttsProviderId,
     apiKey,
     Object.values(options.voiceAssignments).find(v => !!v)
@@ -184,8 +226,7 @@ export async function generateAllAudio(options: AudioGenerationOptions): Promise
     queue.add({
       id: `panel-${panel.id}`,
       fn: async () => {
-        // 1. Общий TTS-кэш по тексту/голосу/провайдеру
-        const voiceId = await resolveVoice(options.ttsProviderId, apiKey, explicitVoice);
+        const voiceId = await resolveVoiceCached(options.ttsProviderId, apiKey, explicitVoice);
         const signature = await buildAudioSignature({
           text: panel.dialogue,
           voice: voiceId,
@@ -195,8 +236,14 @@ export async function generateAllAudio(options: AudioGenerationOptions): Promise
           language,
         });
 
-        // 2. Аудио проекта — только если подпись совпадает (иначе текст/голос менялись)
-        const persisted = await loadFreshProjectAudio(options.projectId, panel.id, signature);
+        // 2. Аудио проекта — только если подпись совпадает (иначе текст/голос менялись).
+        //    Для аудио без подписи (до v1.3.2) сверяемся с текстом из таймлайна.
+        const persisted = await loadFreshProjectAudio(
+          options.projectId,
+          panel.id,
+          signature,
+          legacyAudioIsFresh(options.previousTexts, panel.id, panel.dialogue)
+        );
         if (persisted) {
           const duration = await getAudioDuration(persisted);
           return { blob: persisted, duration };
@@ -229,7 +276,7 @@ export async function generateAllAudio(options: AudioGenerationOptions): Promise
           language,
         });
 
-        const blob = new Blob([buffer], { type: mimeType });
+        const blob = new Blob([buffer], { type: resolveAudioMime(options.ttsProviderId, buffer) });
         const duration = await getAudioDuration(blob);
 
         await saveTTSCache(cacheKey, blob);
@@ -244,7 +291,7 @@ export async function generateAllAudio(options: AudioGenerationOptions): Promise
           const fallbackKey = keys[fallbackProvider.id];
           if (!fallbackKey) throw new Error(`No key for fallback ${fallbackProvider.id}`);
 
-          const voice = await resolveVoice(fallbackProvider.id, fallbackKey);
+          const voice = await resolveVoiceCached(fallbackProvider.id, fallbackKey);
 
           const { buffer } = await generateTTS({
             providerId: fallbackProvider.id,
@@ -254,7 +301,7 @@ export async function generateAllAudio(options: AudioGenerationOptions): Promise
             language,
           });
 
-          const blob = new Blob([buffer], { type: mimeTypeForProvider(fallbackProvider.id) });
+          const blob = new Blob([buffer], { type: resolveAudioMime(fallbackProvider.id, buffer) });
           const duration = await getAudioDuration(blob);
 
           await saveProjectAudio(options.projectId, panel.id, blob);
@@ -289,7 +336,7 @@ export async function generateAllAudio(options: AudioGenerationOptions): Promise
         model: options.model,
         language,
       });
-      introAudio = new Blob([buffer], { type: mimeType });
+      introAudio = new Blob([buffer], { type: resolveAudioMime(options.ttsProviderId, buffer) });
       const cacheKey = await getTTSCacheKey({
         text: options.intro,
         voice: introVoice,
@@ -325,7 +372,7 @@ export async function generateAllAudio(options: AudioGenerationOptions): Promise
         model: options.model,
         language,
       });
-      outroAudio = new Blob([buffer], { type: mimeType });
+      outroAudio = new Blob([buffer], { type: resolveAudioMime(options.ttsProviderId, buffer) });
       const cacheKey = await getTTSCacheKey({
         text: options.outro,
         voice: introVoice,

@@ -6,14 +6,17 @@ import { LLMProvider, LLMOptions, Message, ResponseFormatSchema } from './types'
  */
 const JSON_OBJECT_ONLY_PROVIDERS = new Set(['custom', 'cloudflare', 'deepinfra', 'novita', 'siliconflow', 'zhipu', 'moonshot', '01ai', 'huggingface', 'cohere']);
 
+export type ResponseFormatMode = 'schema' | 'object' | 'none';
+
 /** Собирает response_format для OpenAI-совместимого тела запроса. */
 export function buildResponseFormat(
   providerId: string,
-  responseFormat?: ResponseFormatSchema
+  responseFormat?: ResponseFormatSchema,
+  mode: ResponseFormatMode = 'schema'
 ): Record<string, unknown> | undefined {
-  if (!responseFormat) return undefined;
+  if (!responseFormat || mode === 'none') return undefined;
 
-  if (JSON_OBJECT_ONLY_PROVIDERS.has(providerId)) {
+  if (mode === 'object' || JSON_OBJECT_ONLY_PROVIDERS.has(providerId)) {
     return { type: 'json_object' };
   }
 
@@ -25,6 +28,77 @@ export function buildResponseFormat(
       strict: responseFormat.strict ?? false,
     },
   };
+}
+
+/**
+ * Провайдер мог не переварить json_schema, хотя формально она «OpenAI-совместима»:
+ * тогда 400 прилетает именно на response_format. Запоминаем рабочий режим,
+ * чтобы не платить тремя запросами за каждый вызов, и деградируем мягко.
+ */
+const responseFormatModes = new Map<string, ResponseFormatMode>();
+
+function looksLikeFormatRejection(status: number, body: string): boolean {
+  if (status !== 400 && status !== 422) return false;
+  const text = body.toLowerCase();
+  return text.includes('response_format') || text.includes('json_schema') || text.includes('response format');
+}
+
+/**
+ * POST на /chat/completions с деградацией response_format:
+ * json_schema → json_object → без него. Ошибки не по формату пробрасываются как есть.
+ */
+async function postChatCompletion(params: {
+  configId: string;
+  name: string;
+  url: string;
+  apiKey: string;
+  body: Record<string, unknown>;
+  responseFormat?: ResponseFormatSchema;
+  label?: string;
+}): Promise<Response> {
+  const { configId, name, url, apiKey, body, responseFormat, label = '' } = params;
+
+  const known = responseFormatModes.get(configId);
+  const candidates: ResponseFormatMode[] = known
+    ? known === 'none' ? ['none'] : [known, 'none']
+    : ['schema', 'object', 'none'];
+
+  let lastError = '';
+  let lastStatus = 0;
+
+  for (const mode of candidates) {
+    const responseFormatBody = buildResponseFormat(configId, responseFormat, mode);
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ...body,
+        ...(responseFormatBody ? { response_format: responseFormatBody } : {}),
+      }),
+    });
+
+    if (response.ok) {
+      responseFormatModes.set(configId, responseFormatBody ? mode : 'none');
+      return response;
+    }
+
+    const errText = await response.text();
+    lastError = errText;
+    lastStatus = response.status;
+
+    if (!looksLikeFormatRejection(response.status, errText) || mode === 'none') {
+      throw new Error(`${name}${label} error: ${response.status} — ${errText.slice(0, 500)}`);
+    }
+
+    console.warn(
+      `[llm:${configId}] response_format=${mode} отклонён (${response.status}) — пробую ${mode === 'schema' ? 'json_object' : 'без response_format'}`
+    );
+  }
+
+  throw new Error(`${name}${label} error: ${lastStatus} — ${lastError.slice(0, 500)}`);
 }
 
 export function createOpenAICompatibleProvider(config: {
@@ -96,27 +170,19 @@ export function createOpenAICompatibleProvider(config: {
         return data.content || '';
       }
 
-      const response = await fetch(`${baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${options.apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
+      const response = await postChatCompletion({
+        configId: config.id,
+        name: config.name,
+        url: `${baseUrl}/chat/completions`,
+        apiKey: options.apiKey,
+        body: {
           model,
           messages: openAIMessages,
           temperature: options.temperature ?? 0.7,
           max_tokens: options.maxTokens ?? 4000,
-          ...(buildResponseFormat(config.id, options.responseFormat)
-            ? { response_format: buildResponseFormat(config.id, options.responseFormat) }
-            : {}),
-        })
+        },
+        responseFormat: options.responseFormat,
       });
-
-      if (!response.ok) {
-        const err = await response.text();
-        throw new Error(`${config.name} error: ${response.status} — ${err.slice(0, 500)}`);
-      }
 
       const data = await response.json();
       return data.choices?.[0]?.message?.content || '';
@@ -169,27 +235,20 @@ export function createOpenAICompatibleProvider(config: {
         return data.content || '';
       }
 
-      const response = await fetch(`${baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${options.apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
+      const response = await postChatCompletion({
+        configId: config.id,
+        name: config.name,
+        url: `${baseUrl}/chat/completions`,
+        apiKey: options.apiKey,
+        body: {
           model,
           messages,
           temperature: 0.2,
           max_tokens: options.maxTokens ?? 4000,
-          ...(buildResponseFormat(config.id, options.responseFormat)
-            ? { response_format: buildResponseFormat(config.id, options.responseFormat) }
-            : {}),
-        })
+        },
+        responseFormat: options.responseFormat,
+        label: ' vision',
       });
-
-      if (!response.ok) {
-        const err = await response.text();
-        throw new Error(`${config.name} vision error: ${response.status} — ${err.slice(0, 500)}`);
-      }
 
       const data = await response.json();
       return data.choices?.[0]?.message?.content || '';

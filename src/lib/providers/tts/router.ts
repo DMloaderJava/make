@@ -11,6 +11,7 @@
 
 import { CORS_BLOCKED_PROVIDERS } from './cors';
 import { getTTSProvider } from './catalog';
+import { resolveAudioMime } from './mime';
 
 export interface GenerateTTSRequest {
   providerId: string;
@@ -35,15 +36,15 @@ export function mustUseProxy(providerId: string): boolean {
   return ['playht', 'resemble', 'murf', 'fish', 'hume', 'speechify', 'polly'].includes(providerId);
 }
 
-/** MIME по провайдеру: WAV только там, где мы реально вернули WAV. */
+/**
+ * MIME по провайдеру. Реальный тип контейнера может отличаться от ожидаемого,
+ * поэтому для уже полученных байтов используйте resolveAudioMime(providerId, buffer).
+ */
 export function mimeTypeForProvider(providerId: string): string {
-  if (providerId === 'gemini') return 'audio/wav';
-  return 'audio/mpeg';
+  return resolveAudioMime(providerId, new ArrayBuffer(0));
 }
 
 export async function generateTTS(req: GenerateTTSRequest): Promise<GenerateTTSResult> {
-  const mimeType = mimeTypeForProvider(req.providerId);
-
   if (mustUseProxy(req.providerId)) {
     const res = await fetch('/api/tts', {
       method: 'POST',
@@ -64,9 +65,9 @@ export async function generateTTS(req: GenerateTTSRequest): Promise<GenerateTTSR
       throw new Error(`${req.providerId} proxy error: ${res.status} — ${err.slice(0, 500)}`);
     }
 
-    const contentType = res.headers.get('content-type') || '';
     const buffer = await res.arrayBuffer();
-    return { buffer, mimeType: contentType.startsWith('audio/') ? contentType.split(';')[0] : mimeType };
+    // Сигнатура важнее заголовка: провайдеры отдают не то, что просили
+    return { buffer, mimeType: resolveAudioMime(req.providerId, buffer) };
   }
 
   const provider = getTTSProvider(req.providerId);
@@ -80,5 +81,5 @@ export async function generateTTS(req: GenerateTTSRequest): Promise<GenerateTTSR
     model: req.model,
   });
 
-  return { buffer, mimeType };
+  return { buffer, mimeType: resolveAudioMime(req.providerId, buffer) };
 }

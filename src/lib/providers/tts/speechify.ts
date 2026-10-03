@@ -5,10 +5,11 @@ export const speechifyTTS: TTSProvider = {
   name: 'Speechify',
   description: '1000+ голосов, celebrity voices, Simba 3.2, 60+ языков',
   freeTier: false,
+  defaultModel: 'simba-base',
   languages: ['ru', 'en', 'multi'],
   baseUrl: 'https://api.sws.speechify.com',
 
-  async generate(text: string, { voice = 'matthew', apiKey, speed = 1.0, language = 'ru-RU' }: TTSOptions): Promise<ArrayBuffer> {
+  async generate(text: string, { voice = 'matthew', apiKey, speed = 1.0, language = 'ru-RU', model }: TTSOptions): Promise<ArrayBuffer> {
     // Speechify API - simplified
     const response = await fetch('https://api.sws.speechify.com/v1/audio/speech', {
       method: 'POST',
@@ -21,7 +22,7 @@ export const speechifyTTS: TTSProvider = {
         voice_id: voice,
         audio_format: 'mp3',
         language: language,
-        model: 'simba-base',
+        model: model || 'simba-base',
       })
     });
 

@@ -8,13 +8,14 @@ export const geminiTTS: TTSProvider = {
   description: '200+ голосов, отличный русский, free quota',
   freeTier: true,
   languages: ['ru', 'en', 'multi'],
+  defaultModel: 'gemini-2.5-flash-preview-tts',
   baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
 
-  async generate(text: string, { voice = 'Puck', apiKey, speed = 1.0 }: TTSOptions): Promise<ArrayBuffer> {
+  async generate(text: string, { voice = 'Puck', apiKey, speed = 1.0, model: requestedModel }: TTSOptions): Promise<ArrayBuffer> {
     // Client-side direct call (will be proxied via /api/tts for CORS)
     // Model list: gemini-2.5-flash-preview-tts, gemini-2.5-pro-preview-tts, gemini-2.0-flash-exp etc
     // Use gemini-2.5-flash-preview-tts as recommended
-    const model = 'gemini-2.5-flash-preview-tts';
+    const model = requestedModel || 'gemini-2.5-flash-preview-tts';
     const response = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
       {

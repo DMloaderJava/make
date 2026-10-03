@@ -27,9 +27,10 @@ function timingSafeEqualStr(a: string, b: string): boolean {
 }
 
 function secureCookie(): boolean {
-  if (process.env.MVS_SECURE_COOKIE === '0') return false;
-  if (process.env.MVS_SECURE_COOKIE === '1') return true;
-  return process.env.NODE_ENV === 'production';
+  // По умолчанию Secure ВЫКЛЮЧЕН: типовой self-host работает по http, и с
+  // автоматическим Secure из production-сборки войти было невозможно.
+  // За обратным прокси с TLS включайте явно: MVS_SECURE_COOKIE=1.
+  return process.env.MVS_SECURE_COOKIE === '1';
 }
 
 function withAuthCookie(res: NextResponse, token: string): NextResponse {
