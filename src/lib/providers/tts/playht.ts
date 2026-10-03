@@ -6,6 +6,8 @@ export const playhtTTS: TTSProvider = {
   description: 'Free tier · 900+ голосов, клонирование',
   freeTier: true,
   languages: ['ru', 'en', 'multi'],
+  // Не проверено вживую: эндпоинт/поля взяты из документации (см. npm run smoke:tts).
+  experimental: true,
   baseUrl: 'https://api.play.ht',
 
   async generate(text: string, { voice = 's3://voice-cloning-zero-shot/d9ff78ba-d016-47f6-b0ef-dd630f59414e/female-cs/manifest.json', apiKey }: TTSOptions): Promise<ArrayBuffer> {

@@ -8,7 +8,15 @@
  * таблицу по провайдеру, и только в последнюю очередь — на 'audio/mpeg'.
  */
 
-export type AudioMimeType = 'audio/wav' | 'audio/mpeg' | 'audio/ogg' | 'audio/flac' | 'audio/webm' | 'audio/mp4' | 'application/octet-stream';
+export type AudioMimeType =
+  | 'audio/wav'
+  | 'audio/mpeg'
+  | 'audio/ogg'
+  | 'audio/flac'
+  | 'audio/aac'
+  | 'audio/webm'
+  | 'audio/mp4'
+  | 'application/octet-stream';
 
 /** Что провайдер отдаёт в норме (когда сигнатуру распознать не удалось). */
 const PROVIDER_MIME: Record<string, AudioMimeType> = {
@@ -51,13 +59,16 @@ export function detectAudioMime(buffer: ArrayBuffer): AudioMimeType | null {
   if (ascii(buffer, 0, 3) === 'ID3') return 'audio/mpeg';
 
   const bytes = new Uint8Array(buffer, 0, 2);
+
+  // ADTS AAC проверяем ДО общего MPEG frame sync: синхро-слово ADTS (0xFFF)
+  // удовлетворяет и широкому условию (b1 & 0xE0) === 0xE0, поэтому при обратном
+  // порядке эта ветка была недостижима и сырой AAC подписывался как mp3.
+  if (bytes[0] === 0xff && (bytes[1] & 0xf6) === 0xf0) return 'audio/aac';
   // MPEG frame sync (mp3 без ID3)
   if (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0) return 'audio/mpeg';
 
   if (ascii(buffer, 4, 4) === 'ftyp') return 'audio/mp4';
   if (bytes[0] === 0x1a && bytes[1] === 0x45) return 'audio/webm'; // EBML
-  // ADTS AAC
-  if (bytes[0] === 0xff && (bytes[1] & 0xf6) === 0xf0) return 'audio/mp4';
 
   return null;
 }

@@ -141,7 +141,7 @@ export function ContextPanel({ selected, onUpdatePanel, onUpdateIntro, onUpdateO
               size="sm"
               onClick={() => onRegeneratePanel(panel.id)}
               disabled={regenerating}
-              title="Удалить кэш аудио панели и озвучить заново (текст/голос будут применены)"
+              title="Синтезировать заново, игнорируя кэши (OPFS и общий TTS-кэш)"
               className="h-7 text-[11px] bg-[#0B0B0C] border-[#26262C] hover:bg-[#1E1E23]"
             >
               ↻ Переозвучить

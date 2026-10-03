@@ -42,9 +42,15 @@ export function mimeTypeForProvider(providerId: string): string {
  * поэтому падаем сразу и громко, а не после таймаута.
  */
 export function assertClientContext(): void {
-  if (typeof window === 'undefined') {
+  // NEXT_RUNTIME выставляется Next.js и однозначно говорит, что мы на сервере
+  // (nodejs/edge). Проверка на отсутствие window — запасной вариант для
+  // не-Next окружений: на серверном рендере клиентского компонента window тоже
+  // нет, но generateTTS из рендера не вызывается, только из обработчиков.
+  const runtime = typeof process !== 'undefined' ? process.env?.NEXT_RUNTIME : undefined;
+  const isServer = runtime === 'nodejs' || runtime === 'edge' || typeof window === 'undefined';
+  if (isServer) {
     throw new Error(
-      'generateTTS() — клиентский путь. На сервере используйте getServerGenerate(provider) или serverGenerate у провайдера.'
+      'generateTTS() — клиентский путь (обращается к /api/tts). На сервере используйте getServerGenerate(provider) или serverGenerate у провайдера.'
     );
   }
 }

@@ -1,37 +1,58 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
 import { TTS_PROVIDERS, getServerGenerate } from '../src/lib/providers/tts/catalog';
 import { mustUseProxy } from '../src/lib/providers/tts/cors';
 import { generateTTS, assertClientContext } from '../src/lib/providers/tts/router';
 
-const TTS_DIR = join(process.cwd(), 'src/lib/providers/tts');
-
 /**
  * Структурная защита от рекурсии «сервер → /api/tts → сервер».
  *
- * Проверяем не список известных провайдеров, а сам факт: если клиентская
- * реализация обращается к /api/tts, провайдер обязан быть помечен
- * `proxyClientSide: true` — тогда сервер откажется её вызывать.
+ * Проверяем поведением, а не поиском подстроки в исходнике: подменяем fetch на
+ * «отравленный» (любой поход в /api/tts — это рекурсия) и вызываем серверный
+ * путь каждого провайдера. Провайдер либо обязан отказаться от серверного
+ * вызова (getServerGenerate → null), либо упасть на сетевой заглушке, но не
+ * сходить в собственный API.
  */
-test('провайдер, чья generate() ходит в /api/tts, обязан иметь proxyClientSide: true', () => {
-  const offenders: string[] = [];
+test('серверный путь провайдеров не уходит в /api/tts (проверка поведением)', async () => {
+  const originalFetch = globalThis.fetch;
+  const recursionCalls: string[] = [];
+  const poisoned: typeof fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes('/api/tts')) {
+      recursionCalls.push(url);
+      throw new Error('RECURSION: серверный путь обратился к /api/tts');
+    }
+    // Сеть в тестах недоступна — для нас важно лишь, куда именно пошёл вызов.
+    throw new Error(`network disabled in test: ${url}`);
+  }) as typeof fetch;
 
-  for (const file of readdirSync(TTS_DIR).filter(f => f.endsWith('.ts'))) {
-    const source = readFileSync(join(TTS_DIR, file), 'utf8');
-    // Интересуют только модули-провайдеры, а не router/catalog/mime.
-    if (!/:\s*TTSProvider\s*=/.test(source)) continue;
-    const callsProxy = /fetch\(\s*['"`]\/api\/tts['"`]/.test(source);
-    if (!callsProxy) continue;
-    if (!/proxyClientSide\s*:\s*true/.test(source)) offenders.push(file);
+  globalThis.fetch = poisoned;
+  try {
+    for (const provider of TTS_PROVIDERS) {
+      const serverGenerate = getServerGenerate(provider);
+      if (!serverGenerate) continue; // серверная ветка запрещена — это и есть защита
+      await assert.rejects(
+        () => serverGenerate('тест', { apiKey: 'dummy', voice: '' }),
+        (error: Error) => {
+          assert.doesNotMatch(error.message, /RECURSION/, `${provider.id} зациклится на сервере`);
+          return true;
+        },
+        `${provider.id}: серверный путь должен либо отсутствовать, либо не ходить в /api/tts`
+      );
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 
-  assert.deepEqual(
-    offenders,
-    [],
-    `Эти файлы зовут /api/tts, но не помечены proxyClientSide — сервер может зациклиться: ${offenders.join(', ')}`
-  );
+  assert.deepEqual(recursionCalls, [], 'ни один провайдер не должен звать /api/tts с сервера');
+});
+
+test('proxyClientSide-провайдеры не имеют серверного пути вообще', () => {
+  const proxied = TTS_PROVIDERS.filter(p => p.proxyClientSide);
+  assert.ok(proxied.length > 0, 'есть провайдеры, которые ходят через прокси с клиента');
+  for (const provider of proxied) {
+    assert.equal(getServerGenerate(provider), null, `${provider.id}: серверу нельзя звать клиентскую generate()`);
+  }
 });
 
 test('провайдеры, обязанные идти через прокси, имеют безопасный серверный путь', () => {

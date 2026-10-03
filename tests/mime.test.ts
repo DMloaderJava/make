@@ -21,6 +21,17 @@ test('detectAudioMime: WAV / OGG / FLAC / MP3(ID3) / MP3(sync) / M4A / WebM', ()
   assert.equal(detectAudioMime(bytes(0x1a, 0x45, 0xdf, 0xa3)), 'audio/webm'); // EBML
 });
 
+test('detectAudioMime: ADTS AAC не путается с MP3 (порядок проверок)', () => {
+  // 0xFF 0xF1 — синхро-слово ADTS (MPEG-4 AAC, без CRC)
+  assert.equal(detectAudioMime(bytes(0xff, 0xf1, 0x50, 0x80)), 'audio/aac');
+  // 0xFF 0xF9 — ADTS MPEG-2
+  assert.equal(detectAudioMime(bytes(0xff, 0xf9, 0x50, 0x80)), 'audio/aac');
+  // 0xFF 0xFB — настоящий MP3 (MPEG-1 Layer III), не ADTS
+  assert.equal(detectAudioMime(bytes(0xff, 0xfb, 0x90, 0x00)), 'audio/mpeg');
+  // 0xFF 0xF3 — MPEG-2 Layer III
+  assert.equal(detectAudioMime(bytes(0xff, 0xf3, 0x90, 0x00)), 'audio/mpeg');
+});
+
 test('detectAudioMime: неизвестный контейнер → null, короткий буфер → null', () => {
   assert.equal(detectAudioMime(bytes(0x00, 0x01, 0x02, 0x03)), null);
   assert.equal(detectAudioMime(new ArrayBuffer(8)), null);

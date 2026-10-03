@@ -8,7 +8,7 @@
 import { SyncTimeline } from '../storage/db';
 import { getKenBurnsParams } from './buildTimeline';
 import { createPlacementScheduler, userFacingOverlaps, type AudioPlacement, type PlacementScheduler } from './audioMix';
-import { frameTime, startDelayMs } from './renderClock';
+import { frameTime, waitForStart } from './renderClock';
 import { createStripSceneFromMedia, type StripScene } from './mangaStrip';
 
 export interface AssembleOptions {
@@ -157,6 +157,9 @@ export async function assembleVideoWithCanvas(
     fallbackStart,
   });
 
+  // NB: captureStream(fps) — лишь подсказка браузеру, в метаданные WEBM частота
+  // кадров не пишется (в ffprobe может быть N/A). Точный fps даёт только
+  // MP4-путь через WebCodecs (videoEncoder.ts).
   const videoStream = canvas.captureStream(fps);
   const stream = audioDestination
     ? new MediaStream([...videoStream.getVideoTracks(), ...audioDestination.stream.getAudioTracks()])
@@ -219,16 +222,26 @@ export async function assembleVideoWithCanvas(
     // leadIn секунд видео шли бы без картинки, зато со звуком.
     const beginRecording = () => {
       if (recorder.state !== 'inactive') return;
-      scheduler?.tick();
-      renderFrame(0);
-      fallbackStart = performance.now();
-      recorder.start(100);
-      requestAnimationFrame(animate);
+      // Первые секунды дорожки уже декодированы и запланированы: иначе Web Audio
+      // сыграет опоздавший фрагмент немедленно и срежет его начало.
+      void (async () => {
+        try {
+          await scheduler?.prime();
+        } catch (e) {
+          console.warn('Не удалось подготовить аудио к старту', e);
+        }
+        if (recorder.state !== 'inactive') return;
+        renderFrame(0);
+        fallbackStart = performance.now();
+        recorder.start(100);
+        requestAnimationFrame(animate);
+      })();
     };
 
-    const delay = startDelayMs(audioStartedAt, audioContext ? audioContext.currentTime : null);
-    if (delay > 0) setTimeout(beginRecording, delay);
-    else beginRecording();
+    // Запись начинается по часам AudioContext (см. waitForStart): setTimeout
+    // промахивается на 5–10 мс, из-за чего картинка уходила от звука.
+    const remaining = () => (audioStartedAt !== null && audioContext ? audioStartedAt - audioContext.currentTime : 0);
+    waitForStart({ remaining, onStart: beginRecording });
 
     setTimeout(() => { if (recorder.state === 'recording') recorder.stop(); }, (totalDuration + leadIn + 5) * 1000);
   });

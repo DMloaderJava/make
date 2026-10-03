@@ -374,13 +374,22 @@ export interface PlacementScheduler {
   startedAt: number;
   /** Полная длительность дорожки, сек. */
   duration: number;
-  /** Сколько фрагментов уже отдано в граф. */
-  scheduled: number;
+  /** Сколько фрагментов уже отдано в граф (после завершения декодирования). */
+  readonly scheduled: number;
   total: number;
   overlaps: PackOverlap[];
-  /** Планирует всё, что попало в окно опережения. Возвращает число новых. */
+  /**
+   * Готовит и планирует всё, что начинается в первые `seconds` секунд, ДОЖИДАЯСЬ
+   * декодирования. Нужен перед стартом записи: без него первый фрагмент может
+   * попасть в граф уже после своего времени старта — Web Audio сыграет его
+   * немедленно, с глитчем и потерей первых сэмплов.
+   */
+  prime(seconds?: number): Promise<number>;
+  /** Добирает фрагменты, до которых осталось меньше окна опережения. */
   tick(): number;
-  /** Освобождает источники, которые ещё не начали играть. */
+  /** Сколько фрагментов сейчас декодируется (диагностика и тесты). */
+  readonly pending: number;
+  /** Останавливает и освобождает всё; после вызова новых источников не будет. */
   dispose(): void;
 }
 
@@ -406,26 +415,66 @@ export async function createPlacementScheduler(
   const active: AudioBufferSourceNode[] = [];
   let index = 0;
   let scheduledCount = 0;
+  let disposed = false;
+  let pendingDecodes = 0;
+
+  const release = (src: AudioBufferSourceNode) => {
+    try { src.disconnect(); } catch {}
+    // отпускаем декодированный буфер, как только он отзвучал
+    try { (src as unknown as { buffer: AudioBuffer | null }).buffer = null; } catch {}
+    const i = active.indexOf(src);
+    if (i >= 0) active.splice(i, 1);
+  };
 
   const schedule = (item: (typeof plan.placements)[number], buffer: AudioBuffer) => {
+    if (disposed) return false; // декод завершился после dispose — источник не создаём
     const src = ctx.createBufferSource();
     src.buffer = buffer;
     src.connect(destination);
     // третий аргумент start() — сколько секунд играть: так обрезается перекрытие
-    src.start(startedAt + item.start, 0, Math.min(item.playDuration, buffer.duration));
-    src.onended = () => {
-      try { src.disconnect(); } catch {}
-      // отпускаем декодированный буфер, как только он отзвучал
-      try { (src as unknown as { buffer: AudioBuffer | null }).buffer = null; } catch {}
-      const i = active.indexOf(src);
-      if (i >= 0) active.splice(i, 1);
-    };
+    const when = startedAt + item.start;
+    // Если время старта уже прошло (медленный декод), Web Audio всё равно сыграет
+    // немедленно и потеряет начало фрагмента — сообщаем, чтобы это не было сюрпризом.
+    if (ctx.currentTime > when + 0.05) {
+      console.warn(
+        `[audioMix] фрагмент ${item.label ?? '?'} опоздал на ${(ctx.currentTime - when).toFixed(2)} с — начало может быть срезано`
+      );
+    }
+    src.start(when, 0, Math.min(item.playDuration, buffer.duration));
+    src.onended = () => release(src);
     active.push(src);
     scheduledCount++;
+    return true;
   };
 
-  // Декодируем строго по одному: буфер попадает в граф и больше не удерживается нами.
+  const decodeAndSchedule = async (item: (typeof plan.placements)[number]): Promise<boolean> => {
+    pendingDecodes++;
+    try {
+      const buffer = await decodeToTarget(item.blob, sampleRate, channels);
+      return buffer ? schedule(item, buffer) : false;
+    } finally {
+      pendingDecodes--;
+    }
+  };
+
+  /**
+   * Планирует (дожидаясь декодирования) всё, что стартует в ближайшие `seconds`.
+   * Декодируем строго по одному, чтобы не держать в памяти весь ролик.
+   */
+  const prime = async (seconds = lookahead): Promise<number> => {
+    let added = 0;
+    while (!disposed && index < plan.placements.length) {
+      const item = plan.placements[index];
+      if (item.start > seconds) break;
+      index++;
+      if (await decodeAndSchedule(item)) added++;
+    }
+    return added;
+  };
+
+  /** Синхронный добор: возвращает число взятых в работу фрагментов. */
   const tick = (): number => {
+    if (disposed) return 0;
     let added = 0;
     const elapsed = ctx.currentTime - startedAt;
     while (index < plan.placements.length) {
@@ -433,14 +482,13 @@ export async function createPlacementScheduler(
       if (item.start > elapsed + lookahead) break;
       index++;
       added++;
-      void decodeToTarget(item.blob, sampleRate, channels).then(buffer => {
-        if (buffer) schedule(item, buffer);
-      });
+      void decodeAndSchedule(item);
     }
     return added;
   };
 
   const dispose = () => {
+    disposed = true;
     for (const src of active.splice(0)) {
       try { src.onended = null; src.stop(); src.disconnect(); } catch {}
       try { (src as unknown as { buffer: AudioBuffer | null }).buffer = null; } catch {}
@@ -453,8 +501,10 @@ export async function createPlacementScheduler(
     get scheduled() { return scheduledCount; },
     total: plan.placements.length,
     overlaps: plan.overlaps,
+    prime,
     tick,
     dispose,
+    get pending() { return pendingDecodes; },
   };
 }
 

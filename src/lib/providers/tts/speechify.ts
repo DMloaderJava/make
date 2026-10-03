@@ -7,6 +7,8 @@ export const speechifyTTS: TTSProvider = {
   freeTier: false,
   defaultModel: 'simba-base',
   languages: ['ru', 'en', 'multi'],
+  // Не проверено вживую: эндпоинт/поля взяты из документации (см. npm run smoke:tts).
+  experimental: true,
   baseUrl: 'https://api.sws.speechify.com',
 
   async generate(text: string, { voice = 'matthew', apiKey, speed = 1.0, language = 'ru-RU', model }: TTSOptions): Promise<ArrayBuffer> {

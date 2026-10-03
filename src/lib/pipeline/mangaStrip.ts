@@ -209,8 +209,23 @@ export function buildScrollKeyframes(
     keys.push({ time, y, ease });
   };
 
+  // Точки входа страниц с поправкой на «незаметный переход»: если две короткие
+  // страницы дают совпадающую позицию окна, смена страницы визуально не читается.
+  // В таком случае смещаем вход следующей страницы так, чтобы она въезжала
+  // сверху, а не появлялась в той же точке.
+  const entries = ordered.map(span => entryY(span.slotIndex));
+  for (let i = 1; i < entries.length; i++) {
+    const slot = layout.slots[ordered[i].slotIndex];
+    if (!slot) continue;
+    const prevExit = exitY(ordered[i - 1].slotIndex);
+    if (Math.abs(entries[i] - prevExit) < 8) {
+      const nudged = clampScroll(slot.y - Math.min(layout.gap, 8), layout);
+      if (Math.abs(nudged - prevExit) >= 8) entries[i] = nudged;
+    }
+  }
+
   // До первой страницы окно уже стоит в точке входа — иначе ролик начинается с рывка.
-  pushKey(0, entryY(ordered[0].slotIndex), 'linear');
+  pushKey(0, entries[0], 'linear');
 
   ordered.forEach((span, i) => {
     const slot = layout.slots[span.slotIndex];
@@ -224,7 +239,7 @@ export function buildScrollKeyframes(
     if (isLong(slot) && panInside) {
       // Страница длиннее кадра: пока звучит озвучка — медленно проезжаем её
       // сверху вниз (вебтун-чтение).
-      pushKey(span.start, entryY(span.slotIndex), 'linear');
+      pushKey(span.start, entries[i], 'linear');
       pushKey(transitionStart, exitY(span.slotIndex), 'linear');
     } else {
       const target = targetScrollForSlot(layout, span.slotIndex);
@@ -235,7 +250,7 @@ export function buildScrollKeyframes(
     if (next) {
       // Переход к следующей странице — на «хвосте» интервала, с мягким сглаживанием.
       // Ведём в точку входа следующей страницы (для длинной это её верх).
-      pushKey(span.end, entryY(next.slotIndex), 'easeInOut');
+      pushKey(span.end, entries[i + 1], 'easeInOut');
     } else {
       // Последняя страница: окно остаётся ТАМ ЖЕ, где закончился проезд,
       // а не откатывается к центру (иначе на длинном вебтуне — рывок вверх).

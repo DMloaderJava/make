@@ -379,7 +379,7 @@ export default function EditorPage() {
   };
 
   /** Общий путь: генерация (всех панелей или только выбранных) + обновление таймлайна. */
-  const runAudioGeneration = async (onlyPanelIds?: number[]) => {
+  const runAudioGeneration = async (onlyPanelIds?: number[], options?: { forceRegenerate?: boolean }) => {
     if (!project) return;
     const ttsId = project.settings.ttsProvider || getSettings().defaultTTSProvider;
     const panels = onlyPanelIds
@@ -403,6 +403,8 @@ export default function EditorPage() {
         language: project.settings.ttsLanguage || 'ru',
         speed: project.settings.ttsSpeed,
         onlyPanelIds,
+        // Явная переозвучка игнорирует и OPFS-файл, и общий TTS-кэш.
+        forceRegenerate: options?.forceRegenerate,
         // Снимок текстов прошлой генерации: аудио без .sig используется, только
         // если текст не менялся. Для переозвучиваемых панелей снимок не даём —
         // иначе «Переозвучить» вернуло бы старый файл из кэша.
@@ -504,7 +506,9 @@ export default function EditorPage() {
       next.delete(panelId);
       return next;
     });
-    await runAudioGeneration([panelId]);
+    // forceRegenerate: без него при неизменном тексте и голосе генерация
+    // возвращала тот же файл из общего TTS-кэша — кнопка «Переозвучить» врала.
+    await runAudioGeneration([panelId], { forceRegenerate: true });
   };
 
   const handleExport = async (type: 'mp4' | 'mp3' | 'srt' | 'seo' | 'all') => {

@@ -33,3 +33,35 @@ export function frameTime(params: {
   }
   return Math.max(0, (wallNow - fallbackStart) / 1000);
 }
+
+export interface WaitForStartOptions {
+  /** Сколько секунд осталось до старта звука (может стать ≤ 0 в процессе ожидания). */
+  remaining: () => number;
+  /** Вызывается, когда можно начинать запись. */
+  onStart: () => void;
+  /** Планировщик кадров; по умолчанию requestAnimationFrame, в тестах — заглушка. */
+  schedule?: (cb: () => void) => void;
+}
+
+/**
+ * Ждёт старта звука по часам AudioContext, а не по setTimeout.
+ *
+ * setTimeout(250) в браузере отрабатывает как 250–260 мс, поэтому запись
+ * стартовала бы на несколько миллисекунд позже звука (или раньше, если таймер
+ * сработал неточно в другую сторону). Сравнение часов каждый кадр даёт
+ * привязку к тому же источнику времени, что и сам звук.
+ */
+export function waitForStart(options: WaitForStartOptions): void {
+  const schedule = options.schedule ?? ((cb: () => void) => requestAnimationFrame(cb));
+  const tolerance = 0.005; // 5 мс — меньше одного кадра
+
+  const check = () => {
+    if (options.remaining() > tolerance) {
+      schedule(check);
+      return;
+    }
+    options.onStart();
+  };
+
+  check();
+}

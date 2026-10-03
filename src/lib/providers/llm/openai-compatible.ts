@@ -53,10 +53,15 @@ function getCachedMode(key: string): ResponseFormatMode | undefined {
     responseFormatModes.delete(key);
     return undefined;
   }
+  // Перекладываем запись в конец: вытесняется самый давно использованный
+  // (FIFO по вставке выбивал бы как раз активные пары «провайдер|модель»).
+  responseFormatModes.delete(key);
+  responseFormatModes.set(key, entry);
   return entry.mode;
 }
 
 function setCachedMode(key: string, mode: ResponseFormatMode): void {
+  responseFormatModes.delete(key); // пере-вставка = свежая позиция в LRU
   // Полноценный schema — не деградация: держим долго и не перепроверяем.
   const ttl = mode === 'schema' ? 24 * 60 * 60 * 1000 : RESPONSE_FORMAT_TTL_MS;
   if (responseFormatModes.size >= RESPONSE_FORMAT_MAX_ENTRIES && !responseFormatModes.has(key)) {

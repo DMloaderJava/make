@@ -64,6 +64,8 @@ export function VoicesModal({ open, onClose, characters, assignments, onChange, 
     load();
   }, [open]);
 
+  const selectedProviderMeta = TTS_PROVIDERS.find(p => p.id === selectedProvider);
+
   /** Смена провайдера: голоса старого провайдера невалидны → сбрасываем назначения. */
   const handleProviderChange = (nextProvider: string) => {
     if (nextProvider === selectedProvider) return; // тот же провайдер — ничего не меняем
@@ -182,12 +184,24 @@ export function VoicesModal({ open, onClose, characters, assignments, onChange, 
           <div id="voice-preview-container" className="hidden p-2 rounded-[10px] bg-[#0B0B0C] border border-[#26262C]"></div>
           <div className="flex gap-2">
             <select value={selectedProvider} onChange={(e) => handleProviderChange(e.target.value)} className="flex h-8 w-full rounded-[6px] border border-[#26262C] bg-[#0B0B0C] px-2 text-xs">
-              {TTS_PROVIDERS.map(p => <option key={p.id} value={p.id}>{p.name} {p.freeTier ? 'FREE' : ''}</option>)}
+              {TTS_PROVIDERS.map(p => (
+                <option key={p.id} value={p.id}>
+                  {p.name}{p.freeTier ? ' · FREE' : ''}{p.experimental ? ' · не проверен' : ''}
+                </option>
+              ))}
             </select>
             <Button variant="outline" size="sm" onClick={handleMerge} className="h-8 text-xs bg-[#0B0B0C] border-[#26262C] whitespace-nowrap">
               Объединить
             </Button>
           </div>
+
+          {selectedProviderMeta?.experimental && (
+            <p className="text-[11px] leading-4 text-[#C9B27A] bg-[#1E1A10] border border-[#3A2E14] rounded-[6px] px-3 py-2">
+              Провайдер помечен как <span className="font-medium">непроверенный</span>: запросы к нему написаны
+              по документации и вживую не тестировались. Сначала проверьте синтез на короткой реплике —
+              результат можно зафиксировать через <span className="font-mono">npm run smoke:tts</span>.
+            </p>
+          )}
 
           {/* Провайдер/модель/язык озвучки — на проект, а не только глобально в /settings */}
           <div className="grid grid-cols-3 gap-2">

@@ -22,6 +22,12 @@ export interface TTSProvider {
   description: string;
   freeTier: boolean;
   languages: string[];
+  /**
+   * Реализация не проверена вживую с реальным ключом (URL/поля взяты из
+   * документации). Показываем бейдж в UI и не обещаем «всё работает».
+   * Снимается после успешного `npm run smoke:tts` — результат пишем в README.
+   */
+  experimental?: boolean;
   /** Модель по умолчанию — единый источник для настроек и UI (раньше хардкодилась в VoicesModal). */
   defaultModel?: string;
   getVoices(apiKey: string): Promise<Voice[]>;

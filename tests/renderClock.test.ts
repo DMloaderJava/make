@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { frameTime, startDelayMs } from '../src/lib/pipeline/renderClock';
+import { frameTime, startDelayMs, waitForStart } from '../src/lib/pipeline/renderClock';
 
 const LEAD_IN = 0.25;
 
@@ -31,26 +31,42 @@ test('startDelayMs: запись ждёт старта аудио ровно н�
   assert.equal(startDelayMs(10.25, null), 0, 'нет контекста — пишем сразу');
 });
 
-/**
- * Регрессионный страж: именно здесь дважды подряд ломали A/V — сначала
- * вычитали leadIn дважды, потом один раз, но в другом месте. Логика вынесена
- * в renderClock (покрыта выше), а эти проверки следят, чтобы assembleVideo
- * не начал снова поправлять время кадра на leadIn и не потерял tick().
- */
-test('assembleVideo: время кадра не корректируется на leadIn, планировщик тикает', () => {
-  const source = readFileSync(join(process.cwd(), 'src/lib/pipeline/assembleVideo.ts'), 'utf8');
+test('waitForStart: ждёт по часам, а не по setTimeout (старт ровно в момент аудио)', () => {
+  let ctxNow = 10;
+  const started: number[] = [];
+  const callbacks: Array<() => void> = [];
+  const schedule = (cb: () => void) => { callbacks.push(cb); };
 
-  const animateBody = source.slice(source.indexOf('const animate = () => {'));
-  assert.ok(animateBody.length > 0, 'animate() найден');
-  assert.match(animateBody, /scheduler\?\.tick\(\)/, 'animate обязан тикать планировщиком, иначе WEBM без звука');
-  assert.match(animateBody, /mediaClock\(fallbackStart\)/, 'время кадра берётся из mediaClock');
-  assert.doesNotMatch(
-    animateBody,
-    /mediaClock\([^)]*\)\s*-\s*leadIn/,
-    'вычитание leadIn в animate() возвращает рассинхрон A/V'
-  );
+  waitForStart({
+    remaining: () => 10.25 - ctxNow,
+    onStart: () => started.push(ctxNow),
+    schedule,
+  });
 
-  assert.match(source, /const delay = startDelayMs\(/, 'запись стартует по startDelayMs, а не сразу');
-  assert.match(source, /recorder\.start\(100\)/, 'запись всё ещё стартует');
-  assert.match(source, /scheduler\?\.tick\(\);[\s\S]{0,80}recorder\.start/, 'первый tick — до старта записи');
+  assert.equal(started.length, 0, 'пока звук не начался, запись не стартует');
+  // кадр 1: 10.1 — ещё рано
+  ctxNow = 10.1;
+  callbacks.shift()!();
+  assert.equal(started.length, 0);
+  // кадр 2: 10.24 — разница 10 мс, ещё ждём
+  ctxNow = 10.24;
+  callbacks.shift()!();
+  assert.equal(started.length, 0);
+  // кадр 3: 10.253 — звук уже играет (порог 5 мс)
+  ctxNow = 10.253;
+  callbacks.shift()!();
+  assert.equal(started.length, 1);
+  assert.ok(Math.abs(started[0] - 10.253) < 1e-9, 'старт привязан к часам AudioContext');
+});
+
+test('waitForStart: без звука стартует сразу, без лишних кадров', () => {
+  let calls = 0;
+  let started = 0;
+  waitForStart({
+    remaining: () => 0,
+    onStart: () => { started++; },
+    schedule: () => { calls++; },
+  });
+  assert.equal(started, 1);
+  assert.equal(calls, 0, 'ждать нечего — rAF не запрашивается');
 });

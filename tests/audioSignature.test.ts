@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildAudioSignature } from '../src/lib/pipeline/generateAudio';
+import { buildAudioSignature, decideAudioSource } from '../src/lib/pipeline/generateAudio';
 
 const base = {
   text: 'Привет, мир',
@@ -47,4 +47,17 @@ test('buildAudioSignature: разделитель не даёт коллизий
   const a = await buildAudioSignature({ text: 'a|b', voice: 'c', provider: 'p' });
   const b = await buildAudioSignature({ text: 'a', voice: 'b|c', provider: 'p' });
   assert.notEqual(a, b);
+});
+
+test('decideAudioSource: обычный прогон переиспользует кэши', () => {
+  assert.equal(decideAudioSource({ hasPersisted: true, hasCached: true }), 'persisted');
+  assert.equal(decideAudioSource({ hasPersisted: false, hasCached: true }), 'tts-cache');
+  assert.equal(decideAudioSource({ hasPersisted: false, hasCached: false }), 'generate');
+  assert.equal(decideAudioSource({ hasPersisted: true, hasCached: false }), 'persisted');
+});
+
+test('decideAudioSource: forceRegenerate игнорирует ЛЮБОЙ кэш', () => {
+  assert.equal(decideAudioSource({ forceRegenerate: true, hasPersisted: true, hasCached: true }), 'generate');
+  assert.equal(decideAudioSource({ forceRegenerate: true, hasPersisted: false, hasCached: true }), 'generate');
+  assert.equal(decideAudioSource({ forceRegenerate: true, hasPersisted: false, hasCached: false }), 'generate');
 });

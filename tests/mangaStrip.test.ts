@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { STRIP_SCENARIOS } from './fixtures/stripScenarios';
 import {
   buildScrollKeyframes,
   buildScrollSpans,
@@ -29,6 +30,32 @@ test('computeStripLayout: страницы масштабируются по ш�
   assert.equal(layout.totalHeight, 1920 + 24 + 3840);
   assert.equal(maxScrollY(layout), layout.totalHeight - FRAME.frameHeight);
 });
+
+// Табличные сценарии: новый кейс добавляется объектом в fixtures/stripScenarios.ts
+for (const scenario of STRIP_SCENARIOS) {
+  test(`сценарий ленты: ${scenario.name}`, () => {
+    const layout = computeStripLayout(scenario.sizes, {
+      ...FRAME,
+      viewport: scenario.viewport,
+      gap: scenario.gap,
+    });
+
+    assert.equal(layout.slots.length, scenario.expectedHeights.length, 'число страниц');
+    layout.slots.forEach((slot, i) => {
+      assert.ok(
+        Math.abs(slot.height - scenario.expectedHeights[i]) < 0.5,
+        `страница ${i}: высота ${slot.height}, ожидали ${scenario.expectedHeights[i]}`
+      );
+    });
+    assert.ok(
+      Math.abs(layout.totalHeight - scenario.expectedTotalHeight) < 0.5,
+      `полная высота ${layout.totalHeight}, ожидали ${scenario.expectedTotalHeight}`
+    );
+    if (scenario.expectClamped) {
+      assert.equal(layout.slots.some(sl => sl.height >= 12000), true, 'лимит высоты сработал');
+    }
+  });
+}
 
 test('computeStripLayout: viewport меньше кадра → крупнее (лента шире кадра)', () => {
   const zoom = computeStripLayout(PAGES, { ...FRAME, viewport: 720, gap: 0 });
@@ -267,4 +294,32 @@ test('pageIndexAtScroll: центр окна определяет активну
   assert.equal(pageIndexAtScroll(layout, 0), 0);
   assert.equal(pageIndexAtScroll(layout, maxScrollY(layout)), 1);
   assert.equal(pageIndexAtScroll(computeStripLayout([], FRAME), 0), null);
+});
+
+test('короткие страницы с совпадающей позицией: переход всё равно заметен', () => {
+  // Две страницы одинаковой высоты дают одинаковые центры — раньше окно не
+  // двигалось вовсе, и смена страницы не читалась.
+  const layout = computeStripLayout(
+    [
+      { width: 1000, height: 400 },
+      { width: 1000, height: 400 },
+    ],
+    { ...FRAME, viewport: 1080, gap: 24 }
+  );
+  const keys = buildScrollKeyframes(
+    [
+      { slotIndex: 0, start: 0, end: 4 },
+      { slotIndex: 1, start: 4, end: 8 },
+    ],
+    layout,
+    { transition: 1, panInside: true }
+  );
+
+  const first = sampleScroll(keys, 3);
+  const second = sampleScroll(keys, 4.1);
+  assert.ok(Math.abs(second - first) >= 8, `окно должно сместиться (${first} → ${second})`);
+
+  // и остаётся в границах ленты
+  const max = maxScrollY(layout);
+  assert.ok(second >= 0 && second <= max);
 });

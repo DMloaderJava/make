@@ -9,7 +9,7 @@
 
 import { getTTSProvider } from './catalog';
 
-const FALLBACK_VOICE: Record<string, string> = {
+export const FALLBACK_VOICE: Record<string, string> = {
   gemini: 'Puck',
   openai: 'alloy',
   elevenlabs: '21m00Tcm4TlvDq8ikWAM',

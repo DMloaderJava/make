@@ -49,6 +49,12 @@ export interface AudioGenerationOptions {
   /** Перегенерировать intro/outro (по умолчанию они берутся из кэша). */
   regenerateIntroOutro?: boolean;
   /**
+   * Игнорировать кэши (OPFS-файл панели и общий TTS-кэш) и синтезировать заново.
+   * Нужно кнопке «↻ Переозвучить»: без флага при неизменном тексте она возвращала
+   * ровно тот же файл из TTS-кэша, то есть кнопка врала.
+   */
+  forceRegenerate?: boolean;
+  /**
    * Тексты панелей из сохранённого таймлайна (panelId → text).
    * Нужны для мягкой миграции аудио без подписи: если текст совпадает,
    * файл считается актуальным и не перегенерируется.
@@ -96,6 +102,23 @@ export async function buildAudioSignature(params: {
   return hashSHA256(
     [params.provider, params.voice, params.model || '', params.speed ?? 1, params.language || '', params.text].join('|')
   );
+}
+
+export type CachedAudioSource = 'persisted' | 'tts-cache' | 'generate';
+
+/**
+ * Откуда брать аудио панели. Вынесено отдельно, чтобы явное «переозвучить»
+ * нельзя было случайно перепутать с обычным прогоном.
+ */
+export function decideAudioSource(params: {
+  forceRegenerate?: boolean;
+  hasPersisted: boolean;
+  hasCached: boolean;
+}): CachedAudioSource {
+  if (params.forceRegenerate) return 'generate';
+  if (params.hasPersisted) return 'persisted';
+  if (params.hasCached) return 'tts-cache';
+  return 'generate';
 }
 
 /**
@@ -251,19 +274,6 @@ export async function generateAllAudio(options: AudioGenerationOptions): Promise
           language,
         });
 
-        // 2. Аудио проекта — только если подпись совпадает (иначе текст/голос менялись).
-        //    Для аудио без подписи (до v1.3.2) сверяемся с текстом из таймлайна.
-        const persisted = await loadFreshProjectAudio(
-          options.projectId,
-          panel.id,
-          signature,
-          legacyAudioIsFresh(options.previousTexts, panel.id, panel.dialogue)
-        );
-        if (persisted) {
-          const duration = await getAudioDuration(persisted);
-          return { blob: persisted, duration };
-        }
-
         const cacheKey = await getTTSCacheKey({
           text: panel.dialogue,
           voice: voiceId,
@@ -273,8 +283,34 @@ export async function generateAllAudio(options: AudioGenerationOptions): Promise
           language,
         });
 
-        const cached = await loadTTSCache(cacheKey);
-        if (cached) {
+        // 2. Кэши смотрятся только если это не явная переозвучка.
+        //    По умолчанию: OPFS-файл панели (подпись совпала) → общий TTS-кэш.
+        //    Для аудио без подписи (до v1.3.2) сверяемся с текстом из таймлайна.
+        const persisted = options.forceRegenerate
+          ? null
+          : await loadFreshProjectAudio(
+              options.projectId,
+              panel.id,
+              signature,
+              legacyAudioIsFresh(options.previousTexts, panel.id, panel.dialogue)
+            );
+        let cached: Blob | null = null;
+        if (!persisted && !options.forceRegenerate) {
+          cached = await loadTTSCache(cacheKey);
+        }
+
+        const source = decideAudioSource({
+          forceRegenerate: options.forceRegenerate,
+          hasPersisted: !!persisted,
+          hasCached: !!cached,
+        });
+
+        if (source === 'persisted' && persisted) {
+          const duration = await getAudioDuration(persisted);
+          return { blob: persisted, duration };
+        }
+
+        if (source === 'tts-cache' && cached) {
           const duration = await getAudioDuration(cached);
           await saveProjectAudio(options.projectId, panel.id, cached);
           await saveProjectAudioSignature(options.projectId, panel.id, signature);
