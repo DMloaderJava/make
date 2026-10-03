@@ -6,6 +6,7 @@ export const elevenLabsTTS: TTSProvider = {
   description: 'Лучшее качество, клонирование, Multilingual v2, 10k символов free',
   freeTier: true,
   languages: ['ru', 'en', 'multi'],
+  defaultModel: 'eleven_multilingual_v2',
   baseUrl: 'https://api.elevenlabs.io/v1',
 
   async generate(text: string, { voice = '21m00Tcm4TlvDq8ikWAM', apiKey, speed = 1.0, model }: TTSOptions): Promise<ArrayBuffer> {

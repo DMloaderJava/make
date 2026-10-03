@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useState, useMemo, useCallback } from 'react';
+import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { useParams } from 'next/navigation';
 import { getProjectWithImages, saveProject, Project } from '@/lib/storage/db';
 import { Preview } from '@/components/studio/Preview';
 import { Timeline } from '@/components/studio/Timeline';
 import { ContextPanel } from '@/components/studio/ContextPanel';
+import { RenderModePanel, RENDER_DEFAULTS, type RenderSettings } from '@/components/studio/RenderModePanel';
 import { VoicesModal } from '@/components/studio/modals/VoicesModal';
 import { ExportModal } from '@/components/studio/modals/ExportModal';
 import { Input } from '@/components/ui/input';
@@ -13,10 +14,11 @@ import { getAllKeys, getSettings } from '@/lib/storage/local';
 import { getLLMProvider } from '@/lib/providers/llm';
 import { buildTimeline, estimateDuration, generateSRT, calculateTotalDuration } from '@/lib/pipeline/buildTimeline';
 import { generateIntro, generateOutro, generateFallbackIntro, generateFallbackOutro } from '@/lib/pipeline/generateIntro';
-import { formatSEOPackage } from '@/lib/pipeline/generateSEO';
+import { formatSEOPackage, generateSEO, generateFallbackSEO } from '@/lib/pipeline/generateSEO';
 import { generateAllAudio } from '@/lib/pipeline/generateAudio';
 import { concatenateAudioBlobs } from '@/lib/pipeline/assembleVideo';
 import { renderVideo, checkCapabilities, BackendCapabilities } from '@/lib/pipeline/videoEncoder';
+import type { AudioPlacement } from '@/lib/pipeline/audioMix';
 import { loadProjectAudio, loadProjectIntroAudio, loadProjectOutroAudio, isOPFSSupported } from '@/lib/storage/opfs';
 import { estimateTotalCost } from '@/lib/validators';
 import { downloadBlob, formatTime } from '@/lib/utils';
@@ -54,7 +56,20 @@ export default function EditorPage() {
   const projectLoadError = isProjectLoading ? null : loadResult.error ?? null;
   const [images, setImages] = useState<string[]>([]);
   const [currentPanelIdx, setCurrentPanelIdx] = useState(0);
+  // Настройки режима рендера хранятся в проекте; значения по умолчанию — панели.
+  const renderSettings: RenderSettings = {
+    renderMode: project?.settings.renderMode ?? RENDER_DEFAULTS.renderMode,
+    stripViewport: project?.settings.stripViewport ?? RENDER_DEFAULTS.stripViewport,
+    stripGap: project?.settings.stripGap ?? RENDER_DEFAULTS.stripGap,
+  };
+
   const [currentTime, setCurrentTime] = useState(0);
+  const currentTimeRef = useRef(0);
+  // синхронизируем ref в эффекте (объявлен выше playback-эффекта, поэтому
+  // к моменту старта воспроизведения значение уже актуально)
+  useEffect(() => {
+    currentTimeRef.current = currentTime;
+  }, [currentTime]);
   const [audioDurations, setAudioDurations] = useState<Map<number, number>>(new Map());
   const [audioBlobs, setAudioBlobs] = useState<Map<number, Blob>>(new Map());
   const [audioFull, setAudioFull] = useState<Map<number, { blob: Blob; duration: number }>>(new Map());
@@ -62,8 +77,15 @@ export default function EditorPage() {
   const [outroAudio, setOutroAudio] = useState<Blob | null>(null);
   const [isGeneratingAudio, setIsGeneratingAudio] = useState(false);
   const [audioProgress, setAudioProgress] = useState('');
+  // Обрезанные реплики/сдвиги аудио при экспорте — то, что нельзя показывать только в консоли.
+  const [audioWarnings, setAudioWarnings] = useState<string[]>([]);
+  const [audioDone, setAudioDone] = useState(0);
+  // Число панелей в текущем прогоне: при точечной переозвучке это НЕ project.panels.length,
+  // иначе полоса показывала 2% вместо 20%.
+  const [audioTotal, setAudioTotal] = useState(0);
   const [costEstimate, setCostEstimate] = useState<{ characters: number; cost: string } | null>(null);
   const [isGeneratingIntro, setIsGeneratingIntro] = useState(false);
+  const [generatingSEO, setGeneratingSEO] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [selectedId, setSelectedId] = useState<number | 'intro' | 'outro' | null>(null);
@@ -174,6 +196,8 @@ export default function EditorPage() {
     };
   }, [id, loadAttempt]);
 
+  // Автосейв: раньше в deps не было timeline/srt/audioDurations, из-за чего после
+  // перезагрузки страницы терялись субтитры и длительности озвучки.
   useEffect(() => {
     if (!project) return;
     setSaveStatus('unsaved');
@@ -181,29 +205,51 @@ export default function EditorPage() {
       handleSave();
     }, 2000);
     return () => clearTimeout(t);
-  }, [project?.panels, project?.intro, project?.outro, project?.voiceAssignments, project?.name]);
+  }, [
+    project?.panels,
+    project?.intro,
+    project?.outro,
+    project?.voiceAssignments,
+    project?.name,
+    project?.timeline,
+    project?.srt,
+    project?.audioDurations,
+    project?.seoPackage,
+  ]);
 
-  // Playback timer
+  // Playback timer.
+  // Раньше startTime брался из замыкания при старте эффекта, поэтому перемотка
+  // во время проигрывания тут же откатывалась назад. Теперь смещение читается
+  // из ref, а тик идёт через requestAnimationFrame.
   useEffect(() => {
     if (!isPlaying) return;
     if (!duration || duration <= 0 || !isFinite(duration)) {
       setIsPlaying(false);
       return;
     }
-    const start = Date.now();
-    const startTime = currentTime;
-    const interval = setInterval(() => {
-      const elapsed = (Date.now() - start) / 1000;
-      const next = startTime + elapsed;
+    const startWall = performance.now();
+    const startOffset = currentTimeRef.current;
+    let raf = 0;
+    const tick = () => {
+      const next = startOffset + (performance.now() - startWall) / 1000;
       if (next >= duration) {
+        currentTimeRef.current = duration;
         setCurrentTime(duration);
         setIsPlaying(false);
-      } else {
-        setCurrentTime(next);
+        return;
       }
-    }, 1000 / 30);
-    return () => clearInterval(interval);
+      currentTimeRef.current = next;
+      setCurrentTime(next);
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
   }, [isPlaying, duration]);
+
+  // Актуальный handleSave для хоткеев: эффект ниже намеренно без deps,
+  // поэтому состояние берём из ref. Ref объявлен до эффекта — читать его
+  // в рендере-тайме (и в TDZ) больше не приходится.
+  const handleSaveRef = useRef<() => Promise<void>>(async () => {});
 
   // Hotkeys with input guard
   useEffect(() => {
@@ -224,7 +270,7 @@ export default function EditorPage() {
         setCurrentTime(t => Math.min(duration, t + 5));
       } else if ((e.metaKey || e.ctrlKey) && e.key === 's') {
         e.preventDefault();
-        handleSave();
+        void handleSaveRef.current();
       } else if ((e.metaKey || e.ctrlKey) && e.key === 'e') {
         e.preventDefault();
         setShowExport(true);
@@ -232,7 +278,9 @@ export default function EditorPage() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [duration, currentTime]);
+    // durationRef/currentTimeRef читаются внутри, чтобы не перевешивать
+    // слушатель 30 раз в секунду (currentTime меняется на каждом кадре).
+  }, [duration]);
 
   const handleSave = async () => {
     if (!project) return;
@@ -242,6 +290,12 @@ export default function EditorPage() {
     await saveProject({ ...project, audioDurations: obj });
     setSaveStatus('saved');
   };
+
+  // Хоткеи живут в эффекте без deps — держим актуальный handleSave в ref,
+  // иначе Ctrl+S сохраняет устаревший снимок проекта.
+  useEffect(() => {
+    handleSaveRef.current = handleSave;
+  }, [handleSave]);
 
   const updateProject = (updates: Partial<Project>) => {
     if (!project) return;
@@ -271,7 +325,7 @@ export default function EditorPage() {
   const handleGenerateIntro = async () => {
     if (!project) return;
     const keys = getAllKeys();
-    const { provider, llmId, baseUrl, model, settings } = resolveLLMConfig();
+    const { provider, llmId, baseUrl, model } = resolveLLMConfig();
     const apiKey = keys[llmId] || keys[provider?.id || ''];
     if (!provider || !apiKey) {
       updateProject({ intro: generateFallbackIntro(project.sceneDescription || '') });
@@ -279,7 +333,7 @@ export default function EditorPage() {
     }
     setIsGeneratingIntro(true);
     try {
-      const text = await generateIntro(project.sceneDescription || project.panels.map(p => p.dialogue).join(' '), project.characters.map(c => c.name), provider, { apiKey, model, baseUrl, temperature: 0.8 } as any);
+      const text = await generateIntro(project.sceneDescription || project.panels.map(p => p.dialogue).join(' '), project.characters.map(c => c.name), provider, { apiKey, model, baseUrl, temperature: 0.8 });
       updateProject({ intro: text });
     } catch {
       updateProject({ intro: generateFallbackIntro(project.sceneDescription || '') });
@@ -299,7 +353,7 @@ export default function EditorPage() {
     }
     setIsGeneratingIntro(true);
     try {
-      const text = await generateOutro(settings.siteName, settings.ctaType, provider, { apiKey, model, baseUrl } as any);
+      const text = await generateOutro(settings.siteName, settings.ctaType, provider, { apiKey, model, baseUrl });
       updateProject({ outro: text });
     } catch {
       updateProject({ outro: generateFallbackOutro(settings.siteName) });
@@ -308,32 +362,64 @@ export default function EditorPage() {
     }
   };
 
-  const handleGenerateAudio = async () => {
+  /**
+   * Снимок текстов для мягкой миграции. Панели, которые сейчас переозвучиваются,
+   * исключаем, чтобы «Переозвучить» не вернуло старый файл без подписи.
+   */
+  const targetPreviousTexts = (excludeIds?: number[]): Record<number, string> | undefined => {
+    if (!project) return undefined;
+    const snapshot = project.audioTexts;
+    if (!snapshot) return undefined;
+    if (!excludeIds?.length) return snapshot;
+    const filtered: Record<number, string> = {};
+    for (const [id, text] of Object.entries(snapshot)) {
+      if (!excludeIds.includes(Number(id))) filtered[Number(id)] = text;
+    }
+    return filtered;
+  };
+
+  /** Общий путь: генерация (всех панелей или только выбранных) + обновление таймлайна. */
+  const runAudioGeneration = async (onlyPanelIds?: number[], options?: { forceRegenerate?: boolean }) => {
     if (!project) return;
-    const keys = getAllKeys();
     const ttsId = project.settings.ttsProvider || getSettings().defaultTTSProvider;
-    const cost = estimateTotalCost(project.panels, project.intro, project.outro, ttsId);
-    const confirmed = confirm(`Озвучить ${project.panels.length} панелей?\nСимволов: ${cost.characters}\nСтоимость: ${cost.estimatedCost}\n\nOPFS кэш — повтор бесплатно.`);
-    if (!confirmed) return;
+    const panels = onlyPanelIds
+      ? project.panels.filter(p => onlyPanelIds.includes(p.id))
+      : project.panels;
 
     setIsGeneratingAudio(true);
-    setCostEstimate({ characters: cost.characters, cost: cost.estimatedCost });
+    setAudioDone(0);
+    setAudioTotal(panels.length || project.panels.length);
+    setAudioProgress('0/' + (panels.length || project.panels.length));
 
     try {
       const result = await generateAllAudio({
         projectId: project.id,
         panels: project.panels,
         voiceAssignments: project.voiceAssignments,
-        intro: project.intro,
-        outro: project.outro,
+        intro: onlyPanelIds ? undefined : project.intro,
+        outro: onlyPanelIds ? undefined : project.outro,
         ttsProviderId: ttsId,
-        language: 'ru',
-        onProgress: (c, t, cur) => setAudioProgress(`${c}/${t}: ${cur}`)
+        model: project.settings.ttsModel || undefined,
+        language: project.settings.ttsLanguage || 'ru',
+        speed: project.settings.ttsSpeed,
+        onlyPanelIds,
+        // Явная переозвучка игнорирует и OPFS-файл, и общий TTS-кэш.
+        forceRegenerate: options?.forceRegenerate,
+        // Снимок текстов прошлой генерации: аудио без .sig используется, только
+        // если текст не менялся. Для переозвучиваемых панелей снимок не даём —
+        // иначе «Переозвучить» вернуло бы старый файл из кэша.
+        previousTexts: targetPreviousTexts(onlyPanelIds),
+        onProgress: (c, t) => {
+          setAudioDone(c);
+          setAudioTotal(t);
+          setAudioProgress(`${c}/${t}`);
+        }
       });
 
-      const blobsOnly = new Map<number, Blob>();
-      const fullMap = new Map<number, { blob: Blob; duration: number }>();
-      const newDur = new Map<number, number>();
+      // Мержим с уже имеющимся аудио, чтобы точечная переозвучка не стирала остальное
+      const blobsOnly = new Map<number, Blob>(audioBlobs);
+      const fullMap = new Map<number, { blob: Blob; duration: number }>(audioFull);
+      const newDur = new Map<number, number>(audioDurations);
       result.panelAudios.forEach((v, k) => {
         blobsOnly.set(k, v.blob);
         fullMap.set(k, v);
@@ -344,14 +430,18 @@ export default function EditorPage() {
       setAudioBlobs(blobsOnly);
       setAudioFull(fullMap);
       setAudioDurations(newDur);
-      setIntroAudio(result.introAudio);
-      setOutroAudio(result.outroAudio);
+      if (result.introAudio) setIntroAudio(result.introAudio);
+      if (result.outroAudio) setOutroAudio(result.outroAudio);
 
       const tl = buildTimeline(project.panels, newDur, project.voiceAssignments, project.introDuration, project.outroDuration);
       const srt = generateSRT(tl, project.intro, project.outro, project.introDuration, project.outroDuration);
       const obj: Record<number, number> = {};
       newDur.forEach((v, k) => obj[k] = v);
-      updateProject({ timeline: tl, srt, audioDurations: obj });
+      // Обновляем снимок текстов для всех озвученных панелей (включая старые,
+      // которые остались в кэше) — это база для следующей мягкой миграции.
+      const audioTexts: Record<number, string> = { ...(project.audioTexts || {}) };
+      for (const panel of project.panels) audioTexts[panel.id] = panel.dialogue;
+      updateProject({ timeline: tl, srt, audioDurations: obj, audioTexts });
 
       setAudioProgress('Готово! Сохранено в OPFS.');
       setTimeout(() => setAudioProgress(''), 3000);
@@ -360,6 +450,65 @@ export default function EditorPage() {
     } finally {
       setIsGeneratingAudio(false);
     }
+  };
+
+  const handleGenerateAudio = async () => {
+    if (!project) return;
+    const ttsId = project.settings.ttsProvider || getSettings().defaultTTSProvider;
+    const cost = estimateTotalCost(project.panels, project.intro, project.outro, ttsId);
+    const confirmed = confirm(`Озвучить ${project.panels.length} панелей?\nСимволов: ${cost.characters}\nСтоимость: ${cost.estimatedCost}\n\nOPFS кэш — повтор бесплатно. Изменённый текст/голос озвучивается заново.`);
+    if (!confirmed) return;
+    setCostEstimate({ characters: cost.characters, cost: cost.estimatedCost });
+    await runAudioGeneration();
+  };
+
+  /**
+   * Генерация SEO-пакета (раньше кнопки не было вообще, а generateSEO нигде не вызывался).
+   * Если LLM недоступна — кладём шаблонный фолбэк, чтобы экспорт не был пустым.
+   */
+  const handleGenerateSEO = async () => {
+    if (!project) return;
+    const { provider, llmId, baseUrl, model } = resolveLLMConfig();
+    const keys = getAllKeys();
+    const apiKey = keys[llmId] || (provider ? keys[provider.id] : '');
+    const scene = project.sceneDescription || project.panels.map(p => p.dialogue).join(' ');
+
+    setGeneratingSEO(true);
+    try {
+      if (!provider || !apiKey) {
+        updateProject({ seoPackage: generateFallbackSEO(scene, project.characters.map(c => c.name), duration) });
+        return;
+      }
+      const seo = await generateSEO(scene, project.characters.map(c => c.name), duration, provider, {
+        apiKey,
+        model: model || provider.defaultModel,
+        baseUrl,
+        temperature: 0.7,
+      });
+      updateProject({ seoPackage: seo });
+    } catch (e) {
+      console.warn('SEO generation failed, using fallback', e);
+      updateProject({ seoPackage: generateFallbackSEO(scene, project.characters.map(c => c.name), duration) });
+    } finally {
+      setGeneratingSEO(false);
+    }
+  };
+
+  /** Точечная переозвучка одной панели: чистим OPFS-аудио и синтезируем заново. */
+  const handleRegeneratePanel = async (panelId: number) => {
+    if (!project || isGeneratingAudio) return;
+    try {
+      const { deleteProjectAudio } = await import('@/lib/storage/opfs');
+      await deleteProjectAudio(project.id, panelId);
+    } catch {}
+    setAudioBlobs(prev => {
+      const next = new Map(prev);
+      next.delete(panelId);
+      return next;
+    });
+    // forceRegenerate: без него при неизменном тексте и голосе генерация
+    // возвращала тот же файл из общего TTS-кэша — кнопка «Переозвучить» врала.
+    await runAudioGeneration([panelId], { forceRegenerate: true });
   };
 
   const handleExport = async (type: 'mp4' | 'mp3' | 'srt' | 'seo' | 'all') => {
@@ -383,8 +532,10 @@ export default function EditorPage() {
         }
         if (outroAudio) all.push(outroAudio);
         if (all.length > 0) {
+          // concatenateAudioBlobs всегда отдаёт WAV — раньше файл всё равно назывался .mp3
           const merged = await concatenateAudioBlobs(all);
-          downloadBlob(merged, `${project.name}.mp3`);
+          const ext = merged.type.includes('wav') ? 'wav' : merged.type.includes('mpeg') ? 'mp3' : 'bin';
+          downloadBlob(merged, `${project.name}.${ext}`);
         } else if (type === 'mp3') alert('Сначала озвучь');
       }
       if (type === 'mp4') {
@@ -393,21 +544,37 @@ export default function EditorPage() {
           return;
         }
         const tl = project.timeline.length > 0 ? project.timeline : buildTimeline(project.panels, audioDurations, project.voiceAssignments, project.introDuration, project.outroDuration);
-        const allAudio: Blob[] = [];
-        if (introAudio) allAudio.push(introAudio);
-        for (const p of project.panels) {
-          const b = audioBlobs.get(p.id) || await loadProjectAudio(project.id, p.id);
-          if (b) allAudio.push(b);
-        }
-        if (outroAudio) allAudio.push(outroAudio);
 
-        if (allAudio.length === 0) {
+        // Точные позиции аудио на таймлайне: интро с 0, панели со своих audioStart,
+        // аутро — после последней панели. Это чинит рассинхрон (раньше дорожка
+        // склеивалась подряд, без пауз 0.3s между панелями).
+        const audioPlacements: AudioPlacement[] = [];
+        if (introAudio) audioPlacements.push({ start: 0, blob: introAudio, role: 'intro', label: 'Интро' });
+        for (const p of project.panels) {
+          const seg = tl.find(t => t.panelId === p.id);
+          const b = audioBlobs.get(p.id) || await loadProjectAudio(project.id, p.id);
+          if (b && seg) {
+            audioPlacements.push({
+              start: seg.audioStart,
+              blob: b,
+              role: 'panel',
+              label: `Панель ${p.id}${p.character ? ` · ${p.character}` : ''}`,
+            });
+          }
+        }
+        if (outroAudio) {
+          const lastEnd = tl.length > 0 ? tl[tl.length - 1].audioEnd : project.introDuration;
+          audioPlacements.push({ start: lastEnd, blob: outroAudio, role: 'outro', label: 'Аутро' });
+        }
+
+        if (audioPlacements.length === 0) {
           alert('Сначала озвучь — нет аудио для видео. Экспортирую без звука.');
         }
 
         const { blob, mimeType } = await renderVideo({
           images,
-          audioBlobs: allAudio,
+          audioBlobs: audioPlacements.map(a => a.blob),
+          audioPlacements,
           timeline: tl,
           introText: project.intro,
           outroText: project.outro,
@@ -417,6 +584,11 @@ export default function EditorPage() {
           width: 1920,
           height: 1080,
           fps: 30,
+          renderMode: renderSettings.renderMode,
+          stripViewport: renderSettings.stripViewport,
+          stripGap: renderSettings.stripGap,
+          panels: project.panels.map(p => ({ id: p.id, imageIndex: p.imageIndex })),
+          onAudioTrimmed: (messages) => setAudioWarnings(messages),
           preferredBackend: preferredBackend === 'auto' ? undefined : preferredBackend
         });
 
@@ -523,8 +695,32 @@ export default function EditorPage() {
       </div>
 
       {isGeneratingAudio && (
-        <div className="h-0.5 w-full bg-[#16161A]">
-          <div className="h-full bg-[#E8B44C] transition-all duration-300" style={{ width: `${(audioBlobs.size / Math.max(1, project.panels.length)) * 100}%` }} />
+        <div className="h-0.5 w-full bg-[#16161A]" role="progressbar" aria-label="Озвучка">
+          {/* раньше считалось от audioBlobs.size (обновлялся один раз в конце) — полоса стояла на 0% */}
+          <div className="h-full bg-[#E8B44C] transition-all duration-300" style={{ width: `${(audioDone / Math.max(1, audioTotal || project.panels.length)) * 100}%` }} />
+        </div>
+      )}
+
+      {audioWarnings.length > 0 && (
+        <div className="border-b border-[#3A2E14] bg-[#1E1A10] px-4 py-2">
+          <div className="max-w-[960px] mx-auto flex items-start gap-3">
+            <span className="text-[13px] leading-5 text-[#E8B44C]">⚠</span>
+            <div className="flex-1 space-y-0.5">
+              <p className="text-[12px] font-medium text-[#E8B44C]">Аудио подогнано под таймлайн</p>
+              {audioWarnings.map((line, i) => (
+                <p key={i} className="text-[11px] leading-4 text-[#C9B27A]">{line}</p>
+              ))}
+              <p className="text-[11px] leading-4 text-[#8A8A93]">
+                Проверьте длину реплик или сдвиньте паузы — иначе конец фразы может не прозвучать.
+              </p>
+            </div>
+            <button
+              onClick={() => setAudioWarnings([])}
+              className="h-6 px-2 rounded-[6px] border border-[#3A2E14] text-[11px] text-[#C9B27A] hover:bg-[#262010] transition-colors"
+            >
+              Понятно
+            </button>
+          </div>
         </div>
       )}
 
@@ -540,6 +736,14 @@ export default function EditorPage() {
             isPlaying={isPlaying}
             onPlayPause={() => setIsPlaying(p => !p)}
             onSeek={handleSeek}
+            renderMode={renderSettings.renderMode}
+            stripViewport={renderSettings.stripViewport}
+            stripGap={renderSettings.stripGap}
+          />
+
+          <RenderModePanel
+            {...renderSettings}
+            onChange={(patch) => updateProject({ settings: { ...project.settings, ...patch } })}
           />
 
           <Timeline
@@ -552,6 +756,8 @@ export default function EditorPage() {
             onSelectIntro={() => setSelectedId('intro')}
             onSelectOutro={() => setSelectedId('outro')}
             selectedId={selectedId}
+            introDuration={project.introDuration}
+            outroDuration={project.outroDuration}
           />
 
           <ContextPanel
@@ -567,6 +773,8 @@ export default function EditorPage() {
             onGenerateIntro={handleGenerateIntro}
             onGenerateOutro={handleGenerateOutro}
             generating={isGeneratingIntro}
+            onRegeneratePanel={handleRegeneratePanel}
+            regenerating={isGeneratingAudio}
           />
 
           <div className="pt-2">
@@ -607,6 +815,8 @@ export default function EditorPage() {
         assignments={project.voiceAssignments}
         onChange={(a) => updateProject({ voiceAssignments: a })}
         onCharactersChange={(chars) => updateProject({ characters: chars as any })}
+        settings={project.settings}
+        onSettingsChange={(patch) => updateProject({ settings: { ...project.settings, ...patch } })}
         onPanelsRename={(renameMap) => {
           if (!project) return;
           const newPanels = project.panels.map(p => renameMap[p.character] ? { ...p, character: renameMap[p.character] } : p);
@@ -636,6 +846,8 @@ export default function EditorPage() {
         onBackendChange={setPreferredBackend}
         isExporting={isExporting}
         costEstimate={costEstimate}
+        onGenerateSEO={handleGenerateSEO}
+        generatingSEO={generatingSEO}
       />
     </div>
   );

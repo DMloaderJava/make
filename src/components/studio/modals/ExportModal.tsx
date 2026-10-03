@@ -15,9 +15,11 @@ interface ExportModalProps {
   onBackendChange: (b: 'auto' | 'webcodecs' | 'canvas') => void;
   isExporting: boolean;
   costEstimate: { characters: number; cost: string } | null;
+  onGenerateSEO?: () => void;
+  generatingSEO?: boolean;
 }
 
-export function ExportModal({ open, onClose, onExport, hasAudio, hasSRT, hasSEO, duration, backendCaps, preferredBackend, onBackendChange, isExporting, costEstimate }: ExportModalProps) {
+export function ExportModal({ open, onClose, onExport, hasAudio, hasSRT, hasSEO, duration, backendCaps, preferredBackend, onBackendChange, isExporting, costEstimate, onGenerateSEO, generatingSEO }: ExportModalProps) {
   if (!open) return null;
 
   const formatTime = (s: number) => {
@@ -82,6 +84,17 @@ export function ExportModal({ open, onClose, onExport, hasAudio, hasSRT, hasSEO,
               <span className="text-[13px] font-medium">📄 SEO — YouTube пакет</span>
               <p className="text-[11px] text-[#8A8A93] mt-1">Title, tags, thumbnail {hasSEO ? '' : '(нет SEO)'}</p>
             </button>
+
+            {onGenerateSEO && (
+              <button
+                onClick={onGenerateSEO}
+                disabled={isExporting || generatingSEO}
+                className="w-full p-3 rounded-[10px] border border-dashed border-[#26262C] bg-[#0B0B0C] text-left transition-colors hover:border-[#E8B44C]/50 hover:bg-[#1E1E23] disabled:opacity-50"
+              >
+                <span className="text-[13px] font-medium">✨ {generatingSEO ? 'Генерирую SEO...' : (hasSEO ? 'Перегенерировать SEO' : 'Сгенерировать SEO')}</span>
+                <p className="text-[11px] text-[#8A8A93] mt-1">LLM соберёт title/описание/теги/тайм-коды; без ключа — шаблон</p>
+              </button>
+            )}
 
             <button onClick={() => onExport('all')} disabled={isExporting} className="w-full p-3 rounded-[10px] bg-[#E8B44C] text-[#0B0B0C] hover:bg-[#B88A2E] text-left transition-colors font-medium disabled:opacity-50">
               <span className="text-[13px]">📦 Всё сразу (MP3+SRT+SEO)</span>

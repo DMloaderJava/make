@@ -6,6 +6,8 @@ export const resembleTTS: TTSProvider = {
   description: 'Free tier · клонирование, emotion control',
   freeTier: true,
   languages: ['en', 'multi'],
+  // Не проверено вживую: эндпоинт/поля взяты из документации (см. npm run smoke:tts).
+  experimental: true,
   baseUrl: 'https://app.resemble.ai',
 
   async generate(text: string, { voice = 'default', apiKey }: TTSOptions): Promise<ArrayBuffer> {

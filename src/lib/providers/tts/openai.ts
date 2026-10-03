@@ -5,6 +5,7 @@ export const openAITTS: TTSProvider = {
   name: 'OpenAI TTS',
   description: '$15/1M символов, простота, хорошее качество',
   freeTier: false,
+  defaultModel: 'tts-1-hd',
   languages: ['ru', 'en', 'multi'],
   baseUrl: 'https://api.openai.com/v1',
 

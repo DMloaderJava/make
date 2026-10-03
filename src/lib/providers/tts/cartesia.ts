@@ -5,10 +5,11 @@ export const cartesiaTTS: TTSProvider = {
   name: 'Cartesia Sonic 3',
   description: 'Free tier, 40ms latency · SSM architecture',
   freeTier: true,
-  languages: ['en', 'multi'],
+  languages: ['ru', 'en', 'multi'],
+  defaultModel: 'sonic-3',
   baseUrl: 'https://api.cartesia.ai',
 
-  async generate(text: string, { voice = '79a125e8-cd45-4c13-8a67-188112f4dd22', apiKey, speed = 1.0 }: TTSOptions): Promise<ArrayBuffer> {
+  async generate(text: string, { voice = '79a125e8-cd45-4c13-8a67-188112f4dd22', apiKey, speed = 1.0, language = 'ru', model }: TTSOptions): Promise<ArrayBuffer> {
     const res = await fetch('https://api.cartesia.ai/tts/bytes', {
       method: 'POST',
       headers: {
@@ -17,10 +18,10 @@ export const cartesiaTTS: TTSProvider = {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model_id: 'sonic-3',
+        model_id: model || 'sonic-3',
         transcript: text,
         voice: { mode: 'id', id: voice },
-        language: 'en',
+        language,
         output_format: { container: 'mp3', encoding: 'mp3', sample_rate: 44100 },
         speed: speed,
       })
@@ -36,7 +37,7 @@ export const cartesiaTTS: TTSProvider = {
     if (!apiKey) {
       return [
         { id: '79a125e8-cd45-4c13-8a67-188112f4dd22', name: 'Barbershop Man (муж)', language: 'en', gender: 'male', provider: 'cartesia' },
-        { id: 'a0e0a6d2-8a94-4b5d-9c9a-8a94a6d2a0e0', name: 'Sonic (жен)', language: 'en', gender: 'female', provider: 'cartesia' },
+        { id: 'a0e0a6d2-8a94-4b5d-9c9a-8a94a6d2a0e0', name: 'Sonic (жен, демо-ID)', language: 'en', gender: 'female', provider: 'cartesia' },
       ];
     }
     try {

@@ -14,9 +14,9 @@ fi
 if [ ! -d "node_modules" ]; then
     echo "[INFO] Устанавливаю зависимости..."
     if [ -f "package-lock.json" ]; then
-        npm ci --legacy-peer-deps
+        npm ci --legacy-peer-deps --no-audit --no-fund
     else
-        npm install --legacy-peer-deps
+        npm install --legacy-peer-deps --no-audit --no-fund
     fi
 fi
 

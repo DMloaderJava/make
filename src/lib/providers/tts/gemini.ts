@@ -1,5 +1,6 @@
 import { TTSProvider, TTSOptions, Voice } from './types';
 import { base64ToArrayBuffer } from '@/lib/utils';
+import { pcmToWav } from './wav';
 
 export const geminiTTS: TTSProvider = {
   id: 'gemini',
@@ -7,13 +8,14 @@ export const geminiTTS: TTSProvider = {
   description: '200+ голосов, отличный русский, free quota',
   freeTier: true,
   languages: ['ru', 'en', 'multi'],
+  defaultModel: 'gemini-2.5-flash-preview-tts',
   baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
 
-  async generate(text: string, { voice = 'Puck', apiKey, speed = 1.0 }: TTSOptions): Promise<ArrayBuffer> {
+  async generate(text: string, { voice = 'Puck', apiKey, speed = 1.0, model: requestedModel }: TTSOptions): Promise<ArrayBuffer> {
     // Client-side direct call (will be proxied via /api/tts for CORS)
     // Model list: gemini-2.5-flash-preview-tts, gemini-2.5-pro-preview-tts, gemini-2.0-flash-exp etc
     // Use gemini-2.5-flash-preview-tts as recommended
-    const model = 'gemini-2.5-flash-preview-tts';
+    const model = requestedModel || 'gemini-2.5-flash-preview-tts';
     const response = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
       {
@@ -43,7 +45,9 @@ export const geminiTTS: TTSProvider = {
     if (!candidate) throw new Error('Gemini TTS: no candidates');
     const inlineData = candidate.content?.parts?.[0]?.inlineData?.data;
     if (!inlineData) throw new Error('Gemini TTS: no audio data');
-    return base64ToArrayBuffer(inlineData);
+    // Gemini отдаёт сырой L16 PCM 24 кГц моно — оборачиваем в WAV,
+    // иначе decodeAudioData/<audio>/склейка не смогут его прочитать.
+    return pcmToWav(base64ToArrayBuffer(inlineData), { sampleRate: 24000, channels: 1, bitsPerSample: 16 });
   },
   
   async getVoices(): Promise<Voice[]> {

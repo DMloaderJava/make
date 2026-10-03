@@ -88,8 +88,7 @@ export async function generateSEO(
     ...options,
     temperature: 0.7,
     maxTokens: 4000,
-    // @ts-ignore - structured output hint
-    responseFormat: SEO_JSON_SCHEMA
+    responseFormat: { name: 'seo_package', schema: SEO_JSON_SCHEMA, strict: false }
   });
   
   const parsed = safeParseJSON(result);

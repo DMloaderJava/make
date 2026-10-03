@@ -59,12 +59,30 @@ export interface Project {
   introDuration: number;
   outroDuration: number;
   audioDurations?: Record<number, number>; // panelId -> duration, persisted
+  /**
+   * Снимок текста каждой панели на момент последней генерации аудио.
+   * Нужен для мягкой миграции: у аудио до v1.3.2 нет .sig-подписи, и без снимка
+   * нельзя отличить «текст не менялся» от «менялся, но файл остался старым».
+   */
+  audioTexts?: Record<number, string>;
   srt: string;
   seoPackage: SEOPackage | null;
   settings: {
     ttsProvider: string;
     llmProvider: string;
     visionModel: string;
+    /** Модель TTS для проекта (например eleven_multilingual_v2). */
+    ttsModel?: string;
+    /** Язык озвучки проекта: 'ru' | 'en' | ... */
+    ttsLanguage?: string;
+    /** Скорость речи (1.0 — обычная). */
+    ttsSpeed?: number;
+    /** Режим рендера: постранично ('panels', по умолчанию) или вертикальная лента ('strip'). */
+    renderMode?: 'panels' | 'strip';
+    /** Сколько px ленты видно в кадре по высоте (по умолчанию — высота кадра, 1080). */
+    stripViewport?: number;
+    /** Отступ между страницами ленты, px. */
+    stripGap?: number;
     backgroundMusic?: string;
     musicVolume: number;
   };
@@ -97,6 +115,17 @@ export async function getDB(): Promise<IDBPDatabase> {
     }
   });
   return dbPromise;
+}
+
+/** Закрывает открытое соединение (нужно перед clearAllInfo/deleteDatabase). */
+export async function closeDB(): Promise<void> {
+  if (dbPromise) {
+    try {
+      const db = await dbPromise;
+      db.close();
+    } catch {}
+    dbPromise = null;
+  }
 }
 
 export async function saveProject(project: Project): Promise<void> {

@@ -6,6 +6,8 @@ export const playhtTTS: TTSProvider = {
   description: 'Free tier · 900+ голосов, клонирование',
   freeTier: true,
   languages: ['ru', 'en', 'multi'],
+  // Не проверено вживую: эндпоинт/поля взяты из документации (см. npm run smoke:tts).
+  experimental: true,
   baseUrl: 'https://api.play.ht',
 
   async generate(text: string, { voice = 's3://voice-cloning-zero-shot/d9ff78ba-d016-47f6-b0ef-dd630f59414e/female-cs/manifest.json', apiKey }: TTSOptions): Promise<ArrayBuffer> {
@@ -27,7 +29,7 @@ export const playhtTTS: TTSProvider = {
     const res = await fetch('https://api.play.ht/api/v2/tts', {
       method: 'POST',
       headers: {
-        'AUTHORIZATION': key,
+        'Authorization': `Bearer ${key}`,
         'X-USER-ID': userId,
         'Content-Type': 'application/json',
       },
@@ -56,11 +58,41 @@ export const playhtTTS: TTSProvider = {
     throw new Error('PlayHT: no audio url');
   },
 
-  async getVoices(): Promise<Voice[]> {
+  async getVoices(apiKey: string): Promise<Voice[]> {
+    // Раньше здесь возвращались Azure-голоса (en-US-JennyNeural), которые PlayHT
+    // не принимает. Пробуем получить реальный список, иначе — известные голоса PlayHT.
+    if (apiKey) {
+      let userId = '';
+      let key = apiKey;
+      if (apiKey.includes(':')) {
+        const parts = apiKey.split(':');
+        userId = parts[0];
+        key = parts.slice(1).join(':');
+      }
+      try {
+        const res = await fetch('https://api.play.ht/api/v2/voices', {
+          headers: { Authorization: `Bearer ${key}`, 'X-USER-ID': userId },
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const list = Array.isArray(data) ? data : data.voices || [];
+          if (list.length > 0) {
+            return list.slice(0, 50).map((v: any) => ({
+              id: v.id,
+              name: `${v.name || v.id} (${v.language || 'multi'})`,
+              language: v.language || 'multi',
+              gender: (v.gender as any) || 'neutral',
+              provider: 'playht',
+            }));
+          }
+        }
+      } catch {
+        // нет сети/ключа — отдаём известные голоса ниже
+      }
+    }
     return [
-      { id: 'en-US-JennyNeural', name: 'Jenny (жен, EN)', language: 'en', gender: 'female', provider: 'playht' },
-      { id: 'ru-RU-DmitryNeural', name: 'Dmitry (муж, RU)', language: 'ru', gender: 'male', provider: 'playht' },
-      { id: 'en-US-GuyNeural', name: 'Guy (муж, EN)', language: 'en', gender: 'male', provider: 'playht' },
+      { id: 's3://voice-cloning-zero-shot/d9ff78ba-d016-47f6-b0ef-dd630f59414e/female-cs/manifest.json', name: 'Female (multi)', language: 'multi', gender: 'female', provider: 'playht' },
+      { id: 's3://voice-cloning-zero-shot/baf1ef41-36b6-428c-9bdf-50ba54682bd8/male-cs/manifest.json', name: 'Male (multi)', language: 'multi', gender: 'male', provider: 'playht' },
     ];
   }
 };

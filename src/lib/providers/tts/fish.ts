@@ -6,6 +6,8 @@ export const fishTTS: TTSProvider = {
   description: 'Free tier · 50+ языков, backed by Novita AI',
   freeTier: true,
   languages: ['ru', 'en', 'multi'],
+  // Не проверено вживую: эндпоинт/поля взяты из документации (см. npm run smoke:tts).
+  experimental: true,
   baseUrl: 'https://api.fish.audio',
 
   async generate(text: string, { voice = 'default', apiKey }: TTSOptions): Promise<ArrayBuffer> {

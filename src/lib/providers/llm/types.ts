@@ -1,9 +1,18 @@
+/** Описание JSON-схемы ответа (прокидывается в response_format, если провайдер умеет). */
+export interface ResponseFormatSchema {
+  name?: string;
+  schema: unknown;
+  strict?: boolean;
+}
+
 export interface LLMOptions {
   apiKey: string;
   model: string;
   temperature?: number;
   maxTokens?: number;
   baseUrl?: string;
+  /** Ранее поле игнорировалось — openai-compatible.ts не клал его в тело запроса. */
+  responseFormat?: ResponseFormatSchema;
 }
 
 export interface MessageContent {

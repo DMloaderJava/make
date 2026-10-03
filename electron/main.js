@@ -12,7 +12,9 @@ const URL = `http://localhost:${PORT}`;
 function checkServer() {
   return new Promise((resolve) => {
     const req = http.get(URL, (res) => {
-      resolve(res.statusCode === 200);
+      // 401 (MVS_PASSWORD) и 3xx тоже означают, что сервер поднялся
+      const code = res.statusCode || 0;
+      resolve(code === 200 || code === 401 || code === 302 || code === 301);
     });
     req.on('error', () => resolve(false));
     req.setTimeout(2000, () => {

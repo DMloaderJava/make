@@ -7,21 +7,36 @@
 
 import { SyncTimeline } from '../storage/db';
 import { getKenBurnsParams } from './buildTimeline';
+import { createPlacementScheduler, userFacingOverlaps, type AudioPlacement, type PlacementScheduler } from './audioMix';
+import { frameTime, waitForStart } from './renderClock';
+import { createStripSceneFromMedia, type StripScene } from './mangaStrip';
 
 export interface AssembleOptions {
   images: string[]; // data URLs
   audioBlobs: Blob[]; // in order of timeline + intro/outro
+  /** Точное размещение аудио на таймлайне (приоритетнее audioBlobs). */
+  audioPlacements?: AudioPlacement[];
   timeline: SyncTimeline[];
   introText: string;
   outroText: string;
   introDuration: number;
   outroDuration: number;
   srtContent: string;
+  /** Предупреждения об обрезанных репликах (текстом, для UI). */
+  onAudioTrimmed?: (messages: string[]) => void;
   backgroundMusic?: Blob;
   musicVolume?: number;
   width?: number;
   height?: number;
   fps?: number;
+  /** 'panels' — постранично (по умолчанию), 'strip' — вертикальная лента (webtoon). */
+  renderMode?: 'panels' | 'strip';
+  /** Высота видимой части ленты в px кадра (по умолчанию — высота кадра). */
+  stripViewport?: number;
+  /** Отступ между страницами ленты, px. */
+  stripGap?: number;
+  /** Панели проекта: нужны ленте, если в таймлайне нет imageIndex. */
+  panels?: Array<{ id: number; imageIndex: number }>;
 }
 
 // Honest implementation using Canvas + MediaRecorder - fixed Promise antipattern
@@ -52,51 +67,183 @@ export async function assembleVideoWithCanvas(
     }
   }
 
-  const stream = canvas.captureStream(options.fps || 30);
+  const fps = options.fps || 30;
+
+  const panelsEnd = options.timeline.length > 0
+    ? options.timeline[options.timeline.length - 1].audioEnd
+    : options.introDuration;
+
+  // Режим ленты: сцена один раз, рендер кадра — по времени.
+  const stripScene: StripScene | null = options.renderMode === 'strip'
+    ? createStripSceneFromMedia({
+        images: options.images,
+        loaded: loadedImages,
+        timeline: options.timeline,
+        panels: options.panels,
+        frameWidth: width,
+        frameHeight: height,
+        viewport: options.stripViewport,
+        gap: options.stripGap,
+      })
+    : null;
+
+  let timelineDuration = options.timeline.length > 0
+    ? options.timeline[options.timeline.length - 1].audioEnd + options.outroDuration
+    : options.introDuration + options.outroDuration;
+
+  // --- АУДИО ---
+  // Раньше canvas-фолбэк писал видео вообще без звуковой дорожки.
+  // Теперь микшируем фрагменты (с рересемплингом и паузами) и добавляем
+  // дорожку в MediaStream через MediaStreamAudioDestinationNode.
+  const placements: AudioPlacement[] = options.audioPlacements?.length
+    ? options.audioPlacements
+    : options.audioBlobs.map((blob, i) => ({
+        start: i === 0 ? 0 : options.timeline[i - 1]?.audioStart ?? 0,
+        blob,
+      }));
+
+  let audioContext: AudioContext | null = null;
+  let audioDestination: MediaStreamAudioDestinationNode | null = null;
+  let audioStartedAt: number | null = null;
+  let scheduler: PlacementScheduler | null = null;
+  const leadIn = placements.length > 0 ? 0.25 : 0;
+
+  if (placements.length > 0) {
+    try {
+      audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      // Приостановленный контекст не двигает currentTime: мастер-клок замер бы
+      // на нуле, а звук не зазвучал. Экспорт всегда идёт после жеста пользователя,
+      // но resume() вызываем явно и не считаем ошибкой.
+      try { await audioContext.resume(); } catch {}
+      audioDestination = audioContext.createMediaStreamDestination();
+      // Планировщик с опережением: в графе живут только ближайшие секунды,
+      // а не все 50 источников с декодированными буферами (иначе снова сотни МБ).
+      scheduler = await createPlacementScheduler(audioContext, audioDestination, placements, {
+        sampleRate: 44100,
+        channels: 2,
+        startAt: audioContext.currentTime + leadIn,
+        lookahead: 4,
+      });
+      if (scheduler) {
+        audioStartedAt = scheduler.startedAt;
+        timelineDuration = Math.max(timelineDuration, scheduler.duration);
+        // Обрезка панельных реплик — это то, о чём пользователю надо сказать явно.
+        const warnings = userFacingOverlaps(scheduler.overlaps);
+        if (warnings.length > 0) options.onAudioTrimmed?.(warnings);
+      } else {
+        audioContext = null;
+        audioDestination = null;
+      }
+    } catch (e) {
+      console.warn('Web Audio недоступен, экспорт без звука', e);
+      audioContext = null;
+      audioDestination = null;
+    }
+  }
+
+  /**
+   * Мастер-клок: время кадра считается от момента старта аудио
+   * (`audioStartedAt` уже включает leadIn-задержку планирования).
+   *
+   * Раньше здесь дополнительно вычитался leadIn — и первые 0.25 с видео
+   * оставались неотрисованными, пока звук уже играл (A/V разъезжался в другую
+   * сторону). Теперь коррекция одна и только в одном месте: запись стартует
+   * ровно в момент старта аудио.
+   */
+  const mediaClock = (fallbackStart: number): number => frameTime({
+    audioStartedAt,
+    ctxNow: audioContext ? audioContext.currentTime : 0,
+    wallNow: performance.now(),
+    fallbackStart,
+  });
+
+  // NB: captureStream(fps) — лишь подсказка браузеру, в метаданные WEBM частота
+  // кадров не пишется (в ffprobe может быть N/A). Точный fps даёт только
+  // MP4-путь через WebCodecs (videoEncoder.ts).
+  const videoStream = canvas.captureStream(fps);
+  const stream = audioDestination
+    ? new MediaStream([...videoStream.getVideoTracks(), ...audioDestination.stream.getAudioTracks()])
+    : videoStream;
+
   const chunks: BlobPart[] = [];
-  const mimeTypes = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm', 'video/mp4'];
+  const mimeTypes = audioDestination
+    ? ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm']
+    : ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
   let mimeType = '';
   for (const mt of mimeTypes) {
     if (MediaRecorder.isTypeSupported(mt)) { mimeType = mt; break; }
   }
 
+  const totalDuration = timelineDuration;
+
   return new Promise<Blob>((resolve, reject) => {
     const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 5000000 });
     recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
-    recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType || 'video/webm' }));
-    recorder.onerror = (e) => reject(e);
-    recorder.start(100);
-
-    const totalDuration = options.timeline.length > 0
-      ? options.timeline[options.timeline.length - 1].audioEnd + options.outroDuration
-      : options.introDuration + options.outroDuration;
-    const fps = options.fps || 30;
-    let currentTime = 0;
+    recorder.onstop = () => {
+      try { scheduler?.dispose(); } catch {}
+      try { audioContext?.close(); } catch {}
+      resolve(new Blob(chunks, { type: mimeType || 'video/webm' }));
+    };
+    recorder.onerror = (e) => {
+      try { scheduler?.dispose(); } catch {}
+      try { audioContext?.close(); } catch {}
+      reject(e);
+    };
+    let fallbackStart = performance.now();
     let frameCount = 0;
 
     const renderFrame = (time: number) => {
       ctx.fillStyle = '#000';
       ctx.fillRect(0, 0, width, height);
       if (time < options.introDuration) renderIntro(ctx, width, height, options, time, loadedImages);
-      else if (options.timeline.length > 0 && time < options.timeline[options.timeline.length - 1].audioEnd) renderPanel(ctx, width, height, options, time, loadedImages);
+      else if (stripScene && time < panelsEnd) stripScene.render(ctx, time);
+      else if (options.timeline.length > 0 && time < panelsEnd) renderPanel(ctx, width, height, options, time, loadedImages);
       else renderOutro(ctx, width, height, options, time, loadedImages);
       if (options.srtContent) renderSubtitle(ctx, width, height, options.srtContent, time);
-      if (totalDuration > 0) {
-        ctx.fillStyle = '#6366f1';
-        ctx.fillRect(0, height - 4, (time / totalDuration) * width, 4);
-      }
+      // NB: полоса прогресса больше не рисуется — она попадала в готовое видео
     };
 
+    // MediaRecorder пишет в реальном времени: кадры ведём по мастер-клоку
+    // (AudioContext, если есть звук), а не «наращиванием 1/fps».
+    // Поправок на leadIn здесь НЕТ: он уже внутри audioStartedAt.
     const animate = () => {
-      if (currentTime >= totalDuration) { recorder.stop(); return; }
-      renderFrame(currentTime);
-      currentTime += 1 / fps;
+      // Подкидываем планировщику фрагменты, до которых осталось меньше lookahead.
+      // Без этого вызова в графе не окажется ни одного источника — и WEBM будет немым.
+      scheduler?.tick();
+      const time = mediaClock(fallbackStart);
+      if (time >= totalDuration) { renderFrame(totalDuration); recorder.stop(); return; }
+      if (time >= 0) renderFrame(time);
       frameCount++;
-      if (frameCount % 10 === 0) options.onProgress?.(currentTime / totalDuration);
+      if (frameCount % 10 === 0) options.onProgress?.(Math.max(0, time / totalDuration));
       requestAnimationFrame(animate);
     };
-    animate();
-    setTimeout(() => { if (recorder.state === 'recording') recorder.stop(); }, (totalDuration + 5) * 1000);
+
+    // Запись стартует ровно тогда, когда начинает играть звук: иначе первые
+    // leadIn секунд видео шли бы без картинки, зато со звуком.
+    const beginRecording = () => {
+      if (recorder.state !== 'inactive') return;
+      // Первые секунды дорожки уже декодированы и запланированы: иначе Web Audio
+      // сыграет опоздавший фрагмент немедленно и срежет его начало.
+      void (async () => {
+        try {
+          await scheduler?.prime();
+        } catch (e) {
+          console.warn('Не удалось подготовить аудио к старту', e);
+        }
+        if (recorder.state !== 'inactive') return;
+        renderFrame(0);
+        fallbackStart = performance.now();
+        recorder.start(100);
+        requestAnimationFrame(animate);
+      })();
+    };
+
+    // Запись начинается по часам AudioContext (см. waitForStart): setTimeout
+    // промахивается на 5–10 мс, из-за чего картинка уходила от звука.
+    const remaining = () => (audioStartedAt !== null && audioContext ? audioStartedAt - audioContext.currentTime : 0);
+    waitForStart({ remaining, onStart: beginRecording });
+
+    setTimeout(() => { if (recorder.state === 'recording') recorder.stop(); }, (totalDuration + leadIn + 5) * 1000);
   });
 }
 
