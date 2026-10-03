@@ -77,6 +77,12 @@ export interface Project {
     ttsLanguage?: string;
     /** Скорость речи (1.0 — обычная). */
     ttsSpeed?: number;
+    /** Режим рендера: постранично ('panels', по умолчанию) или вертикальная лента ('strip'). */
+    renderMode?: 'panels' | 'strip';
+    /** Сколько px ленты видно в кадре по высоте (по умолчанию — высота кадра, 1080). */
+    stripViewport?: number;
+    /** Отступ между страницами ленты, px. */
+    stripGap?: number;
     backgroundMusic?: string;
     musicVolume: number;
   };

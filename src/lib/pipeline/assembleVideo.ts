@@ -8,6 +8,7 @@
 import { SyncTimeline } from '../storage/db';
 import { getKenBurnsParams } from './buildTimeline';
 import { schedulePlacements, type AudioPlacement } from './audioMix';
+import { STRIP_DEFAULTS, createStripScene, resolveStripViewport, type StripScene } from './mangaStrip';
 
 export interface AssembleOptions {
   images: string[]; // data URLs
@@ -25,6 +26,12 @@ export interface AssembleOptions {
   width?: number;
   height?: number;
   fps?: number;
+  /** 'panels' — постранично (по умолчанию), 'strip' — вертикальная лента (webtoon). */
+  renderMode?: 'panels' | 'strip';
+  /** Высота видимой части ленты в px кадра (по умолчанию — высота кадра). */
+  stripViewport?: number;
+  /** Отступ между страницами ленты, px. */
+  stripGap?: number;
 }
 
 // Honest implementation using Canvas + MediaRecorder - fixed Promise antipattern
@@ -56,6 +63,31 @@ export async function assembleVideoWithCanvas(
   }
 
   const fps = options.fps || 30;
+
+  const panelsEnd = options.timeline.length > 0
+    ? options.timeline[options.timeline.length - 1].audioEnd
+    : options.introDuration;
+
+  // Режим ленты: сцена один раз, рендер кадра — по времени.
+  const stripScene: StripScene | null = options.renderMode === 'strip' && options.images.length > 0
+    ? createStripScene({
+        sizes: options.images.map(src => {
+          const img = loadedImages.get(src);
+          return { width: img?.naturalWidth || 1000, height: img?.naturalHeight || 1400 };
+        }),
+        images: options.images.map(src => loadedImages.get(src) ?? null),
+        timeline: options.timeline,
+        options: {
+          frameWidth: width,
+          frameHeight: height,
+          viewport: resolveStripViewport(height, options.stripViewport),
+          gap: options.stripGap ?? STRIP_DEFAULTS.gap,
+          transition: STRIP_DEFAULTS.transition,
+          kenBurnsAmount: STRIP_DEFAULTS.kenBurnsAmount,
+          highlight: false,
+        },
+      })
+    : null;
 
   let timelineDuration = options.timeline.length > 0
     ? options.timeline[options.timeline.length - 1].audioEnd + options.outroDuration
@@ -150,7 +182,8 @@ export async function assembleVideoWithCanvas(
       ctx.fillStyle = '#000';
       ctx.fillRect(0, 0, width, height);
       if (time < options.introDuration) renderIntro(ctx, width, height, options, time, loadedImages);
-      else if (options.timeline.length > 0 && time < options.timeline[options.timeline.length - 1].audioEnd) renderPanel(ctx, width, height, options, time, loadedImages);
+      else if (stripScene && time < panelsEnd) stripScene.render(ctx, time);
+      else if (options.timeline.length > 0 && time < panelsEnd) renderPanel(ctx, width, height, options, time, loadedImages);
       else renderOutro(ctx, width, height, options, time, loadedImages);
       if (options.srtContent) renderSubtitle(ctx, width, height, options.srtContent, time);
       // NB: полоса прогресса больше не рисуется — она попадала в готовое видео

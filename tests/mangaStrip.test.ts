@@ -1,0 +1,177 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  buildScrollKeyframes,
+  buildScrollSpans,
+  clampScroll,
+  computeStripLayout,
+  maxScrollY,
+  pageIndexAtScroll,
+  sampleScroll,
+  targetScrollForSlot,
+  visibleSlots,
+} from '../src/lib/pipeline/mangaStrip';
+
+const FRAME = { frameWidth: 1920, frameHeight: 1080 };
+const PAGES = [
+  { width: 1000, height: 1000 },
+  { width: 1000, height: 2000 },
+];
+
+test('computeStripLayout: страницы масштабируются по ширине кадра, gap между ними', () => {
+  const layout = computeStripLayout(PAGES, { ...FRAME, viewport: 1080, gap: 24 });
+
+  assert.equal(layout.scale, 1);
+  assert.equal(layout.width, 1920);
+  assert.equal(layout.slots[0].height, 1920);
+  assert.equal(layout.slots[1].height, 3840);
+  assert.equal(layout.slots[1].y, 1920 + 24);
+  assert.equal(layout.totalHeight, 1920 + 24 + 3840);
+  assert.equal(maxScrollY(layout), layout.totalHeight - FRAME.frameHeight);
+});
+
+test('computeStripLayout: viewport меньше кадра → крупнее (лента шире кадра)', () => {
+  const zoom = computeStripLayout(PAGES, { ...FRAME, viewport: 720, gap: 0 });
+  assert.equal(zoom.scale, 1.5);
+  assert.equal(zoom.width, 2880);
+  assert.equal(zoom.slots[0].height, 2880);
+  assert.equal(zoom.totalHeight, 2880 + 5760);
+
+  const wide = computeStripLayout(PAGES, { ...FRAME, viewport: 1620, gap: 0 });
+  assert.ok(wide.scale < 1, 'большой viewport показывает больше контекста');
+  assert.ok(wide.totalHeight < zoom.totalHeight);
+});
+
+test('computeStripLayout: защита от панорам 1px и «бесконечных» страниц', () => {
+  const layout = computeStripLayout(
+    [
+      { width: 10000, height: 10 }, // панорама-полоска
+      { width: 100, height: 100000 }, // «бесконечный» вебтун
+    ],
+    { ...FRAME, viewport: 1080, gap: 24 }
+  );
+  assert.ok(layout.slots[0].height >= 240, 'слишком низкая страница растянута до минимума');
+  assert.ok(layout.slots[1].height <= 12000, 'слишком высокая обрезана по максимуму');
+});
+
+test('scroll: клампится в границы ленты, target центрирует страницу', () => {
+  const layout = computeStripLayout(PAGES, { ...FRAME, viewport: 1080, gap: 24 });
+  assert.equal(targetScrollForSlot(layout, 0), 420); // 1920/2 - 540
+  assert.equal(clampScroll(-100, layout), 0);
+  assert.equal(clampScroll(10 ** 9, layout), maxScrollY(layout));
+});
+
+test('visibleSlots: за кадром остаются только пересекающиеся страницы', () => {
+  const layout = computeStripLayout(PAGES, { ...FRAME, viewport: 1080, gap: 24 });
+  assert.deepEqual(visibleSlots(layout, 0).map(s => s.index), [0]);
+  const second = visibleSlots(layout, 2000).map(s => s.index);
+  assert.deepEqual(second, [1]);
+});
+
+test('длинная лента не упирается в лимит canvas 32767px', () => {
+  const many = Array.from({ length: 40 }, () => ({ width: 1000, height: 1500 }));
+  const layout = computeStripLayout(many, { ...FRAME, viewport: 1080, gap: 24 });
+  assert.ok(layout.totalHeight > 32767, 'лента заведомо выше лимита canvas');
+
+  // Рисуем только окно: одновременно видно 1–2 страницы, а не всю ленту.
+  const visible = visibleSlots(layout, layout.totalHeight / 2);
+  assert.ok(visible.length <= 2, `видимых страниц должно быть мало, а не ${visible.length}`);
+});
+
+test('buildScrollSpans: страницы группируются по imageIndex, соседние панели склеиваются', () => {
+  const spans = buildScrollSpans(
+    [
+      { panelId: 1, imageIndex: 0, audioStart: 0, audioEnd: 3 },
+      { panelId: 2, imageIndex: 0, audioStart: 3, audioEnd: 6 },
+      { panelId: 3, imageIndex: 1, audioStart: 6, audioEnd: 8 },
+    ]
+  );
+  assert.deepEqual(spans, [
+    { slotIndex: 0, start: 0, end: 6 },
+    { slotIndex: 1, start: 6, end: 8 },
+  ]);
+});
+
+test('buildScrollSpans: работает без imageIndex в таймлайне (fallback на panels)', () => {
+  const spans = buildScrollSpans(
+    [{ panelId: 7, audioStart: 1, audioEnd: 4 }],
+    [{ id: 7, imageIndex: 2 }]
+  );
+  assert.deepEqual(spans, [{ slotIndex: 2, start: 1, end: 4 }]);
+});
+
+test('buildScrollKeyframes: страница держится, переход — в хвосте интервала', () => {
+  const layout = computeStripLayout(PAGES, { ...FRAME, viewport: 1080, gap: 24 });
+  const keys = buildScrollKeyframes(
+    [
+      { slotIndex: 0, start: 0, end: 5 },
+      { slotIndex: 1, start: 5, end: 9 },
+    ],
+    layout,
+    { transition: 0.8, panInside: false }
+  );
+
+  const firstTarget = targetScrollForSlot(layout, 0);
+  const secondTarget = targetScrollForSlot(layout, 1);
+
+  assert.equal(sampleScroll(keys, 0), firstTarget);
+  assert.equal(sampleScroll(keys, 0.5), firstTarget, 'в начале интервала окно стоит');
+  assert.equal(sampleScroll(keys, 4.2), firstTarget, 'перед переходом всё ещё стоит');
+  assert.equal(sampleScroll(keys, 5), secondTarget, 'к концу интервала переход завершён');
+  assert.equal(sampleScroll(keys, 9), secondTarget, 'после последней страницы окно стоит');
+});
+
+test('buildScrollKeyframes: переход плавный (easeInOut), а не рывок', () => {
+  const layout = computeStripLayout(PAGES, { ...FRAME, viewport: 1080, gap: 24 });
+  const keys = buildScrollKeyframes(
+    [
+      { slotIndex: 0, start: 0, end: 5 },
+      { slotIndex: 1, start: 5, end: 9 },
+    ],
+    layout,
+    { transition: 1, panInside: false }
+  );
+
+  const from = targetScrollForSlot(layout, 0);
+  const to = targetScrollForSlot(layout, 1);
+  const middle = sampleScroll(keys, 4.5);
+  // smoothstep на середине даёт ровно половину пути
+  assert.ok(Math.abs(middle - (from + to) / 2) < 1, `середина перехода ≈ ${(from + to) / 2}, получено ${middle}`);
+  // и не выходит за границы
+  assert.ok(middle > from && middle < to);
+});
+
+test('buildScrollKeyframes: страница выше кадра проезжается (webtoon-чтение)', () => {
+  const layout = computeStripLayout(PAGES, { ...FRAME, viewport: 1080, gap: 24 });
+  const keys = buildScrollKeyframes([{ slotIndex: 1, start: 0, end: 10 }], layout, {
+    transition: 0.8,
+    panInside: true,
+  });
+
+  const top = clampScroll(layout.slots[1].y, layout);
+  const bottom = clampScroll(layout.slots[1].y + layout.slots[1].height - FRAME.frameHeight, layout);
+
+  assert.equal(sampleScroll(keys, 0), top);
+  assert.equal(sampleScroll(keys, 9.2), bottom, 'к концу озвучки страница прочитана до низа');
+  const middle = sampleScroll(keys, 4.6);
+  assert.ok(middle > top && middle < bottom, 'середина между верхом и низом');
+});
+
+test('buildScrollKeyframes: панель может быть выключена (panInside=false)', () => {
+  const layout = computeStripLayout(PAGES, { ...FRAME, viewport: 1080, gap: 24 });
+  const keys = buildScrollKeyframes([{ slotIndex: 1, start: 0, end: 10 }], layout, { panInside: false });
+  const value = sampleScroll(keys, 5);
+  assert.equal(value, sampleScroll(keys, 0), 'без проезда окно стоит на месте');
+});
+
+test('sampleScroll: пустые ключи и время до первого', () => {
+  assert.equal(sampleScroll([], 5), 0);
+  assert.equal(sampleScroll([{ time: 2, y: 100, ease: 'linear' }], 0), 100);
+});
+
+test('pageIndexAtScroll: центр окна определяет активную страницу', () => {
+  const layout = computeStripLayout(PAGES, { ...FRAME, viewport: 1080, gap: 24 });
+  assert.equal(pageIndexAtScroll(layout, 0), 0);
+  assert.equal(pageIndexAtScroll(layout, maxScrollY(layout)), 1);
+  assert.equal(pageIndexAtScroll(computeStripLayout([], FRAME), 0), null);
+});

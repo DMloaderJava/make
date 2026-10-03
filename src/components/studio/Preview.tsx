@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { PanelData } from '@/lib/pipeline/extractPanels';
 import { SyncTimeline } from '@/lib/storage/db';
+import { STRIP_DEFAULTS, createStripScene, resolveStripViewport } from '@/lib/pipeline/mangaStrip';
 
 interface PreviewProps {
   images: string[];
@@ -14,9 +15,33 @@ interface PreviewProps {
   isPlaying: boolean;
   onPlayPause: () => void;
   onSeek: (time: number) => void;
+  /** Режим рендера проекта: постранично или вертикальная лента. */
+  renderMode?: 'panels' | 'strip';
+  /** Высота видимой части ленты в px кадра 1080 (по умолчанию — сам кадр). */
+  stripViewport?: number;
+  /** Отступ между страницами ленты, px кадра 1080. */
+  stripGap?: number;
 }
 
-export function Preview({ images, panels, currentPanelIndex, timeline, currentTime, duration, isPlaying, onPlayPause, onSeek }: PreviewProps) {
+const FRAME_W = 1280;
+const FRAME_H = 720;
+/** Высота кадра, в координатах которого хранятся настройки ленты (экспорт 1920×1080). */
+const EXPORT_FRAME_H = 1080;
+
+export function Preview({
+  images,
+  panels,
+  currentPanelIndex,
+  timeline,
+  currentTime,
+  duration,
+  isPlaying,
+  onPlayPause,
+  onSeek,
+  renderMode = 'panels',
+  stripViewport,
+  stripGap,
+}: PreviewProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [loaded, setLoaded] = useState<Map<string, HTMLImageElement>>(new Map());
 
@@ -41,25 +66,66 @@ export function Preview({ images, panels, currentPanelIndex, timeline, currentTi
     load();
   }, [images]);
 
+  /**
+   * Сцена ленты строится тем же кодом, что и в экспорте, поэтому превью и
+   * итоговое видео совпадают. Настройки заданы в координатах 1080p — переносим
+   * их на превью-кадр 720p.
+   */
+  const stripScene = useMemo(() => {
+    if (renderMode !== 'strip' || images.length === 0) return null;
+    const ratio = FRAME_H / EXPORT_FRAME_H;
+    const sizes = images.map(src => {
+      const img = loaded.get(src);
+      return { width: img?.naturalWidth || 1000, height: img?.naturalHeight || 1400 };
+    });
+    return createStripScene({
+      sizes,
+      images: images.map(src => loaded.get(src) ?? null),
+      timeline,
+      panels: panels.map(p => ({ id: p.id, imageIndex: p.imageIndex })),
+      options: {
+        frameWidth: FRAME_W,
+        frameHeight: FRAME_H,
+        viewport: resolveStripViewport(EXPORT_FRAME_H, stripViewport) * ratio,
+        gap: (stripGap ?? STRIP_DEFAULTS.gap) * ratio,
+        transition: STRIP_DEFAULTS.transition,
+        kenBurnsAmount: STRIP_DEFAULTS.kenBurnsAmount,
+        highlight: false,
+      },
+    });
+  }, [renderMode, images, loaded, timeline, panels, stripViewport, stripGap]);
+
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d', { alpha: false });
     if (!ctx) return;
 
-    const w = 1280;
-    const h = 720;
+    const w = FRAME_W;
+    const h = FRAME_H;
     canvas.width = w;
     canvas.height = h;
 
     const currentPanel = panels[currentPanelIndex];
+
+    // --- Режим ленты: вертикальный скролл вместо переключения кадров ---
+    if (stripScene) {
+      stripScene.render(ctx, currentTime, {
+        // Прогресс — правый скроллбар; он рисуется только в UI и не попадает в видео.
+        showProgress: true,
+        progress: duration > 0 && isFinite(duration) ? currentTime / duration : 0,
+      });
+      if (currentPanel) drawDialogue(ctx, w, h, currentPanel.dialogue, currentPanel.character);
+      return;
+    }
+
     if (!currentPanel) {
       ctx.fillStyle = '#0B0B0C';
       ctx.fillRect(0, 0, w, h);
       ctx.fillStyle = '#8A8A93';
       ctx.font = '14px JetBrains Mono';
       ctx.textAlign = 'center';
-      ctx.fillText('Нет панелей', w/2, h/2);
+      ctx.fillText('Нет панелей', w / 2, h / 2);
       return;
     }
 
@@ -71,7 +137,7 @@ export function Preview({ images, panels, currentPanelIndex, timeline, currentTi
       const seg = timeline.find(t => t.panelId === currentPanel.id);
       const progress = seg ? Math.min(1, Math.max(0, (currentTime - seg.audioStart) / (seg.audioEnd - seg.audioStart || 1))) : 0;
       const scale = 1 + progress * 0.08;
-      
+
       const imgAspect = img.width / img.height;
       const canvasAspect = w / h;
       let dw, dh, ox, oy;
@@ -108,7 +174,6 @@ export function Preview({ images, panels, currentPanelIndex, timeline, currentTi
     ctx.lineWidth = 2;
     ctx.globalAlpha = 0.9;
     ctx.beginPath();
-    // @ts-ignore
     if (ctx.roundRect) ctx.roundRect(bx, by, bw, bh, 6);
     else ctx.rect(bx, by, bw, bh);
     ctx.stroke();
@@ -116,7 +181,6 @@ export function Preview({ images, panels, currentPanelIndex, timeline, currentTi
 
     ctx.fillStyle = '#16161A';
     ctx.beginPath();
-    // @ts-ignore
     if (ctx.roundRect) ctx.roundRect(bx, Math.max(4, by - 22), Math.min(160, ctx.measureText(currentPanel.character).width + 20), 18, 20);
     else ctx.rect(bx, Math.max(4, by - 22), 160, 18);
     ctx.fill();
@@ -125,55 +189,27 @@ export function Preview({ images, panels, currentPanelIndex, timeline, currentTi
     ctx.textAlign = 'left';
     ctx.fillText(currentPanel.character, bx + 10, Math.max(4, by - 22) + 12);
 
-    ctx.fillStyle = 'rgba(22,22,26,0.92)';
-    const boxY = h * 0.78;
-    const boxH = h * 0.18;
-    ctx.beginPath();
-    // @ts-ignore
-    if (ctx.roundRect) ctx.roundRect(w * 0.08, boxY, w * 0.84, boxH, 10);
-    else ctx.rect(w * 0.08, boxY, w * 0.84, boxH);
-    ctx.fill();
-
-    ctx.fillStyle = '#F5F5F7';
-    ctx.font = '18px Inter';
-    ctx.textAlign = 'center';
-    const maxW = w * 0.76;
-    const words = currentPanel.dialogue.split(' ');
-    let lines: string[] = [];
-    let cur = '';
-    for (const word of words) {
-      const test = cur ? `${cur} ${word}` : word;
-      if (ctx.measureText(test).width > maxW && cur) {
-        lines.push(cur);
-        cur = word;
-      } else cur = test;
-    }
-    if (cur) lines.push(cur);
-    let y = boxY + 32;
-    for (const line of lines.slice(0, 2)) {
-      ctx.fillText(line, w/2, y);
-      y += 26;
-    }
+    drawDialogue(ctx, w, h, currentPanel.dialogue, currentPanel.character, false);
 
     if (duration > 0 && isFinite(duration)) {
       const pw = (currentTime / duration) * w;
       ctx.fillStyle = '#E8B44C';
       ctx.fillRect(0, h - 2, Math.max(0, Math.min(w, pw)), 2);
     }
-  }, [loaded, panels, currentPanelIndex, timeline, currentTime, duration]);
+  }, [loaded, panels, currentPanelIndex, timeline, currentTime, duration, images, stripScene, isPlaying]);
 
   const formatTime = (s: number) => {
     if (!isFinite(s) || s <= 0) return '00:00';
     const m = Math.floor(s / 60);
     const sec = Math.floor(s % 60);
-    return `${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
+    return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
   };
 
   return (
     <div className="w-full">
       <div className="relative aspect-video bg-[#0B0B0C] rounded-[16px] overflow-hidden border border-[#26262C] group">
         <canvas ref={canvasRef} className="w-full h-full" />
-        
+
         <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-[150ms] bg-[#0B0B0C]/20">
           <button
             onClick={onPlayPause}
@@ -190,9 +226,48 @@ export function Preview({ images, panels, currentPanelIndex, timeline, currentTi
             </button>
             <span className="font-mono text-[12px] text-[#8A8A93]">{formatTime(currentTime)} / {formatTime(duration)}</span>
           </div>
-          <span className="font-mono text-[11px] text-[#8A8A93]">Панель {currentPanelIndex + 1} из {panels.length}</span>
+          <span className="font-mono text-[11px] text-[#8A8A93]">
+            {renderMode === 'strip' ? 'Лента' : `Панель ${currentPanelIndex + 1} из ${panels.length}`}
+          </span>
         </div>
       </div>
     </div>
   );
+}
+
+/** Плашка с репликой — общая для обоих режимов. */
+function drawDialogue(ctx: CanvasRenderingContext2D, w: number, h: number, dialogue: string, character: string, withName = true): void {
+  if (!dialogue) return;
+  ctx.fillStyle = 'rgba(22,22,26,0.92)';
+  const boxY = h * 0.78;
+  const boxH = h * 0.18;
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(w * 0.08, boxY, w * 0.84, boxH, 10);
+  else ctx.rect(w * 0.08, boxY, w * 0.84, boxH);
+  ctx.fill();
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#E8B44C';
+  ctx.font = '12px Inter';
+  if (withName && character) ctx.fillText(character, w / 2, boxY + 16);
+
+  ctx.fillStyle = '#F5F5F7';
+  ctx.font = '18px Inter';
+  const maxW = w * 0.76;
+  const words = dialogue.split(' ');
+  const lines: string[] = [];
+  let cur = '';
+  for (const word of words) {
+    const test = cur ? `${cur} ${word}` : word;
+    if (ctx.measureText(test).width > maxW && cur) {
+      lines.push(cur);
+      cur = word;
+    } else cur = test;
+  }
+  if (cur) lines.push(cur);
+  let y = boxY + (withName ? 44 : 36);
+  for (const line of lines.slice(0, 2)) {
+    ctx.fillText(line, w / 2, y);
+    y += 26;
+  }
 }

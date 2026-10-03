@@ -6,6 +6,7 @@ import { getProjectWithImages, saveProject, Project } from '@/lib/storage/db';
 import { Preview } from '@/components/studio/Preview';
 import { Timeline } from '@/components/studio/Timeline';
 import { ContextPanel } from '@/components/studio/ContextPanel';
+import { RenderModePanel, RENDER_DEFAULTS, type RenderSettings } from '@/components/studio/RenderModePanel';
 import { VoicesModal } from '@/components/studio/modals/VoicesModal';
 import { ExportModal } from '@/components/studio/modals/ExportModal';
 import { Input } from '@/components/ui/input';
@@ -54,6 +55,13 @@ export default function EditorPage() {
   const projectLoadError = isProjectLoading ? null : loadResult.error ?? null;
   const [images, setImages] = useState<string[]>([]);
   const [currentPanelIdx, setCurrentPanelIdx] = useState(0);
+  // Настройки режима рендера хранятся в проекте; значения по умолчанию — панели.
+  const renderSettings: RenderSettings = {
+    renderMode: project?.settings.renderMode ?? RENDER_DEFAULTS.renderMode,
+    stripViewport: project?.settings.stripViewport ?? RENDER_DEFAULTS.stripViewport,
+    stripGap: project?.settings.stripGap ?? RENDER_DEFAULTS.stripGap,
+  };
+
   const [currentTime, setCurrentTime] = useState(0);
   const currentTimeRef = useRef(0);
   // синхронизируем ref в эффекте (объявлен выше playback-эффекта, поэтому
@@ -562,6 +570,9 @@ export default function EditorPage() {
           width: 1920,
           height: 1080,
           fps: 30,
+          renderMode: renderSettings.renderMode,
+          stripViewport: renderSettings.stripViewport,
+          stripGap: renderSettings.stripGap,
           preferredBackend: preferredBackend === 'auto' ? undefined : preferredBackend
         });
 
@@ -686,6 +697,14 @@ export default function EditorPage() {
             isPlaying={isPlaying}
             onPlayPause={() => setIsPlaying(p => !p)}
             onSeek={handleSeek}
+            renderMode={renderSettings.renderMode}
+            stripViewport={renderSettings.stripViewport}
+            stripGap={renderSettings.stripGap}
+          />
+
+          <RenderModePanel
+            {...renderSettings}
+            onChange={(patch) => updateProject({ settings: { ...project.settings, ...patch } })}
           />
 
           <Timeline

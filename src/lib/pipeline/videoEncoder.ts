@@ -8,6 +8,7 @@
 import { SyncTimeline } from '../storage/db';
 import { getKenBurnsParams } from './buildTimeline';
 import { appendPlacements, type AudioPlacement } from './audioMix';
+import { STRIP_DEFAULTS, createStripScene, resolveStripViewport, type StripScene } from './mangaStrip';
 
 export interface RenderOptions {
   images: string[]; // data URLs
@@ -23,6 +24,12 @@ export interface RenderOptions {
   width: number;
   height: number;
   fps: number;
+  /** 'panels' — постранично (по умолчанию), 'strip' — вертикальная лента (webtoon). */
+  renderMode?: 'panels' | 'strip';
+  /** Высота видимой части ленты в px кадра (по умолчанию — высота кадра). */
+  stripViewport?: number;
+  /** Отступ между страницами ленты, px. */
+  stripGap?: number;
   onProgress?: (progress: number) => void;
 }
 
@@ -142,6 +149,9 @@ export class CanvasMediaRecorderBackend implements RenderBackend {
       width: options.width,
       height: options.height,
       fps: options.fps,
+      renderMode: options.renderMode,
+      stripViewport: options.stripViewport,
+      stripGap: options.stripGap,
       onProgress: options.onProgress
     });
   }
@@ -207,6 +217,31 @@ export class WebCodecsBackend implements RenderBackend {
     let timelineDuration = options.timeline.length > 0
       ? options.timeline[options.timeline.length - 1].audioEnd + options.outroDuration
       : options.introDuration + options.outroDuration;
+
+    const panelsEnd = options.timeline.length > 0
+      ? options.timeline[options.timeline.length - 1].audioEnd
+      : options.introDuration;
+
+    // Режим ленты: сцена строится один раз и рендерит каждый кадр по своему времени.
+    const stripScene: StripScene | null = options.renderMode === 'strip' && options.images.length > 0
+      ? createStripScene({
+          sizes: options.images.map(src => {
+            const img = loadedImages.get(src);
+            return { width: img?.naturalWidth || 1000, height: img?.naturalHeight || 1400 };
+          }),
+          images: options.images.map(src => loadedImages.get(src) ?? null),
+          timeline: options.timeline,
+          options: {
+            frameWidth: options.width,
+            frameHeight: options.height,
+            viewport: resolveStripViewport(options.height, options.stripViewport),
+            gap: options.stripGap ?? STRIP_DEFAULTS.gap,
+            transition: STRIP_DEFAULTS.transition,
+            kenBurnsAmount: STRIP_DEFAULTS.kenBurnsAmount,
+            highlight: false,
+          },
+        })
+      : null;
 
     // Create output
     const target = new BufferTarget();
@@ -275,7 +310,10 @@ export class WebCodecsBackend implements RenderBackend {
       // Determine phase and render
       if (time < options.introDuration) {
         this.renderIntroFrame(ctx, options, time, loadedImages);
-      } else if (options.timeline.length > 0 && time < options.timeline[options.timeline.length - 1].audioEnd) {
+      } else if (stripScene && time < panelsEnd) {
+        // Лента: окно скроллится по склеенным страницам синхронно с озвучкой.
+        stripScene.render(ctx, time);
+      } else if (options.timeline.length > 0 && time < panelsEnd) {
         this.renderPanelFrame(ctx, options, time, loadedImages);
       } else {
         this.renderOutroFrame(ctx, options, time, loadedImages);
