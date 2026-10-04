@@ -1,4 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { pcmToWav } from '@/lib/providers/tts/wav';
+import { resolveAudioMime } from '@/lib/providers/tts/mime';
+import { generateCartesia } from '@/lib/providers/tts/cartesia';
+import { mustUseProxy } from '@/lib/providers/tts/cors';
+import { getServerGenerate } from '@/lib/providers/tts/catalog';
 
 export const runtime = 'nodejs';
 export const maxDuration = 60;
@@ -96,8 +101,13 @@ export async function POST(req: NextRequest) {
         const data = await res.json();
         const base64Audio = data.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
         if (!base64Audio) return NextResponse.json({ error: 'No audio data from Gemini' }, { status: 500 });
-        const binary = Buffer.from(base64Audio, 'base64');
-        return new NextResponse(binary, { headers: { 'Content-Type': 'audio/wav' } });
+        const pcm = Buffer.from(base64Audio, 'base64');
+        // Gemini TTS → raw L16 PCM 24kHz mono: оборачиваем в WAV, иначе клиент не декодирует
+        const wav = pcmToWav(
+          pcm.buffer.slice(pcm.byteOffset, pcm.byteOffset + pcm.byteLength) as ArrayBuffer,
+          { sampleRate: 24000, channels: 1, bitsPerSample: 16 }
+        );
+        return new NextResponse(wav, { headers: { 'Content-Type': 'audio/wav' } });
       }
 
       case 'polly': {
@@ -142,7 +152,7 @@ export async function POST(req: NextRequest) {
           return NextResponse.json({ error: `Azure TTS error: ${err}` }, { status: res.status });
         }
         const buf = await res.arrayBuffer();
-        return new NextResponse(buf, { headers: { 'Content-Type': 'audio/mpeg' } });
+        return new NextResponse(buf, { headers: { 'Content-Type': resolveAudioMime('azure', buf) } });
       }
 
       case 'google-cloud': {
@@ -162,32 +172,19 @@ export async function POST(req: NextRequest) {
         const data = await res.json();
         if (!data.audioContent) return NextResponse.json({ error: 'No audioContent' }, { status: 500 });
         const binary = Buffer.from(data.audioContent, 'base64');
-        return new NextResponse(binary, { headers: { 'Content-Type': 'audio/mpeg' } });
+        const gBuf = binary.buffer.slice(binary.byteOffset, binary.byteOffset + binary.byteLength) as ArrayBuffer;
+        return new NextResponse(gBuf, { headers: { 'Content-Type': resolveAudioMime('google-cloud', gBuf) } });
       }
 
       case 'cartesia': {
-        const res = await fetch('https://api.cartesia.ai/tts/bytes', {
-          method: 'POST',
-          headers: {
-            'Cartesia-Version': '2024-06-10',
-            'X-API-Key': apiKey,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            model_id: model || 'sonic-3',
-            transcript: text,
-            voice: { mode: 'id', id: voice || '79a125e8-cd45-4c13-8a67-188112f4dd22' },
-            language: language || 'en',
-            output_format: { container: 'mp3', encoding: 'mp3', sample_rate: 44100 },
-            speed: speed || 1.0,
-          })
-        });
-        if (!res.ok) {
-          const err = await res.text();
-          return NextResponse.json({ error: `Cartesia error: ${err}` }, { status: res.status });
+        // Тот же путь, что и у клиента (включая ретрай без speed): тела больше
+        // не дублируются, ошибки приходят со статусом от Cartesia.
+        try {
+          const buf = await generateCartesia(text, { apiKey, voice, language, speed, model });
+          return new NextResponse(buf, { headers: { 'Content-Type': resolveAudioMime(providerId, buf) } });
+        } catch (e: any) {
+          return NextResponse.json({ error: e.message }, { status: typeof e?.status === 'number' ? e.status : 502 });
         }
-        const buf = await res.arrayBuffer();
-        return new NextResponse(buf, { headers: { 'Content-Type': 'audio/mpeg' } });
       }
 
       case 'deepgram': {
@@ -201,7 +198,7 @@ export async function POST(req: NextRequest) {
           return NextResponse.json({ error: `Deepgram error: ${err}` }, { status: res.status });
         }
         const buf = await res.arrayBuffer();
-        return new NextResponse(buf, { headers: { 'Content-Type': 'audio/mpeg' } });
+        return new NextResponse(buf, { headers: { 'Content-Type': resolveAudioMime(providerId, buf) } });
       }
 
       case 'qwen': {
@@ -234,14 +231,62 @@ export async function POST(req: NextRequest) {
       case 'fish':
       case 'hume':
       case 'speechify': {
-        return NextResponse.json({
-          error: `Provider ${providerId} requires client-side direct call (CORS may need browser). Use preview in VoicesModal`,
-          hint: 'Try client-side generation'
-        }, { status: 400 });
+        // Раньше здесь был 400 «use client-side» → эти провайдеры падали на CORS.
+        // Теперь выполняем их запрос на сервере (в Node те же fetch/atob) и
+        // возвращаем аудио клиенту.
+        //
+        // Антирекурсивный guard — структурный, а не списочный: если у провайдера
+        // нет серверной реализации и клиентская ходит через прокси, честно
+        // отвечаем 501, вместо «сервер вызывает сам себя до таймаута».
+        const { TTS_PROVIDERS } = await import('@/lib/providers/tts');
+        const provider = TTS_PROVIDERS.find(p => p.id === providerId);
+        if (!provider) {
+          return NextResponse.json({ error: `Provider ${providerId} not found` }, { status: 404 });
+        }
+        // Экспериментальные провайдеры: их дефолтные голоса не проверены живым
+        // ключом, поэтому без явного voice честно просим указать его, а не
+        // отправляем в API выдуманный id.
+        if (provider.experimental && (!voice || voice === 'default')) {
+          return NextResponse.json(
+            {
+              error: `${providerId}: укажите голос вручную — провайдер помечен как экспериментальный, дефолтный голос может быть невалиден.`,
+              code: 'voice_required',
+            },
+            { status: 400 }
+          );
+        }
+        const serverGenerate = getServerGenerate(provider);
+        if (!serverGenerate) {
+          return NextResponse.json(
+            {
+              error: `${providerId}: нет серверной реализации синтеза (клиентская ходит через /api/tts). Добавьте serverGenerate провайдеру или отдельную ветку в route.ts.`,
+              code: 'no_server_generate',
+            },
+            { status: 501 }
+          );
+        }
+        const buffer = await serverGenerate(text, {
+          apiKey,
+          // undefined, а не '': дефолт в сигнатуре провайдера срабатывает только
+          // на undefined, а пустая строка ушла бы в API как voiceId=''.
+          voice: voice || undefined,
+          language: language || 'ru',
+          speed,
+          model,
+        });
+        // MIME по фактической сигнатуре: провайдеры не всегда отдают запрошенный формат
+        return new NextResponse(buffer, {
+          headers: { 'Content-Type': resolveAudioMime(providerId, buffer) },
+        });
       }
 
       default: {
-        return NextResponse.json({ error: `Provider ${providerId} not implemented in proxy, use client-side` }, { status: 400 });
+        // Здесь же ловим будущие провайдеры, которым прокси обязателен по политике:
+        // молчаливая рекурсия «сервер → /api/tts → сервер» невозможна.
+        const hint = mustUseProxy(providerId)
+          ? `Provider ${providerId} требует прокси, но серверной ветки нет — добавьте её в route.ts`
+          : `Provider ${providerId} not implemented in proxy, use client-side`;
+        return NextResponse.json({ error: hint, code: mustUseProxy(providerId) ? 'no_server_branch' : 'not_implemented' }, { status: 400 });
       }
     }
   } catch (e: any) {
@@ -252,7 +297,7 @@ export async function POST(req: NextRequest) {
 export async function GET() {
   return NextResponse.json({
     status: 'TTS proxy ready',
-    providers: ['elevenlabs', 'openai', 'gemini', 'polly', 'azure', 'google-cloud', 'cartesia', 'deepgram', 'qwen'],
-    note: 'Some providers require client-side due to complex auth'
+    providers: ['elevenlabs', 'openai', 'gemini', 'polly', 'azure', 'google-cloud', 'cartesia', 'deepgram', 'qwen', 'playht', 'resemble', 'murf', 'fish', 'hume', 'speechify'],
+    note: 'Gemini (raw PCM) оборачивается в WAV; Content-Type остальных определяется по сигнатуре полученного аудио'
   });
 }

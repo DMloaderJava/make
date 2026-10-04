@@ -7,10 +7,14 @@
 
 import { SyncTimeline } from '../storage/db';
 import { getKenBurnsParams } from './buildTimeline';
+import { appendPlacements, measureBlobDurations, stackBlobsBackToBack, type AudioPlacement } from './audioMix';
+import { createStripSceneFromMedia, type StripScene } from './mangaStrip';
 
 export interface RenderOptions {
   images: string[]; // data URLs
   audioBlobs: Blob[];
+  /** Точное размещение аудио на таймлайне (приоритетнее audioBlobs). */
+  audioPlacements?: AudioPlacement[];
   timeline: SyncTimeline[];
   introText: string;
   outroText: string;
@@ -20,6 +24,16 @@ export interface RenderOptions {
   width: number;
   height: number;
   fps: number;
+  /** 'panels' — постранично (по умолчанию), 'strip' — вертикальная лента (webtoon). */
+  renderMode?: 'panels' | 'strip';
+  /** Высота видимой части ленты в px кадра (по умолчанию — высота кадра). */
+  stripViewport?: number;
+  /** Отступ между страницами ленты, px. */
+  stripGap?: number;
+  /** Панели проекта: нужны ленте, если в таймлайне нет imageIndex. */
+  panels?: Array<{ id: number; imageIndex: number }>;
+  /** Предупреждения об обрезанных репликах (текстом, для UI). */
+  onAudioTrimmed?: (messages: string[]) => void;
   onProgress?: (progress: number) => void;
 }
 
@@ -129,6 +143,7 @@ export class CanvasMediaRecorderBackend implements RenderBackend {
     return assembleVideoWithCanvas({
       images: options.images,
       audioBlobs: options.audioBlobs,
+      audioPlacements: options.audioPlacements,
       timeline: options.timeline,
       introText: options.introText,
       outroText: options.outroText,
@@ -138,6 +153,11 @@ export class CanvasMediaRecorderBackend implements RenderBackend {
       width: options.width,
       height: options.height,
       fps: options.fps,
+      renderMode: options.renderMode,
+      stripViewport: options.stripViewport,
+      stripGap: options.stripGap,
+      panels: options.panels,
+      onAudioTrimmed: options.onAudioTrimmed,
       onProgress: options.onProgress
     });
   }
@@ -204,6 +224,24 @@ export class WebCodecsBackend implements RenderBackend {
       ? options.timeline[options.timeline.length - 1].audioEnd + options.outroDuration
       : options.introDuration + options.outroDuration;
 
+    const panelsEnd = options.timeline.length > 0
+      ? options.timeline[options.timeline.length - 1].audioEnd
+      : options.introDuration;
+
+    // Режим ленты: сцена строится один раз и рендерит каждый кадр по своему времени.
+    const stripScene: StripScene | null = options.renderMode === 'strip'
+      ? createStripSceneFromMedia({
+          images: options.images,
+          loaded: loadedImages,
+          timeline: options.timeline,
+          panels: options.panels,
+          frameWidth: options.width,
+          frameHeight: options.height,
+          viewport: options.stripViewport,
+          gap: options.stripGap,
+        })
+      : null;
+
     // Create output
     const target = new BufferTarget();
     const output = new Output({
@@ -221,43 +259,39 @@ export class WebCodecsBackend implements RenderBackend {
       codec: 'avc',
       bitrate: 5_000_000,
     });
-    output.addVideoTrack(canvasSource, { framerate: options.fps });
+    // mediabunny ждёт metadata.frameRate (camelCase), 'framerate' молча игнорировался
+    output.addVideoTrack(canvasSource, { frameRate: options.fps });
 
-    // Audio source - mix all audio blobs
+    // Audio: раскладываем фрагменты по таймлайну (рересемплинг + паузы между панелями).
+    // Если размещения не передали (старые вызовы) — склеиваем подряд по ФАКТИЧЕСКИМ
+    // длительностям (stackBlobsBackToBack): раньше там брался timeline[i-1].audioStart,
+    // и для outro это давало старт последней панели (наложение вместо «после неё»).
+    // mediabunny принимает буферы последовательно, поэтому паузы добиваются тишиной,
+    // а не предварительным «гигантским» миксом (10 мин стерео 44.1 кГц ≈ 212 МБ).
     let audioSource: any = null;
     let mixedDuration: number | null = null;
-    if (options.audioBlobs.length > 0) {
-      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-      const buffers: AudioBuffer[] = [];
-      for (const blob of options.audioBlobs) {
-        try {
-          const ab = await blob.arrayBuffer();
-          const buf = await audioContext.decodeAudioData(ab.slice(0));
-          buffers.push(buf);
-        } catch {}
-      }
+    if (options.audioPlacements?.length || options.audioBlobs.length > 0) {
+      const placements: AudioPlacement[] = options.audioPlacements?.length
+        ? options.audioPlacements
+        : stackBlobsBackToBack(
+            options.audioBlobs,
+            await measureBlobDurations(options.audioBlobs, { sampleRate: 44100, channels: 2 })
+          );
 
-      if (buffers.length > 0) {
-        const totalLength = buffers.reduce((acc, b) => acc + b.length, 0);
-        const mixed = audioContext.createBuffer(2, totalLength, 44100);
-        let offset = 0;
-        for (const buf of buffers) {
-          for (let ch = 0; ch < Math.min(2, buf.numberOfChannels); ch++) {
-            mixed.getChannelData(ch).set(buf.getChannelData(ch), offset);
-          }
-          offset += buf.length;
-        }
-        mixedDuration = mixed.duration; // actual audio buffer duration
-
-        audioSource = new AudioBufferSource({
-          codec: 'aac',
-          bitrate: 128000,
-        });
-        output.addAudioTrack(audioSource);
-        try {
-          // @ts-ignore
-          await audioSource.add(mixed, { timestamp: 0 });
-        } catch {}
+      audioSource = new AudioBufferSource({
+        codec: 'aac',
+        bitrate: 128000,
+      });
+      output.addAudioTrack(audioSource);
+      const appended = await appendPlacements(audioSource, placements, {
+        sampleRate: 44100,
+        channels: 2,
+        onTrim: options.onAudioTrimmed,
+      });
+      if (appended.duration > 0) {
+        mixedDuration = appended.duration;
+      } else {
+        audioSource = null;
       }
     }
 
@@ -280,22 +314,28 @@ export class WebCodecsBackend implements RenderBackend {
 
       // Determine phase and render
       if (time < options.introDuration) {
-        this.renderIntroFrame(ctx, options, time, loadedImages);
-      } else if (options.timeline.length > 0 && time < options.timeline[options.timeline.length - 1].audioEnd) {
+        this.renderIntroFrame(ctx, options, loadedImages);
+      } else if (stripScene && time < panelsEnd) {
+        // Лента: окно скроллится по склеенным страницам синхронно с озвучкой.
+        stripScene.render(ctx, time);
+      } else if (options.timeline.length > 0 && time < panelsEnd) {
         this.renderPanelFrame(ctx, options, time, loadedImages);
       } else {
-        this.renderOutroFrame(ctx, options, time, loadedImages);
+        this.renderOutroFrame(ctx, options, loadedImages);
       }
 
       if (options.srtContent) {
         this.renderSubtitleFrame(ctx, options, time);
       }
 
-      // Add frame to video track
+      // Add frame to video track.
+      // ВАЖНО: mediabunny принимает timestamp/duration в СЕКУНДАХ, а не в микросекундах —
+      // раньше здесь было time*1e6, из-за чего первый кадр получал длительность ~33333 c.
       try {
-        // @ts-ignore
-        await canvasSource.add(time * 1e6, (time + 1/fps) * 1e6);
-      } catch {}
+        await canvasSource.add(time, 1 / fps);
+      } catch (e) {
+        throw new Error(`Не удалось закодировать кадр t=${time.toFixed(2)}s: ${(e as Error).message}`);
+      }
 
       if (frame % 10 === 0) {
         options.onProgress?.(time / totalDuration);
@@ -312,7 +352,7 @@ export class WebCodecsBackend implements RenderBackend {
     return new Blob([buffer!], { type: 'video/mp4' });
   }
 
-  private renderIntroFrame(ctx: CanvasRenderingContext2D, options: RenderOptions, time: number, loadedImages: Map<string, HTMLImageElement>) {
+  private renderIntroFrame(ctx: CanvasRenderingContext2D, options: RenderOptions, loadedImages: Map<string, HTMLImageElement>) {
     const w = options.width;
     const h = options.height;
     const gradient = ctx.createLinearGradient(0, 0, w, h);
@@ -406,7 +446,7 @@ export class WebCodecsBackend implements RenderBackend {
     }
   }
 
-  private renderOutroFrame(ctx: CanvasRenderingContext2D, options: RenderOptions, time: number, loadedImages: Map<string, HTMLImageElement>) {
+  private renderOutroFrame(ctx: CanvasRenderingContext2D, options: RenderOptions, loadedImages: Map<string, HTMLImageElement>) {
     const w = options.width;
     const h = options.height;
     const gradient = ctx.createLinearGradient(0, 0, w, h);

@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal enabledelayedexpansion
 chcp 65001 >nul
 title Manga Voice Studio - Браузерный режим
 
@@ -28,11 +28,15 @@ if %ERRORLEVEL% EQU 0 (
 if not exist node_modules (
     echo [INFO] node_modules не найден, устанавливаю...
     if exist package-lock.json (
-        call npm ci --legacy-peer-deps
+        call npm ci --legacy-peer-deps --no-audit --no-fund
     ) else (
-        call npm install --legacy-peer-deps
+        call npm install --legacy-peer-deps --no-audit --no-fund
     )
-    if %ERRORLEVEL% NEQ 0 (
+    rem Внутри блока нужен отложенный ERRORLEVEL (через восклицательные знаки),
+    rem а не обычный: проценты раскрываются один раз при разборе всей скобки —
+    rem то есть до выполнения npm ci, и проверка сравнивала бы с кодом предыдущей
+    rem команды. Двоеточия тут не годятся: это метка, а метки внутри блока ломают cmd.
+    if !ERRORLEVEL! NEQ 0 (
         echo [ОШИБКА] Установка зависимостей не удалась
         pause
         exit /b 1

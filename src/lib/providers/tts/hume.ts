@@ -6,6 +6,8 @@ export const humeTTS: TTSProvider = {
   description: 'Free tier · эмоционально-осознанная, контекстная',
   freeTier: true,
   languages: ['en', 'multi'],
+  // Не проверено вживую: эндпоинт/поля взяты из документации (см. npm run smoke:tts).
+  experimental: true,
   baseUrl: 'https://api.hume.ai',
 
   async generate(text: string, { voice = 'ITO', apiKey }: TTSOptions): Promise<ArrayBuffer> {

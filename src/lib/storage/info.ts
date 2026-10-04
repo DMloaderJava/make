@@ -55,47 +55,6 @@ async function getOPFSRoot(): Promise<FileSystemDirectoryHandle | null> {
   }
 }
 
-async function ensureDir(root: FileSystemDirectoryHandle, path: string[]): Promise<FileSystemDirectoryHandle> {
-  let dir = root;
-  for (const seg of path) {
-    dir = await dir.getDirectoryHandle(seg, { create: true });
-  }
-  return dir;
-}
-
-async function tryRemoveDir(root: FileSystemDirectoryHandle, path: string[], recursive = true): Promise<void> {
-  try {
-    if (path.length === 0) return;
-    if (path.length === 1) {
-      await root.removeEntry(path[0], { recursive } as any);
-      return;
-    }
-    const parentPath = path.slice(0, -1);
-    const name = path[path.length - 1];
-    const parent = await ensureDir(root, parentPath.slice(0, -1)).catch(async () => {
-      // try to get parent without create
-      let d = root;
-      for (const seg of parentPath.slice(0, -1)) {
-        d = await d.getDirectoryHandle(seg);
-      }
-      return d;
-    });
-    // Actually we need to get parent dir handle for parentPath
-    let dir = root;
-    for (const seg of parentPath.slice(0, -1)) {
-      dir = await dir.getDirectoryHandle(seg);
-    }
-    if (parentPath.length > 0) {
-      const lastParent = parentPath[parentPath.length - 1];
-      try {
-        const pDir = await dir.getDirectoryHandle(lastParent);
-        await pDir.removeEntry(name, { recursive } as any);
-        return;
-      } catch {}
-    }
-    await root.removeEntry(path[0], { recursive } as any);
-  } catch {}
-}
 
 async function deleteOPFSPath(path: string[]): Promise<void> {
   const root = await getOPFSRoot();
@@ -170,10 +129,13 @@ export async function clearAllInfo(): Promise<void> {
     }
   }
 
-  // IDB
+  // IDB: сначала закрываем своё соединение (dbPromise в db.ts), иначе
+  // deleteDatabase блокируется открытым соединением и данные остаются.
   if (typeof indexedDB !== 'undefined') {
-    try { indexedDB.deleteDatabase(INFO_IDB_NAME); } catch {}
-    try { indexedDB.deleteDatabase(OLD_IDB_NAME); } catch {}
+    const { closeDB } = await import('./db');
+    await closeDB().catch(() => {});
+    await deleteDatabaseAsync(INFO_IDB_NAME);
+    await deleteDatabaseAsync(OLD_IDB_NAME);
   }
 
   // OPFS
@@ -184,6 +146,20 @@ export async function clearAllInfo(): Promise<void> {
       await deleteOPFSPath([old]);
     }
   }
+}
+
+/** deleteDatabase с ожиданием результата (успех/блокировка). */
+function deleteDatabaseAsync(name: string): Promise<void> {
+  return new Promise((resolve) => {
+    try {
+      const req = indexedDB.deleteDatabase(name);
+      req.onsuccess = () => resolve();
+      req.onerror = () => resolve();
+      req.onblocked = () => resolve(); // не подвисаем, просто сообщаем наверх
+    } catch {
+      resolve();
+    }
+  });
 }
 
 /** Оценка размера по каждому слою. */

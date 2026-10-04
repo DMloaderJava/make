@@ -28,9 +28,9 @@ if %ERRORLEVEL% EQU 0 (
 if not exist node_modules (
     echo [INFO] Устанавливаю зависимости...
     if exist package-lock.json (
-        call npm ci --legacy-peer-deps
+        call npm ci --legacy-peer-deps --no-audit --no-fund
     ) else (
-        call npm install --legacy-peer-deps
+        call npm install --legacy-peer-deps --no-audit --no-fund
     )
     if !ERRORLEVEL! NEQ 0 (
         echo [ОШИБКА] Установка не удалась
@@ -109,7 +109,7 @@ if exist .dev-window.pid (
 :: Проверяем TCP порт 3000 открыт (не зависит от HTTP статуса, работает с MVS_PASSWORD=401)
 powershell -NoProfile -Command "try { $c=New-Object System.Net.Sockets.TcpClient; $c.Connect('127.0.0.1',3000); $c.Close(); exit 0 } catch { exit 1 }"
 if %ERRORLEVEL% NEQ 0 (
-    echo   ... ещё не готов, жду (%ATTEMPTS%/60)
+    echo   ... ещё не готов, жду: %ATTEMPTS%/60
     goto WAIT_LOOP
 )
 
@@ -117,7 +117,7 @@ echo [OK] Сервер готов!
 echo.
 
 if %CHROME_FOUND%==1 (
-    echo [INFO] Запускаю в Chrome App режиме (1280x800)...
+    echo [INFO] Запускаю в Chrome App режиме, окно 1280x800...
     if exist "%ProgramFiles%\Google\Chrome\Application\chrome.exe" (
         start "" "%ProgramFiles%\Google\Chrome\Application\chrome.exe" --app=http://localhost:3000 --window-size=1280,800 --window-position=100,100
         goto END

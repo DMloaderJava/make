@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  verify:
+    # Windows проверяем отдельно: пути, npm-скрипты и .bat-лаунчеры ломаются
+    # именно там, а без матрицы такие регрессии всплывают только у пользователей.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # --ignore-scripts: postinstall Electron в CI не нужен и часто падает по TLS
+      - name: Установка зависимостей
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Типы
+        run: npm run typecheck
+
+      - name: Тесты
+        run: npm run test
+
+      - name: ESLint
+        run: npm run lint
+
+      - name: Сборка
+        run: npm run build
+
+      # Прод-сборка должна не только собраться, но и запуститься: проверяем
+      # `next start` и живые маршруты (страницы + валидация /api/tts).
+      - name: "Smoke — прод-сборка стартует"
+        run: npm run smoke:server
+
+      # Кроссплатформенные проверки (node, без pwsh): версия в package.json не
+      # разъехалась по баннерам лаунчеров/README/electron-моста, а .bat соблюдают
+      # правила npm-флагов, delayed expansion и %ERRORLEVEL% вне блоков.
+      # На Windows шаг читает те же файлы с CRLF — это заодно проверка .gitattributes.
+      - name: Проверки согласованности (версии, лаунчеры)
+        run: npm run check:versions && npm run check:launchers
+
+

@@ -234,6 +234,83 @@ export async function loadProjectAudio(projectId: string, panelId: number): Prom
   }
 }
 
+// --- Подпись аудио: позволяет понять, что сохранённый файл устарел ---
+// Раньше loadProjectAudio всегда возвращал старый файл, поэтому правки текста
+// и смена голоса не применялись при повторной озвучке.
+
+export async function saveProjectAudioSignature(
+  projectId: string,
+  slot: ProjectAudioSlot,
+  signature: string
+): Promise<void> {
+  await writeFile(['projects', projectId, 'audio'], `${slot}.sig`, signature);
+}
+
+export async function getProjectAudioSignature(
+  projectId: string,
+  slot: ProjectAudioSlot
+): Promise<string | null> {
+  try {
+    if (!(await fileExists(['projects', projectId, 'audio'], `${slot}.sig`))) return null;
+    const blob = await readFile(['projects', projectId, 'audio'], `${slot}.sig`);
+    return (await blob.text()).trim();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Возвращает сохранённое аудио слота, если его подпись совпадает с ожидаемой.
+ *
+ * Мягкая миграция: если подписи ещё нет (аудио создано до v1.3.2), файл НЕ
+ * выбрасывается вслепую — решение принимает вызывающая сторона через
+ * `legacyIsFresh`. Если она подтверждает, что текст не менялся (сравнение с
+ * сохранённым таймлайном), подпись просто дописывается — пользователь не
+ * платит за повторную генерацию.
+ *
+ * @param legacyIsFresh undefined → старое аудио считается устаревшим
+ *                      (безопасно: повтор обычно попадает в общий TTS-кэш);
+ *                      true → подпись дописывается, файл переиспользуется.
+ */
+export async function loadFreshProjectAudio(
+  projectId: string,
+  slot: ProjectAudioSlot,
+  expectedSignature: string,
+  legacyIsFresh?: boolean
+): Promise<Blob | null> {
+  const blob = slot === 'intro'
+    ? await loadProjectIntroAudio(projectId)
+    : slot === 'outro'
+      ? await loadProjectOutroAudio(projectId)
+      : await loadProjectAudio(projectId, slot);
+  if (!blob) return null;
+
+  const stored = await getProjectAudioSignature(projectId, slot);
+
+  // Подписи нет (аудио из старой версии)
+  if (!stored) {
+    if (legacyIsFresh) {
+      await saveProjectAudioSignature(projectId, slot, expectedSignature);
+      return blob;
+    }
+    return null;
+  }
+
+  return stored === expectedSignature ? blob : null;
+}
+
+export type ProjectAudioSlot = number | 'intro' | 'outro';
+
+function audioFileName(slot: ProjectAudioSlot): string {
+  return `${slot}.mp3`;
+}
+
+/** Удаляет аудио (и подпись) — используется кнопкой «↻ Переозвучить». */
+export async function deleteProjectAudio(projectId: string, slot: ProjectAudioSlot): Promise<void> {
+  await deleteFile(['projects', projectId, 'audio'], audioFileName(slot));
+  await deleteFile(['projects', projectId, 'audio'], `${slot}.sig`);
+}
+
 export async function saveProjectIntroAudio(projectId: string, blob: Blob): Promise<void> {
   await writeFile(['projects', projectId, 'audio'], `intro.mp3`, blob);
 }

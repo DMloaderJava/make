@@ -6,9 +6,10 @@ export const qwenTTS: TTSProvider = {
   description: '49 голосов, 10 языков, 1M символов free',
   freeTier: true,
   languages: ['ru', 'en', 'zh', 'multi'],
+  defaultModel: 'qwen3-tts-flash',
   baseUrl: 'https://dashscope.aliyuncs.com',
 
-  async generate(text: string, { voice = 'Chelsie', apiKey, language = 'ru' }: TTSOptions): Promise<ArrayBuffer> {
+  async generate(text: string, { voice = 'Chelsie', apiKey, language = 'ru', model }: TTSOptions): Promise<ArrayBuffer> {
     // Qwen TTS via DashScope API
     const response = await fetch('https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation', {
       method: 'POST',
@@ -17,7 +18,7 @@ export const qwenTTS: TTSProvider = {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'qwen3-tts-flash',
+        model: model || 'qwen3-tts-flash',
         input: {
           text: text,
           voice: voice,

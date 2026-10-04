@@ -6,6 +6,8 @@ export const murfTTS: TTSProvider = {
   description: 'Free tier · 120+ голосов, синхронизация с видео',
   freeTier: true,
   languages: ['en', 'multi'],
+  // Не проверено вживую: эндпоинт/поля взяты из документации (см. npm run smoke:tts).
+  experimental: true,
   baseUrl: 'https://api.murf.ai',
 
   async generate(text: string, { voice = 'en-US-natalie', apiKey }: TTSOptions): Promise<ArrayBuffer> {

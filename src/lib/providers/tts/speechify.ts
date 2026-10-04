@@ -5,10 +5,16 @@ export const speechifyTTS: TTSProvider = {
   name: 'Speechify',
   description: '1000+ голосов, celebrity voices, Simba 3.2, 60+ языков',
   freeTier: false,
+  defaultModel: 'simba-base',
   languages: ['ru', 'en', 'multi'],
+  // Не проверено вживую: эндпоинт/поля взяты из документации (см. npm run smoke:tts).
+  experimental: true,
+  // Параметр темпа в используемом эндпоинте не подтверждён — не отправляем
+  // наугад: 400 от API хуже, чем честная пометка «не поддерживается».
+  supportsSpeed: false,
   baseUrl: 'https://api.sws.speechify.com',
 
-  async generate(text: string, { voice = 'matthew', apiKey, speed = 1.0, language = 'ru-RU' }: TTSOptions): Promise<ArrayBuffer> {
+  async generate(text: string, { voice = 'matthew', apiKey, speed: _speed = 1.0, language = 'ru-RU', model }: TTSOptions): Promise<ArrayBuffer> {
     // Speechify API - simplified
     const response = await fetch('https://api.sws.speechify.com/v1/audio/speech', {
       method: 'POST',
@@ -21,7 +27,7 @@ export const speechifyTTS: TTSProvider = {
         voice_id: voice,
         audio_format: 'mp3',
         language: language,
-        model: 'simba-base',
+        model: model || 'simba-base',
       })
     });
 

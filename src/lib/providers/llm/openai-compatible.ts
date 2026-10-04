@@ -1,4 +1,145 @@
-import { LLMProvider, LLMOptions, Message } from './types';
+import { LLMProvider, LLMOptions, Message, ResponseFormatSchema } from './types';
+
+/**
+ * Провайдеры, у которых нет json_schema, но есть json_object.
+ * Остальные (OpenAI/OpenRouter/Groq/Together/Mistral/...) поддерживают json_schema.
+ */
+const JSON_OBJECT_ONLY_PROVIDERS = new Set(['custom', 'cloudflare', 'deepinfra', 'novita', 'siliconflow', 'zhipu', 'moonshot', '01ai', 'huggingface', 'cohere']);
+
+export type ResponseFormatMode = 'schema' | 'object' | 'none';
+
+/** Собирает response_format для OpenAI-совместимого тела запроса. */
+export function buildResponseFormat(
+  providerId: string,
+  responseFormat?: ResponseFormatSchema,
+  mode: ResponseFormatMode = 'schema'
+): Record<string, unknown> | undefined {
+  if (!responseFormat || mode === 'none') return undefined;
+
+  if (mode === 'object' || JSON_OBJECT_ONLY_PROVIDERS.has(providerId)) {
+    return { type: 'json_object' };
+  }
+
+  return {
+    type: 'json_schema',
+    json_schema: {
+      name: responseFormat.name || 'response',
+      schema: responseFormat.schema,
+      strict: responseFormat.strict ?? false,
+    },
+  };
+}
+
+/**
+ * Провайдер мог не переварить json_schema, хотя формально она «OpenAI-совместима»:
+ * тогда 400 прилетает именно на response_format. Запоминаем рабочий режим,
+ * чтобы не платить тремя запросами за каждый вызов, и деградируем мягко.
+ *
+ * Ключ — «провайдер|модель»: у одного и того же провайдера gpt-4o понимает
+ * json_schema, а меньшая модель может нет. Кэш на провайдера целиком приводил бы
+ * к тому, что вторая модель всегда платит за лишние попытки.
+ */
+const responseFormatModes = new Map<string, { mode: ResponseFormatMode; expiresAt: number }>();
+
+/** Схема-режим перепроверяем раз в 10 минут: провайдер мог починить json_schema. */
+const RESPONSE_FORMAT_TTL_MS = 10 * 60 * 1000;
+/** Потолок кэша: длинная сессия в Electron не должна расти бесконечно. */
+const RESPONSE_FORMAT_MAX_ENTRIES = 200;
+
+function getCachedMode(key: string): ResponseFormatMode | undefined {
+  const entry = responseFormatModes.get(key);
+  if (!entry) return undefined;
+  if (Date.now() > entry.expiresAt) {
+    responseFormatModes.delete(key);
+    return undefined;
+  }
+  // Перекладываем запись в конец: вытесняется самый давно использованный
+  // (FIFO по вставке выбивал бы как раз активные пары «провайдер|модель»).
+  responseFormatModes.delete(key);
+  responseFormatModes.set(key, entry);
+  return entry.mode;
+}
+
+function setCachedMode(key: string, mode: ResponseFormatMode): void {
+  responseFormatModes.delete(key); // пере-вставка = свежая позиция в LRU
+  // Полноценный schema — не деградация: держим долго и не перепроверяем.
+  const ttl = mode === 'schema' ? 24 * 60 * 60 * 1000 : RESPONSE_FORMAT_TTL_MS;
+  if (responseFormatModes.size >= RESPONSE_FORMAT_MAX_ENTRIES && !responseFormatModes.has(key)) {
+    const oldest = responseFormatModes.keys().next();
+    if (!oldest.done) responseFormatModes.delete(oldest.value);
+  }
+  responseFormatModes.set(key, { mode, expiresAt: Date.now() + ttl });
+}
+
+function looksLikeFormatRejection(status: number, body: string): boolean {
+  if (status !== 400 && status !== 422) return false;
+  const text = body.toLowerCase();
+  return text.includes('response_format') || text.includes('json_schema') || text.includes('response format');
+}
+
+/**
+ * POST на /chat/completions с деградацией response_format:
+ * json_schema → json_object → без него. Ошибки не по формату пробрасываются как есть.
+ */
+async function postChatCompletion(params: {
+  configId: string;
+  name: string;
+  url: string;
+  apiKey: string;
+  body: Record<string, unknown>;
+  responseFormat?: ResponseFormatSchema;
+  label?: string;
+}): Promise<Response> {
+  const { configId, name, url, apiKey, body, responseFormat, label = '' } = params;
+  const model = typeof body.model === 'string' ? body.model : '';
+  const cacheKey = `${configId}|${model}`;
+
+  const known = getCachedMode(cacheKey);
+  const candidates: ResponseFormatMode[] = known
+    ? known === 'none' ? ['none'] : [known, 'none']
+    : ['schema', 'object', 'none'];
+
+  let lastError = '';
+  let lastStatus = 0;
+
+  for (const mode of candidates) {
+    const responseFormatBody = buildResponseFormat(configId, responseFormat, mode);
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ...body,
+        ...(responseFormatBody ? { response_format: responseFormatBody } : {}),
+      }),
+    });
+
+    if (response.ok) {
+      setCachedMode(cacheKey, responseFormatBody ? mode : 'none');
+      return response;
+    }
+
+    const errText = await response.text();
+    lastError = errText;
+    lastStatus = response.status;
+
+    if (!looksLikeFormatRejection(response.status, errText) || mode === 'none') {
+      throw new Error(`${name}${label} error: ${response.status} — ${errText.slice(0, 500)}`);
+    }
+
+    // NB: каждый повтор — это повторная отправка промпта (для vision — с картинками),
+    // поэтому рабочий режим запоминается, и следующий вызов идёт сразу в него.
+    // Но деградация ('object'/'none') кэшируется с TTL: иначе разовый сбой
+    // провайдера навсегда лишал бы нас строгой схемы до перезагрузки вкладки.
+    console.warn(
+      `[llm:${cacheKey}] response_format=${mode} отклонён (${response.status}) — пробую ${mode === 'schema' ? 'json_object' : 'без response_format'}`
+    );
+  }
+
+  throw new Error(`${name}${label} error: ${lastStatus} — ${lastError.slice(0, 500)}`);
+}
 
 export function createOpenAICompatibleProvider(config: {
   id: string;
@@ -69,24 +210,19 @@ export function createOpenAICompatibleProvider(config: {
         return data.content || '';
       }
 
-      const response = await fetch(`${baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${options.apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
+      const response = await postChatCompletion({
+        configId: config.id,
+        name: config.name,
+        url: `${baseUrl}/chat/completions`,
+        apiKey: options.apiKey,
+        body: {
           model,
           messages: openAIMessages,
           temperature: options.temperature ?? 0.7,
           max_tokens: options.maxTokens ?? 4000,
-        })
+        },
+        responseFormat: options.responseFormat,
       });
-
-      if (!response.ok) {
-        const err = await response.text();
-        throw new Error(`${config.name} error: ${response.status} — ${err.slice(0, 500)}`);
-      }
 
       const data = await response.json();
       return data.choices?.[0]?.message?.content || '';
@@ -139,24 +275,20 @@ export function createOpenAICompatibleProvider(config: {
         return data.content || '';
       }
 
-      const response = await fetch(`${baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${options.apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
+      const response = await postChatCompletion({
+        configId: config.id,
+        name: config.name,
+        url: `${baseUrl}/chat/completions`,
+        apiKey: options.apiKey,
+        body: {
           model,
           messages,
           temperature: 0.2,
           max_tokens: options.maxTokens ?? 4000,
-        })
+        },
+        responseFormat: options.responseFormat,
+        label: ' vision',
       });
-
-      if (!response.ok) {
-        const err = await response.text();
-        throw new Error(`${config.name} vision error: ${response.status} — ${err.slice(0, 500)}`);
-      }
 
       const data = await response.json();
       return data.choices?.[0]?.message?.content || '';

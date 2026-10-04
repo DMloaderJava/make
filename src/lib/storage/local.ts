@@ -1,4 +1,4 @@
-import { lsKey, LS_KEYS } from './info';
+import { LS_KEYS } from './info';
 
 const STORAGE_KEY = LS_KEYS.KEYS;
 const SETTINGS_KEY = LS_KEYS.SETTINGS;
