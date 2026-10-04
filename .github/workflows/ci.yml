@@ -38,11 +38,16 @@ jobs:
       - name: Сборка
         run: npm run build
 
+      # Прод-сборка должна не только собраться, но и запуститься: проверяем
+      # `next start` и живые маршруты (страницы + валидация /api/tts).
+      - name: Smoke: прод-сборка стартует
+        run: npm run smoke:server
+
       # Кроссплатформенные проверки (node, без pwsh): версия в package.json не
       # разъехалась по баннерам лаунчеров/README/electron-моста, а .bat соблюдают
       # правила npm-флагов, delayed expansion и %ERRORLEVEL% вне блоков.
       # На Windows шаг читает те же файлы с CRLF — это заодно проверка .gitattributes.
-      - name: Проверки согласованности (версии, .bat)
+      - name: Проверки согласованности (версии, лаунчеры)
         run: npm run check:versions && npm run check:launchers
 
 

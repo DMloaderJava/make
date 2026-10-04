@@ -16,6 +16,7 @@
     "check:versions": "node scripts/check-version.mjs",
     "check:launchers": "node scripts/check-launchers.mjs",
     "smoke:tts": "tsx scripts/smoke-tts.ts",
+    "smoke:server": "node scripts/smoke-server.mjs",
     "verify": "npm run check:versions && npm run check:launchers && npm run typecheck && npm run test && npm run lint && npm run build",
     "desktop": "electron electron/main.js",
     "desktop:dev": "concurrently \"npm run dev -- -H 0.0.0.0 -p 3000\" \"wait-on http://localhost:3000 && electron electron/main.js\"",

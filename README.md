@@ -244,6 +244,15 @@ CI (`.github/workflows/ci.yml`) гоняет typecheck/test/lint/build на
   серверным путём (вызов вручную, с ключом OpenAI или `nodejs-whisper`) и при
   отсутствии зависимости отвечает мягко (`method: 'unavailable'`), а не падает.
 
+### Smoke вместо ручного curl
+- **`npm run smoke:server`** поднимает прод-сборку (`next start` на порту 3311) и
+  проверяет живые маршруты: `/`, `/settings`, `/editor/[id]` → 200, а
+  `POST /api/tts` с пустым телом → 400 (роут жив и валидирует вход, а не падает
+  500). Шаг выполняется в CI после сборки — на обеих ОС.
+- Граница честная: smoke проверяет, что сервер стартует и отвечает, но не
+  заменяет браузерный e2e — экспорт через WebCodecs/MediaRecorder и OPFS
+  проверяются только настоящим Chromium (Playwright), это отдельная задача.
+
 ### Тесты
 84/84: `tests/voiceResolver.test.ts` (6 — политика голосов и тело Cartesia),
 `tests/launcherChecks.test.ts` (+1 — `.sh`-лаунчеры).
