@@ -86,7 +86,10 @@ export function checkLaunchers(files) {
     const text = files[name];
 
     text.split(/\r?\n/).forEach((line, index) => {
-      if (!/^\s*(call\s+)?npm\s+(ci|install)\b/.test(line)) return;
+      // `npx npm …` и `call npm.cmd …` — тоже npm-вызовы: без префиксов они бы
+      // выпали из проверки флагов (в текущих лаунчерах их нет, но правило должно
+      // работать на будущее).
+      if (!/^\s*(?:call\s+)?(?:npx\s+)?npm(?:\.cmd)?\s+(?:ci|install)\b/.test(line)) return;
       if (!/--no-audit/.test(line) || !/--no-fund/.test(line)) {
         problems.push(`${name}:${index + 1}: npm-вызов без --no-audit --no-fund — ${line.trim()}`);
       }

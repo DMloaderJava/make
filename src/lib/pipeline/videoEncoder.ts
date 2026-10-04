@@ -7,7 +7,7 @@
 
 import { SyncTimeline } from '../storage/db';
 import { getKenBurnsParams } from './buildTimeline';
-import { appendPlacements, type AudioPlacement } from './audioMix';
+import { appendPlacements, measureBlobDurations, stackBlobsBackToBack, type AudioPlacement } from './audioMix';
 import { createStripSceneFromMedia, type StripScene } from './mangaStrip';
 
 export interface RenderOptions {
@@ -263,7 +263,9 @@ export class WebCodecsBackend implements RenderBackend {
     output.addVideoTrack(canvasSource, { frameRate: options.fps });
 
     // Audio: раскладываем фрагменты по таймлайну (рересемплинг + паузы между панелями).
-    // Если размещения не передали (старые вызовы) — склеиваем подряд, как раньше.
+    // Если размещения не передали (старые вызовы) — склеиваем подряд по ФАКТИЧЕСКИМ
+    // длительностям (stackBlobsBackToBack): раньше там брался timeline[i-1].audioStart,
+    // и для outro это давало старт последней панели (наложение вместо «после неё»).
     // mediabunny принимает буферы последовательно, поэтому паузы добиваются тишиной,
     // а не предварительным «гигантским» миксом (10 мин стерео 44.1 кГц ≈ 212 МБ).
     let audioSource: any = null;
@@ -271,10 +273,10 @@ export class WebCodecsBackend implements RenderBackend {
     if (options.audioPlacements?.length || options.audioBlobs.length > 0) {
       const placements: AudioPlacement[] = options.audioPlacements?.length
         ? options.audioPlacements
-        : options.audioBlobs.map((blob, i) => ({
-            start: i === 0 ? 0 : options.timeline[i - 1]?.audioStart ?? 0,
-            blob,
-          }));
+        : stackBlobsBackToBack(
+            options.audioBlobs,
+            await measureBlobDurations(options.audioBlobs, { sampleRate: 44100, channels: 2 })
+          );
 
       audioSource = new AudioBufferSource({
         codec: 'aac',

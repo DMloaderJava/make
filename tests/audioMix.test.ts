@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatOverlaps, packStarts, userFacingOverlaps } from '../src/lib/pipeline/audioMix';
+import { formatOverlaps, packStarts, stackBlobsBackToBack, userFacingOverlaps } from '../src/lib/pipeline/audioMix';
 
 test('packStarts: без наложений ничего не меняет', () => {
   const result = packStarts([
@@ -117,4 +117,22 @@ test('formatOverlaps/userFacingOverlaps: текст для UI только пр�
   assert.equal(text.length, 1);
   assert.match(text[0], /Панель 1/);
   assert.match(text[0], /3\.0 с/);
+});
+
+test('stackBlobsBackToBack: устаревшая раскладка идёт встык по фактическим длительностям', () => {
+  // Регрессия: раньше videoEncoder для этого случая брал timeline[i-1].audioStart —
+  // для outro (индекс за пределами таймлайна) это старт последней ПАНЕЛИ, то есть
+  // наложение, а не «после неё». Здесь старт считается по длительностям.
+  const blobs = [new Blob(['a']), new Blob(['b']), new Blob(['c'])];
+  const placements = stackBlobsBackToBack(blobs, [1.5, 2, 0.5]);
+
+  assert.deepEqual(placements.map(p => p.start), [0, 1.5, 3.5]);
+  assert.ok(placements.every((p, i) => p.blob === blobs[i]), 'блобы идут в исходном порядке');
+
+  // Битые длительности не должны отравить старт последующих фрагментов.
+  const degenerate = stackBlobsBackToBack(blobs, [Number.NaN, -5, Number.POSITIVE_INFINITY]);
+  assert.deepEqual(degenerate.map(p => p.start), [0, 0, 0]);
+  assert.ok(degenerate.every(p => Number.isFinite(p.start)));
+
+  assert.deepEqual(stackBlobsBackToBack([], []), []);
 });

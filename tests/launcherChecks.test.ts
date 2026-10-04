@@ -90,6 +90,16 @@ test('npm-вызовы требуют оба флага, !VAR! требует de
   assert.equal(bangProblems.length, 1);
   assert.match(bangProblems[0], /enabledelayedexpansion/);
 
+  // Префиксы npx/call и Windows-форма npm.cmd не должны прятать вызов от проверки.
+  const npx = shell(['setlocal', 'npx npm ci --legacy-peer-deps --no-audit']);
+  const npxProblems = checkLaunchers(five(npx));
+  assert.equal(npxProblems.length, 1, 'npx npm ci без --no-fund должен ловиться');
+  assert.match(npxProblems[0], /--no-audit --no-fund/);
+
+  const cmd = shell(['setlocal', 'call npm.cmd install --no-audit']);
+  const cmdProblems = checkLaunchers(five(cmd));
+  assert.equal(cmdProblems.length, 1, 'call npm.cmd install без --no-fund должен ловиться');
+
   // .sh проверяются тем же правилом флагов: иначе --no-fund мог бы пропасть
   // из install.sh/start-*.sh незамеченным.
   const shFive = (text: string) => ({ ...five(shell(['setlocal'])), 'install.sh': text });

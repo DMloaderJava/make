@@ -318,6 +318,27 @@ export function userFacingOverlaps(overlaps: PackOverlap[]): string[] {
 }
 
 /**
+ * Раскладка «встык» для устаревшего вызова без `audioPlacements`:
+ * intro → панели → outro подряд, без пауз.
+ *
+ * Раньше в videoEncoder.ts стояло `start = timeline[i - 1]?.audioStart ?? 0`, из-за
+ * чего для outro (i = timeline.length + 1) брался стart последней ПАНЕЛИ — звук
+ * наложился бы сам на себя, а не шёл после неё. Здесь старт считается по
+ * фактическим длительностям, поэтому лишних наложений нет.
+ */
+export function stackBlobsBackToBack(blobs: Blob[], durations: number[]): AudioPlacement[] {
+  let cursor = 0;
+  return blobs.map((blob, i) => {
+    const placement: AudioPlacement = { start: cursor, blob };
+    const duration = durations[i];
+    // NaN/Infinity (например, от несостоявшегося декодирования) не должны
+    // отравить старт всех последующих фрагментов.
+    cursor += Number.isFinite(duration) && duration > 0 ? duration : 0;
+    return placement;
+  });
+}
+
+/**
  * Измеряет длительности фрагментов.
  *
  * Буферы не складываются в массив (раньше это давало ~88 МБ на 50 панелей),
@@ -326,6 +347,15 @@ export function userFacingOverlaps(overlaps: PackOverlap[]): string[] {
  * повторного декодирования. При ролике длиннее бюджета — деградация до двух
  * декодирований, зато память ограничена.
  */
+async function measureBlobDuration(blob: Blob, sampleRate: number, channels: number): Promise<number> {
+  const cached = durationCache.get(blob);
+  if (cached !== undefined) return cached;
+  const buffer = await decodeToTarget(blob, sampleRate, channels);
+  const duration = buffer ? buffer.duration : 0;
+  if (buffer) durationCache.set(blob, duration);
+  return duration;
+}
+
 export async function measurePlacements(
   placements: AudioPlacement[],
   options: { sampleRate?: number; channels?: number } = {}
@@ -335,17 +365,26 @@ export async function measurePlacements(
   const durations: number[] = [];
 
   for (const placement of placements) {
-    const cached = durationCache.get(placement.blob);
-    if (cached !== undefined) {
-      durations.push(cached);
-      continue;
-    }
-    const buffer = await decodeToTarget(placement.blob, sampleRate, channels);
-    const duration = buffer ? buffer.duration : 0;
-    if (buffer) durationCache.set(placement.blob, duration);
-    durations.push(duration);
+    durations.push(await measureBlobDuration(placement.blob, sampleRate, channels));
   }
 
+  return durations;
+}
+
+/**
+ * То же измерение, но по голым блобам: нужно устаревшей раскладке «встык»
+ * (stackBlobsBackToBack), где никаких размещений ещё нет.
+ */
+export async function measureBlobDurations(
+  blobs: Blob[],
+  options: { sampleRate?: number; channels?: number } = {}
+): Promise<number[]> {
+  const sampleRate = options.sampleRate ?? 44100;
+  const channels = options.channels ?? 2;
+  const durations: number[] = [];
+  for (const blob of blobs) {
+    durations.push(await measureBlobDuration(blob, sampleRate, channels));
+  }
   return durations;
 }
 

@@ -20,6 +20,20 @@
  * Запуск: `npm run smoke:server` после `npm run build`.
  */
 import { spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
+
+/**
+ * Путь к бинарю next ищем через резолвер Node, а не строкой 'node_modules/next/…':
+ * при pnpm/yarn раскладка node_modules другая, и жёсткий путь падал бы.
+ */
+const require = createRequire(import.meta.url);
+let nextBin;
+try {
+  nextBin = require.resolve('next/dist/bin/next');
+} catch {
+  console.error('smoke:server — не найден next. Установите зависимости: npm ci --ignore-scripts --no-audit --no-fund');
+  process.exit(2);
+}
 
 const PORT = Number(process.env.SMOKE_PORT || 3311);
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -32,7 +46,7 @@ const checks = [
   { method: 'POST', path: '/api/tts', body: {}, expect: 400 },
 ];
 
-const server = spawn(process.execPath, ['node_modules/next/dist/bin/next', 'start', '-p', String(PORT)], {
+const server = spawn(process.execPath, [nextBin, 'start', '-p', String(PORT)], {
   stdio: ['ignore', 'pipe', 'pipe'],
   env: { ...process.env, PORT: String(PORT), NODE_ENV: 'production' },
 });

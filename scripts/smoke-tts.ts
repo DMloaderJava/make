@@ -125,7 +125,11 @@ async function run(): Promise<void> {
       const ms = Date.now() - started;
       const mime = resolveAudioMime(provider.id, buffer);
       const expected = providerMimeType(provider.id);
-      const mismatch = mime !== expected ? ` (ожидали ${expected})` : '';
+      // У experimental-провайдеров ожидаемый MIME — догадка из каталога, поэтому
+      // пишем это прямо, а не как расхождение с проверенным фактом.
+      const mismatch = mime !== expected
+        ? ` (в каталоге ${expected}${provider.experimental ? ' — для непроверенных это догадка' : ''})`
+        : '';
       results.push({ id: provider.id, status: 'OK', detail: `${buffer.byteLength} B, ${mime}${mismatch}, ${ms} мс` });
       console.log(`OK    ${provider.id.padEnd(14)} ${buffer.byteLength} B, ${mime}${mismatch}, ${ms} мс`);
     } catch (e) {
