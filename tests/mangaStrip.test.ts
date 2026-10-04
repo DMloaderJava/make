@@ -168,6 +168,76 @@ test('buildScrollKeyframes: переход плавный (easeInOut), а не �
   assert.ok(middle > from && middle < to);
 });
 
+test('buildScrollKeyframes: короткая страница над короткой — переход всё равно виден', () => {
+  // Регрессия: ключ удержания следующей короткой страницы (span.start) совпадает по
+  // времени с переходом к ней (span.end предыдущей). Раньше удержание брало target и
+  // затирало посчитанный нудж — переход схлопывался до 4 px. Проверяем именно стык
+  // двух коротких страниц, когда прокрутка в принципе возможна (третья — длинная).
+  const layout = computeStripLayout(
+    [{ width: 1920, height: 240 }, { width: 1920, height: 240 }, { width: 1920, height: 800 }],
+    { ...FRAME, viewport: 720, gap: 4 }
+  );
+  const transition = 1;
+  const keys = buildScrollKeyframes(
+    [
+      { slotIndex: 0, start: 0, end: 4 },
+      { slotIndex: 1, start: 4, end: 7 },
+      { slotIndex: 2, start: 7, end: 11 },
+    ],
+    layout,
+    { transition, panInside: true }
+  );
+
+  const from = sampleScroll(keys, 4 - transition - 0.01);
+  const to = sampleScroll(keys, 4 + 0.01);
+  assert.ok(Math.abs(to - from) >= 8, `сдвиг на стыке ${from} → ${to}, ожидали ≥ 8 px`);
+});
+
+test('buildScrollKeyframes: меньше 8 px окно едет только упёршись в границу ленты', () => {
+  // Инвариант вместо запрета: если сдвиг на стыке < 8 px, значит окно уже на пределе
+  // (0 или maxScrollY) — двигать нечего, а не «нудж потерялся» где-то внутри.
+  const atBound = (v: number, max: number) => Math.abs(v) < 1e-6 || Math.abs(v - max) < 1e-6;
+  for (const h0 of [240, 500, 1080]) {
+    for (const h2 of [800, 3000]) {
+      for (const gap of [0, 4, 8, 24]) {
+        for (const viewport of [720, 1080]) {
+        const layout = computeStripLayout(
+          [
+            { width: 1920, height: h0 },
+            { width: 1920, height: 240 },
+            { width: 1920, height: h2 },
+          ],
+          { ...FRAME, viewport, gap }
+        );
+        const max = maxScrollY(layout);
+        if (max <= 8) continue; // прокрутки нет — переход и не требуется
+
+        const keys = buildScrollKeyframes(
+          [
+            { slotIndex: 0, start: 0, end: 4 },
+            { slotIndex: 1, start: 4, end: 7 },
+            { slotIndex: 2, start: 7, end: 11 },
+          ],
+          layout,
+          { transition: 1, panInside: true }
+        );
+
+        for (const end of [4, 7]) {
+          const from = sampleScroll(keys, end - 1.01);
+          const to = sampleScroll(keys, end + 0.01);
+          if (Math.abs(to - from) < 8) {
+            assert.ok(
+              atBound(from, max) && atBound(to, max),
+              `h=${h0}/${h2} gap=${gap} vp=${viewport} стык@${end}: ${from} → ${to}, max=${max} — сдвиг потерян не у границы`
+            );
+          }
+        }
+        }
+      }
+    }
+  }
+});
+
 test('buildScrollKeyframes: страница выше кадра проезжается (webtoon-чтение)', () => {
   const layout = computeStripLayout(PAGES, { ...FRAME, viewport: 1080, gap: 24 });
   const keys = buildScrollKeyframes([{ slotIndex: 1, start: 0, end: 10 }], layout, {

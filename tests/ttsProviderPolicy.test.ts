@@ -94,3 +94,40 @@ test('mustUseProxy покрывает и CORS-провайдеров, и «кл�
   assert.equal(mustUseProxy('gemini'), false);
   assert.equal(mustUseProxy('cartesia'), false);
 });
+
+test('supportsSpeed=false честно означает «speed не уходит в API»', async () => {
+  // Поведенческая проверка: провайдеры, помеченные в реестре как не поддерживающие
+  // темп, не должны отправлять speed — иначе UI-пометка «не поддерживается» лгала бы.
+  const { geminiTTS } = await import('../src/lib/providers/tts/gemini');
+  const { openAITTS } = await import('../src/lib/providers/tts/openai');
+  const { speechifyTTS } = await import('../src/lib/providers/tts/speechify');
+
+  const calls: Array<{ body: string }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+    calls.push({ body: String(init?.body ?? '') });
+    const audioB64 = Buffer.from([0, 0, 0, 0]).toString('base64');
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ candidates: [{ content: { parts: [{ inlineData: { data: audioB64 } }] } }], audio_data: audioB64 }),
+      arrayBuffer: async () => new ArrayBuffer(4),
+      text: async () => '',
+    } as unknown as Response;
+  }) as typeof fetch;
+
+  try {
+    await geminiTTS.generate('тест', { apiKey: 'k', voice: 'Puck', speed: 1.6 });
+    await speechifyTTS.generate('тест', { apiKey: 'k', voice: 'matthew', speed: 1.6 });
+    await openAITTS.generate('тест', { apiKey: 'k', voice: 'alloy', speed: 1.6 });
+
+    assert.equal(geminiTTS.supportsSpeed, false, 'gemini помечен как не поддерживающий темп');
+    assert.equal(speechifyTTS.supportsSpeed, false, 'speechify помечен как не поддерживающий темп');
+    assert.ok(!calls[0].body.includes('speed'), `gemini отправил speed: ${calls[0].body}`);
+    assert.ok(!calls[1].body.includes('speed'), `speechify отправил speed: ${calls[1].body}`);
+    // Контроль с другой стороны: провайдер, который темп поддерживает, его передаёт.
+    assert.ok(calls[2].body.includes('"speed":1.6'), `openai не передал speed: ${calls[2].body}`);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

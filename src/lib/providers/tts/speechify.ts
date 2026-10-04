@@ -9,9 +9,12 @@ export const speechifyTTS: TTSProvider = {
   languages: ['ru', 'en', 'multi'],
   // Не проверено вживую: эндпоинт/поля взяты из документации (см. npm run smoke:tts).
   experimental: true,
+  // Параметр темпа в используемом эндпоинте не подтверждён — не отправляем
+  // наугад: 400 от API хуже, чем честная пометка «не поддерживается».
+  supportsSpeed: false,
   baseUrl: 'https://api.sws.speechify.com',
 
-  async generate(text: string, { voice = 'matthew', apiKey, speed = 1.0, language = 'ru-RU', model }: TTSOptions): Promise<ArrayBuffer> {
+  async generate(text: string, { voice = 'matthew', apiKey, speed: _speed = 1.0, language = 'ru-RU', model }: TTSOptions): Promise<ArrayBuffer> {
     // Speechify API - simplified
     const response = await fetch('https://api.sws.speechify.com/v1/audio/speech', {
       method: 'POST',

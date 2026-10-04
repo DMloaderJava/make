@@ -49,7 +49,8 @@ export async function generateOutro(
 }
 
 // Fallback generators if LLM fails
-export function generateFallbackIntro(sceneDescription: string): string {
+/** Текст-заглушка универсальный: описание сцены здесь не используется (в отличие от LLM-пути generateIntro). */
+export function generateFallbackIntro(): string {
   return `Вы когда-нибудь задумывались, что скрывается за одним кадром? За одним взглядом, за одной фразой? Эта сцена — именно такой момент. Здесь всё меняется. Эмоции накалены до предела, и каждое слово имеет вес. Давайте погрузимся в эту историю и посмотрим, что происходит, когда герои сталкиваются с тем, что меняет их навсегда. Сейчас вы увидите всё своими глазами.`;
 }
 

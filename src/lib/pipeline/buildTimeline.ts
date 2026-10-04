@@ -12,8 +12,7 @@ export function buildTimeline(
   panels: PanelData[],
   audioDurations: Map<number, number>, // panelId -> duration
   voiceAssignments: Record<string, string>,
-  introDuration: number = 8,
-  outroDuration: number = 5
+  introDuration: number = 8
 ): SyncTimeline[] {
   const timeline: SyncTimeline[] = [];
   let currentTime = introDuration;

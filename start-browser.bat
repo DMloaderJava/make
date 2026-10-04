@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal enabledelayedexpansion
 chcp 65001 >nul
 title Manga Voice Studio - Браузерный режим
 
@@ -32,7 +32,10 @@ if not exist node_modules (
     ) else (
         call npm install --legacy-peer-deps --no-audit --no-fund
     )
-    if %ERRORLEVEL% NEQ 0 (
+    :: !ERRORLEVEL!, а не %ERRORLEVEL%: внутри блока if (...) «проценты»
+    :: раскрываются один раз при разборе всей скобки — то есть до выполнения npm ci,
+    :: и проверка сравнивала бы с кодом от предыдущей команды (всегда ошибка).
+    if !ERRORLEVEL! NEQ 0 (
         echo [ОШИБКА] Установка зависимостей не удалась
         pause
         exit /b 1

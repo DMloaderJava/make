@@ -14,7 +14,6 @@ interface PreviewProps {
   duration: number;
   isPlaying: boolean;
   onPlayPause: () => void;
-  onSeek: (time: number) => void;
   /** Режим рендера проекта: постранично или вертикальная лента. */
   renderMode?: 'panels' | 'strip';
   /** Высота видимой части ленты в px кадра 1080 (по умолчанию — сам кадр). */
@@ -37,7 +36,6 @@ export function Preview({
   duration,
   isPlaying,
   onPlayPause,
-  onSeek,
   renderMode = 'panels',
   stripViewport,
   stripGap,

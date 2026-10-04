@@ -41,8 +41,7 @@ export interface AssembleOptions {
 
 // Honest implementation using Canvas + MediaRecorder - fixed Promise antipattern
 export async function assembleVideoWithCanvas(
-  options: AssembleOptions & { onProgress?: (p: number) => void },
-  getImageElement?: (dataUrl: string) => Promise<HTMLImageElement>
+  options: AssembleOptions & { onProgress?: (p: number) => void }
 ): Promise<Blob> {
   const canvas = document.createElement('canvas');
   const width = options.width || 1920;
@@ -185,20 +184,37 @@ export async function assembleVideoWithCanvas(
       resolve(new Blob(chunks, { type: mimeType || 'video/webm' }));
     };
     recorder.onerror = (e) => {
+      if (stopGuard !== undefined) clearTimeout(stopGuard);
       try { scheduler?.dispose(); } catch {}
       try { audioContext?.close(); } catch {}
       reject(e);
     };
+
+    /**
+     * Единая точка остановки записи.
+     *
+     * Таймер-страховка взводится ТОЛЬКО после фактического recorder.start(), а не
+     * сразу после waitForStart: если prime() (декод первых секунд дорожки, на
+     * слабой машине с длинным интро — секунды) затягивался, старый таймер
+     * срабатывал раньше старта записи, проверка `state === 'recording'` не
+     * проходила — и запись оставалась без страховки вообще.
+     */
+    let stopGuard: ReturnType<typeof setTimeout> | undefined;
+    const stopRecorder = () => {
+      if (stopGuard !== undefined) { clearTimeout(stopGuard); stopGuard = undefined; }
+      if (recorder.state === 'recording') recorder.stop();
+    };
+
     let fallbackStart = performance.now();
     let frameCount = 0;
 
     const renderFrame = (time: number) => {
       ctx.fillStyle = '#000';
       ctx.fillRect(0, 0, width, height);
-      if (time < options.introDuration) renderIntro(ctx, width, height, options, time, loadedImages);
+      if (time < options.introDuration) renderIntro(ctx, width, height, options, loadedImages);
       else if (stripScene && time < panelsEnd) stripScene.render(ctx, time);
       else if (options.timeline.length > 0 && time < panelsEnd) renderPanel(ctx, width, height, options, time, loadedImages);
-      else renderOutro(ctx, width, height, options, time, loadedImages);
+      else renderOutro(ctx, width, height, options, loadedImages);
       if (options.srtContent) renderSubtitle(ctx, width, height, options.srtContent, time);
       // NB: полоса прогресса больше не рисуется — она попадала в готовое видео
     };
@@ -211,7 +227,7 @@ export async function assembleVideoWithCanvas(
       // Без этого вызова в графе не окажется ни одного источника — и WEBM будет немым.
       scheduler?.tick();
       const time = mediaClock(fallbackStart);
-      if (time >= totalDuration) { renderFrame(totalDuration); recorder.stop(); return; }
+      if (time >= totalDuration) { renderFrame(totalDuration); stopRecorder(); return; }
       if (time >= 0) renderFrame(time);
       frameCount++;
       if (frameCount % 10 === 0) options.onProgress?.(Math.max(0, time / totalDuration));
@@ -234,6 +250,9 @@ export async function assembleVideoWithCanvas(
         renderFrame(0);
         fallbackStart = performance.now();
         recorder.start(100);
+        // Страховка от «вечной» записи, если кадры перестанут приходить (вкладка
+        // в фоне): отсчёт от реального старта, а не от момента waitForStart.
+        stopGuard = setTimeout(stopRecorder, (totalDuration + 5) * 1000);
         requestAnimationFrame(animate);
       })();
     };
@@ -242,8 +261,6 @@ export async function assembleVideoWithCanvas(
     // промахивается на 5–10 мс, из-за чего картинка уходила от звука.
     const remaining = () => (audioStartedAt !== null && audioContext ? audioStartedAt - audioContext.currentTime : 0);
     waitForStart({ remaining, onStart: beginRecording });
-
-    setTimeout(() => { if (recorder.state === 'recording') recorder.stop(); }, (totalDuration + leadIn + 5) * 1000);
   });
 }
 
@@ -252,7 +269,6 @@ function renderIntro(
   w: number,
   h: number,
   options: AssembleOptions,
-  time: number,
   loadedImages: Map<string, HTMLImageElement>
 ) {
   const gradient = ctx.createLinearGradient(0, 0, w, h);
@@ -264,7 +280,7 @@ function renderIntro(
   if (options.images[0]) {
     const img = loadedImages.get(options.images[0]);
     if (img) {
-      drawImageCover(ctx, img, w, h, 0.3, time);
+      drawImageCover(ctx, img, w, h, 0.3);
     }
   }
 
@@ -381,7 +397,6 @@ function renderOutro(
   w: number,
   h: number,
   options: AssembleOptions,
-  time: number,
   loadedImages: Map<string, HTMLImageElement>
 ) {
   const gradient = ctx.createLinearGradient(0, 0, w, h);
@@ -393,7 +408,7 @@ function renderOutro(
   if (options.images[options.images.length - 1]) {
     const img = loadedImages.get(options.images[options.images.length - 1]);
     if (img) {
-      drawImageCover(ctx, img, w, h, 0.25, time);
+      drawImageCover(ctx, img, w, h, 0.25);
     }
   }
 
@@ -448,7 +463,7 @@ function renderSubtitle(ctx: CanvasRenderingContext2D, w: number, h: number, srt
   ctx.fillText(current.text, w / 2, h - 55);
 }
 
-function drawImageCover(ctx: CanvasRenderingContext2D, img: HTMLImageElement, w: number, h: number, alpha: number, time: number) {
+function drawImageCover(ctx: CanvasRenderingContext2D, img: HTMLImageElement, w: number, h: number, alpha: number) {
   ctx.globalAlpha = alpha;
   const imgAspect = img.width / img.height;
   const canvasAspect = w / h;

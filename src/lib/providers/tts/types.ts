@@ -28,6 +28,11 @@ export interface TTSProvider {
    * Снимается после успешного `npm run smoke:tts` — результат пишем в README.
    */
   experimental?: boolean;
+  /**
+   * false — провайдер не умеет менять темп речи: `speed` ему не передаётся,
+   * UI помечает поле «Скорость» как неподдерживаемое (вместо молчаливого игнора).
+   */
+  supportsSpeed?: boolean;
   /** Модель по умолчанию — единый источник для настроек и UI (раньше хардкодилась в VoicesModal). */
   defaultModel?: string;
   getVoices(apiKey: string): Promise<Voice[]>;

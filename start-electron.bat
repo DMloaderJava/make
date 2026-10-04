@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal enabledelayedexpansion
 chcp 65001 >nul
 title Manga Voice Studio - Electron (Настоящее окно)
 
@@ -29,7 +29,8 @@ if not exist node_modules (
     ) else (
         call npm install --legacy-peer-deps --no-audit --no-fund
     )
-    if %ERRORLEVEL% NEQ 0 (
+    :: См. комментарий в start-browser.bat: внутри блока нужен !ERRORLEVEL!.
+    if !ERRORLEVEL! NEQ 0 (
         echo [ОШИБКА] Установка не удалась
         pause
         exit /b 1
@@ -40,11 +41,11 @@ if not exist node_modules (
 if not exist node_modules\electron (
     echo [INFO] Устанавливаю Electron (для оконного режима, без сохранения в package.json)...
     call npm install --no-save electron --legacy-peer-deps --no-audit --no-fund
-    if %ERRORLEVEL% NEQ 0 (
+    if !ERRORLEVEL! NEQ 0 (
         echo [ОШИБКА] Не удалось установить Electron
         echo [INFO] Fallback на Chrome App режим - запускаю start-window.bat
         call start-window.bat
-        exit /b %ERRORLEVEL%
+        exit /b !ERRORLEVEL!
     )
 )
 

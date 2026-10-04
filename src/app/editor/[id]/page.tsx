@@ -97,7 +97,7 @@ export default function EditorPage() {
 
   const duration = useMemo(() => {
     if (!project) return 0;
-    const timeline = buildTimeline(project.panels, audioDurations, project.voiceAssignments, project.introDuration, project.outroDuration);
+    const timeline = buildTimeline(project.panels, audioDurations, project.voiceAssignments, project.introDuration);
     return calculateTotalDuration(timeline, project.introDuration, project.outroDuration);
   }, [project, audioDurations]);
 
@@ -328,7 +328,7 @@ export default function EditorPage() {
     const { provider, llmId, baseUrl, model } = resolveLLMConfig();
     const apiKey = keys[llmId] || keys[provider?.id || ''];
     if (!provider || !apiKey) {
-      updateProject({ intro: generateFallbackIntro(project.sceneDescription || '') });
+      updateProject({ intro: generateFallbackIntro() });
       return;
     }
     setIsGeneratingIntro(true);
@@ -336,7 +336,7 @@ export default function EditorPage() {
       const text = await generateIntro(project.sceneDescription || project.panels.map(p => p.dialogue).join(' '), project.characters.map(c => c.name), provider, { apiKey, model, baseUrl, temperature: 0.8 });
       updateProject({ intro: text });
     } catch {
-      updateProject({ intro: generateFallbackIntro(project.sceneDescription || '') });
+      updateProject({ intro: generateFallbackIntro() });
     } finally {
       setIsGeneratingIntro(false);
     }
@@ -433,7 +433,7 @@ export default function EditorPage() {
       if (result.introAudio) setIntroAudio(result.introAudio);
       if (result.outroAudio) setOutroAudio(result.outroAudio);
 
-      const tl = buildTimeline(project.panels, newDur, project.voiceAssignments, project.introDuration, project.outroDuration);
+      const tl = buildTimeline(project.panels, newDur, project.voiceAssignments, project.introDuration);
       const srt = generateSRT(tl, project.intro, project.outro, project.introDuration, project.outroDuration);
       const obj: Record<number, number> = {};
       newDur.forEach((v, k) => obj[k] = v);
@@ -543,7 +543,7 @@ export default function EditorPage() {
           alert('Нет изображений для видео');
           return;
         }
-        const tl = project.timeline.length > 0 ? project.timeline : buildTimeline(project.panels, audioDurations, project.voiceAssignments, project.introDuration, project.outroDuration);
+        const tl = project.timeline.length > 0 ? project.timeline : buildTimeline(project.panels, audioDurations, project.voiceAssignments, project.introDuration);
 
         // Точные позиции аудио на таймлайне: интро с 0, панели со своих audioStart,
         // аутро — после последней панели. Это чинит рассинхрон (раньше дорожка
@@ -606,7 +606,7 @@ export default function EditorPage() {
   // Memoize timeline to avoid recalculating on every render (perf fix for 30+ panels)
   const tl = useMemo(() => {
     if (!project) return [];
-    return project.timeline.length > 0 ? project.timeline : buildTimeline(project.panels, audioDurations, project.voiceAssignments, project.introDuration, project.outroDuration);
+    return project.timeline.length > 0 ? project.timeline : buildTimeline(project.panels, audioDurations, project.voiceAssignments, project.introDuration);
   }, [project, audioDurations]);
 
   const handleSeek = useCallback((t: number) => {
@@ -735,7 +735,6 @@ export default function EditorPage() {
             duration={duration}
             isPlaying={isPlaying}
             onPlayPause={() => setIsPlaying(p => !p)}
-            onSeek={handleSeek}
             renderMode={renderSettings.renderMode}
             stripViewport={renderSettings.stripViewport}
             stripGap={renderSettings.stripGap}
@@ -747,7 +746,6 @@ export default function EditorPage() {
           />
 
           <Timeline
-            panels={project.panels}
             timeline={tl}
             currentTime={currentTime}
             duration={duration}

@@ -1,4 +1,4 @@
-# Manga Voice Studio — Self-hosted озвучка манги с AI (v1.3.7)
+# Manga Voice Studio — Self-hosted озвучка манги с AI (v1.3.8)
 
 Self-hosted веб-инструмент для автоматической генерации озвученных видео из изображений (манга/комикс) с BYOK, 25+ LLM и 15+ TTS провайдерами, OPFS кэшем, WebCodecs MP4 и SEO-пакетом.
 
@@ -37,27 +37,32 @@ npm run dev
 
 Есть готовые лаунчеры (двойной клик): `install.bat` → `run.bat` (меню режимов),
 либо `start-browser.bat` / `start-window.bat` / `start-electron.bat`.
-Они дублируют `.sh`-скрипты: та же проверка Node, тот же `npm ci --no-audit --no-fund`
-и тот же фолбэк `--ignore-scripts`, если postinstall Electron не смог проверить
-TLS-сертификат (корпоративный прокси, антивирус).
+Они дублируют `.sh`-скрипты: та же проверка Node, тот же
+`npm ci --legacy-peer-deps --no-audit --no-fund` и тот же фолбэк `--ignore-scripts`,
+если postinstall Electron не смог проверить TLS-сертификат (корпоративный прокси,
+антивирус).
 
-Через терминал:
+`.bat`-файлы принудительно выкладываются с CRLF (`.gitattributes`): cmd.exe
+переваривает LF-only батники не во всех сценариях (`goto`, `call`, метки).
+
+Через терминал — тот же набор флагов, что в лаунчерах:
 
 ```cmd
 :: cmd.exe
-npm ci --ignore-scripts
+npm ci --legacy-peer-deps --no-audit --no-fund
 npm run dev
 ```
 
 ```powershell
 # PowerShell
-npm ci --ignore-scripts
+npm ci --legacy-peer-deps --no-audit --no-fund
 npm run dev
 ```
 
-`--ignore-scripts` нужен только если `npm ci` падает на postinstall Electron;
-для веб-режима Electron не требуется, для десктопного — поставьте его отдельно:
-`npm install --no-save electron --legacy-peer-deps`.
+`--legacy-peer-deps` нужен из-за peer-конфликтов в цепочке Next.js/Electron,
+`--ignore-scripts` добавляется как фолбэк, если установка падает на postinstall
+Electron. Для веб-режима Electron не требуется, для десктопного — поставьте его
+отдельно: `npm install --no-save electron --legacy-peer-deps --no-audit --no-fund`.
 
 CI (`.github/workflows/ci.yml`) гоняет typecheck/test/lint/build на
 **ubuntu-latest и windows-latest**, поэтому Windows-регрессии не доживают до релиза.
@@ -193,6 +198,37 @@ CI (`.github/workflows/ci.yml`) гоняет typecheck/test/lint/build на
 - **Инфра**: `npm run typecheck|verify`, версия 1.3.2, Electron считает 401/302 живым сервером,
   `clearAllInfo` закрывает соединение IDB перед удалением, форма входа — POST с хэшем в cookie
   (пароль больше не попадает в URL), флаг `MVS_SECURE_COOKIE`.
+
+## 🪟 v1.3.8 — первый запуск на Windows и мёртвые параметры
+
+- **Настоящий блокер первого запуска**: в `start-browser.bat` и `start-electron.bat`
+  проверка `%ERRORLEVEL%` стояла внутри блока `if (...)` — cmd.exe раскрывает
+  «проценты» один раз при разборе всей скобки, то есть ДО выполнения `npm ci`.
+  На первом запуске (порта 3000 ещё нет) проверка видела код от `findstr` и
+  **всегда** сообщала «Установка не удалась» сразу после успешной установки.
+  Теперь `!ERRORLEVEL!` + `setlocal enabledelayedexpansion`, а CI проверяет это
+  правило по всем `.bat` (плюс запрет `%ERRORLEVEL%` на строках внутри блоков).
+- **`.gitattributes`**: `*.bat text eol=crlf` — Windows-пользователь получает
+  CRLF-файлы независимо от `core.autocrlf`; `*.sh` наоборот зафиксированы как LF.
+- **README больше не спорит с лаунчерами**: ручная установка описана теми же
+  флагами (`npm ci --legacy-peer-deps --no-audit --no-fund`), а `--ignore-scripts`
+  честно назван фолбэком при TLS-ошибке postinstall, а не первым шагом.
+- **CI требует оба флага**: `--no-audit` и `--no-fund` (раньше — только первый).
+- **`noUnusedParameters` включён** вслед за `noUnusedLocals` и нашёл 10 забытых
+  параметров: мёртвые пропсы `onSeek` (Preview) и `panels` (Timeline),
+  неиспользуемый `outroDuration` в `buildTimeline`, `time` в статичных кадрах
+  интро/аутро и `drawImageCover`, параметр-заглушка у fallback-интро.
+- **Темп речи**: `gemini` и `speechify` не принимают `speed` — вместо молчаливого
+  игнорирования у провайдера есть флаг `supportsSpeed: false`, UI помечает поле
+  «Скорость · не поддерживается», а тест проверяет, что `speed` реально не уходит
+  в запрос (и что у `openai`, наоборот, уходит).
+- **Страховка остановки записи** взводится после фактического `recorder.start()`,
+  а не сразу после `waitForStart`: при медленном `prime()` таймер мог сработать
+  до старта записи — и запись оставалась без остановки.
+- **Лента**: переход между двумя короткими страницами больше не затирается
+  ключом удержания следующей страницы (обе стояли в одной точке окна, сдвиг
+  4–8 px читался как рывок). Добавлены два теста: именованный сценарий и
+  инвариант «сдвиг < 8 px возможен только у границы прокрутки» по сетке раскладок.
 
 ## 🪟 v1.3.7 — Windows-совместимость и запрет мёртвого кода
 

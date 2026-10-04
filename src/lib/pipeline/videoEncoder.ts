@@ -312,14 +312,14 @@ export class WebCodecsBackend implements RenderBackend {
 
       // Determine phase and render
       if (time < options.introDuration) {
-        this.renderIntroFrame(ctx, options, time, loadedImages);
+        this.renderIntroFrame(ctx, options, loadedImages);
       } else if (stripScene && time < panelsEnd) {
         // Лента: окно скроллится по склеенным страницам синхронно с озвучкой.
         stripScene.render(ctx, time);
       } else if (options.timeline.length > 0 && time < panelsEnd) {
         this.renderPanelFrame(ctx, options, time, loadedImages);
       } else {
-        this.renderOutroFrame(ctx, options, time, loadedImages);
+        this.renderOutroFrame(ctx, options, loadedImages);
       }
 
       if (options.srtContent) {
@@ -350,7 +350,7 @@ export class WebCodecsBackend implements RenderBackend {
     return new Blob([buffer!], { type: 'video/mp4' });
   }
 
-  private renderIntroFrame(ctx: CanvasRenderingContext2D, options: RenderOptions, time: number, loadedImages: Map<string, HTMLImageElement>) {
+  private renderIntroFrame(ctx: CanvasRenderingContext2D, options: RenderOptions, loadedImages: Map<string, HTMLImageElement>) {
     const w = options.width;
     const h = options.height;
     const gradient = ctx.createLinearGradient(0, 0, w, h);
@@ -444,7 +444,7 @@ export class WebCodecsBackend implements RenderBackend {
     }
   }
 
-  private renderOutroFrame(ctx: CanvasRenderingContext2D, options: RenderOptions, time: number, loadedImages: Map<string, HTMLImageElement>) {
+  private renderOutroFrame(ctx: CanvasRenderingContext2D, options: RenderOptions, loadedImages: Map<string, HTMLImageElement>) {
     const w = options.width;
     const h = options.height;
     const gradient = ctx.createLinearGradient(0, 0, w, h);

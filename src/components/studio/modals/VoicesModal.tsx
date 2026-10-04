@@ -65,6 +65,8 @@ export function VoicesModal({ open, onClose, characters, assignments, onChange, 
   }, [open]);
 
   const selectedProviderMeta = TTS_PROVIDERS.find(p => p.id === selectedProvider);
+  // Темп — общая настройка, но часть провайдеров его не принимает: не молчим об этом.
+  const speedUnsupported = selectedProviderMeta?.supportsSpeed === false;
 
   /** Смена провайдера: голоса старого провайдера невалидны → сбрасываем назначения. */
   const handleProviderChange = (nextProvider: string) => {
@@ -228,7 +230,9 @@ export function VoicesModal({ open, onClose, characters, assignments, onChange, 
               </select>
             </div>
             <div className="space-y-1">
-              <label className="text-[10px] text-[#8A8A93]">Скорость</label>
+              <label className="text-[10px] text-[#8A8A93]" title={speedUnsupported ? 'Провайдер не принимает параметр темпа — значение будет проигнорировано' : undefined}>
+                Скорость{speedUnsupported ? ' · не поддерживается' : ''}
+              </label>
               <input
                 type="number"
                 step="0.05"

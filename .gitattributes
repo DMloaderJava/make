@@ -1,0 +1,8 @@
+# Windows-лаунчеры обязаны лежать на диске с CRLF: cmd.exe разбирает goto/call/
+# метки в LF-only .bat не во всех сценариях (окно мелькает и закрывается).
+# В репозитории строки хранятся нормализованными (LF), на диск отдаётся CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Shell-скриптам CRLF ломает shebang и запуск из bash — фиксируем LF.
+*.sh text eol=lf

@@ -242,9 +242,13 @@ export function buildScrollKeyframes(
       pushKey(span.start, entries[i], 'linear');
       pushKey(transitionStart, exitY(span.slotIndex), 'linear');
     } else {
-      const target = targetScrollForSlot(layout, span.slotIndex);
-      pushKey(span.start, target, 'linear');
-      pushKey(transitionStart, target, 'linear');
+      // Для короткой страницы entryY == target, НО нудж выше мог сдвинуть
+      // entries[i]. Раньше здесь брался target — и ключ удержания с тем же
+      // временем (span.start) затирал переход, посчитанный на span.end:
+      // переход «въезд страницы» пропадал, если обе страницы короткие и стоят
+      // в одном и том же месте окна (4–8 px движения читаются как рывок).
+      pushKey(span.start, entries[i], 'linear');
+      pushKey(transitionStart, entries[i], 'linear');
     }
 
     if (next) {

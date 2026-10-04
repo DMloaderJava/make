@@ -1,10 +1,8 @@
 "use client";
 
-import { PanelData } from '@/lib/pipeline/extractPanels';
 import { SyncTimeline } from '@/lib/storage/db';
 
 interface TimelineProps {
-  panels: PanelData[];
   timeline: SyncTimeline[];
   currentTime: number;
   duration: number;
@@ -17,7 +15,7 @@ interface TimelineProps {
   outroDuration?: number;
 }
 
-export function Timeline({ panels, timeline, currentTime, duration, onSeek, onSelectPanel, onSelectIntro, onSelectOutro, selectedId, introDuration = 8, outroDuration = 5 }: TimelineProps) {
+export function Timeline({ timeline, currentTime, duration, onSeek, onSelectPanel, onSelectIntro, onSelectOutro, selectedId, introDuration = 8, outroDuration = 5 }: TimelineProps) {
   const formatTime = (s: number) => {
     if (!isFinite(s) || s <= 0) return '00:00';
     const m = Math.floor(s / 60);

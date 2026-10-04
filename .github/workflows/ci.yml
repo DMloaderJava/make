@@ -38,18 +38,46 @@ jobs:
       - name: Сборка
         run: npm run build
 
-      # Проверяем, что .bat-лаунчеры хотя бы существуют и не деградировали:
-      # в них не должно остаться npm-вызовов без --no-audit --no-fund.
+      # Проверяем, что .bat-лаунчеры не деградировали:
+      #  1) все npm ci/install содержат ОБА флага --no-audit --no-fund;
+      #  2) файлы, использующие !VAR!, включают setlocal enabledelayedexpansion;
+      #  3) внутри блоков if (...) нет %ERRORLEVEL% — cmd.exe раскрывает «проценты»
+      #     при разборе всей скобки, то есть до выполнения команды, из-за чего
+      #     проверка установки срабатывала по коду предыдущей команды.
       - name: Лаунчеры согласованы (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          $failed = $false
           # ^ якорим на начало строки: в .bat есть подсказки вида
           # «echo ... npm install @aws-sdk/client-polly --no-save», их не считаем.
-          $bad = Select-String -Path *.bat -Pattern '^\s*(call\s+)?npm\s+(ci|install)\b(?!.*--no-audit)'
+          $bad = Select-String -Path *.bat -Pattern '^\s*(call\s+)?npm\s+(ci|install)\b(?!.*--no-audit)(?!.*--no-fund)'
           if ($bad) {
-            $bad | ForEach-Object { Write-Error "$($_.Filename):$($_.LineNumber): $($_.Line.Trim())" }
-            exit 1
+            $bad | ForEach-Object { Write-Host "::error file=$($_.Filename),line=$($_.LineNumber)::нужны оба флага --no-audit --no-fund: $($_.Line.Trim())" }
+            $failed = $true
           }
-          Write-Host "Все npm-вызовы в .bat содержат --no-audit --no-fund"
+          # Комментарии (:: и rem) не считаем — в них %ERRORLEVEL% может упоминаться текстом.
+          $badErr = @()
+          foreach ($file in Get-ChildItem *.bat) {
+            $n = 0
+            foreach ($line in Get-Content $file) {
+              $n++
+              if ($line -match '^\s+.*%ERRORLEVEL%' -and $line -notmatch '^\s*(::|rem\b)') {
+                $badErr += "$($file.Name):${n}: $($line.Trim())"
+              }
+            }
+          }
+          if ($badErr.Count -gt 0) {
+            $badErr | ForEach-Object { Write-Host "::error ::%ERRORLEVEL% на строке внутри блока — нужен !ERRORLEVEL! + enabledelayedexpansion — $_" }
+            $failed = $true
+          }
+          foreach ($file in Get-ChildItem *.bat) {
+            $text = Get-Content -Raw $file
+            if ($text -match '![A-Za-z_][A-Za-z0-9_]*!' -and $text -notmatch 'enabledelayedexpansion') {
+              Write-Host "::error file=$($file.Name)::использует !VAR!, но не включает setlocal enabledelayedexpansion"
+              $failed = $true
+            }
+          }
+          if ($failed) { exit 1 }
+          Write-Host 'Лаунчеры в порядке: npm-флаги, delayed expansion, ERRORLEVEL вне блоков'
 

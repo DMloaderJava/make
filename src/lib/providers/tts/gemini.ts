@@ -9,9 +9,12 @@ export const geminiTTS: TTSProvider = {
   freeTier: true,
   languages: ['ru', 'en', 'multi'],
   defaultModel: 'gemini-2.5-flash-preview-tts',
+  // У Gemini TTS нет параметра темпа: скорость задаётся только стилевой
+  // подсказкой в тексте, поэтому speed не передаём и честно помечаем это в UI.
+  supportsSpeed: false,
   baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
 
-  async generate(text: string, { voice = 'Puck', apiKey, speed = 1.0, model: requestedModel }: TTSOptions): Promise<ArrayBuffer> {
+  async generate(text: string, { voice = 'Puck', apiKey, speed: _speed = 1.0, model: requestedModel }: TTSOptions): Promise<ArrayBuffer> {
     // Client-side direct call (will be proxied via /api/tts for CORS)
     // Model list: gemini-2.5-flash-preview-tts, gemini-2.5-pro-preview-tts, gemini-2.0-flash-exp etc
     // Use gemini-2.5-flash-preview-tts as recommended
