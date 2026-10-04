@@ -49,6 +49,12 @@ jobs:
         shell: pwsh
         run: |
           $failed = $false
+          # Страховка от «проверка ничего не проверила»: без файлов все regex молчат.
+          $bats = Get-ChildItem *.bat
+          if ($bats.Count -lt 5) {
+            Write-Host "::error ::ожидали минимум 5 .bat-лаунчеров, нашли $($bats.Count)"
+            exit 1
+          }
           # ^ якорим на начало строки: в .bat есть подсказки вида
           # «echo ... npm install @aws-sdk/client-polly --no-save», их не считаем.
           $bad = Select-String -Path *.bat -Pattern '^\s*(call\s+)?npm\s+(ci|install)\b(?!.*--no-audit)(?!.*--no-fund)'
@@ -71,7 +77,7 @@ jobs:
             $badErr | ForEach-Object { Write-Host "::error ::%ERRORLEVEL% на строке внутри блока — нужен !ERRORLEVEL! + enabledelayedexpansion — $_" }
             $failed = $true
           }
-          foreach ($file in Get-ChildItem *.bat) {
+          foreach ($file in $bats) {
             $text = Get-Content -Raw $file
             if ($text -match '![A-Za-z_][A-Za-z0-9_]*!' -and $text -notmatch 'enabledelayedexpansion') {
               Write-Host "::error file=$($file.Name)::использует !VAR!, но не включает setlocal enabledelayedexpansion"
