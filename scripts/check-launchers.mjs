@@ -10,11 +10,17 @@
  *     cmd раскрывает проценты один раз при разборе всей скобки, то есть ДО
  *     выполнения команд внутри неё. Именно на этом лаунчеры «падали» после
  *     успешной установки.
- *  4. `::` не используется внутри блоков: это метка, а не комментарий, и метки в
- *     скобочных блоках ломают разбор на части версий Windows («syntax of the
- *     command is incorrect», исчезающие команды). Внутри блоков — только `rem`.
+ *  4. Внутри блоков нет меток: ни `::` (это метка, а не комментарий), ни `:метка`.
+ *     cmd не поддерживает метки в скобочных блоках: две `::` подряд дают «The
+ *     system cannot find the drive specified», метка последней строкой блока —
+ *     «) was unexpected at this time», метка перед пустой строкой — «The syntax of
+ *     the command is incorrect». Внутри блоков — только `rem`.
  *  5. В `echo` внутри блоков нет круглых скобок: на старых версиях cmd скобка в
  *     тексте сообщения может оборвать блок.
+ *  6. В `echo` внутри блоков нет `%ERRORLEVEL%`: проценты раскрываются один раз
+ *     при разборе скобки, поэтому echo напечатает код от предыдущей команды, а не
+ *     от той, что выполнилась строкой выше. Нужен `!ERRORLEVEL!` (при
+ *     `setlocal enabledelayedexpansion`) или вывод вне блока.
  *
  * Для правила 3 считается глубина скобок; из подсчёта исключаются комментарии
  * (`::`, `rem`), строки `echo` и содержимое кавычек. Это эвристика (без полного
@@ -92,11 +98,10 @@ export function findErrorlevelInBlocks(name, text) {
 }
 
 /**
- * `::` — это не комментарий, а метка. Внутри блока `(...)` метки cmd не
- * поддерживает: две подряд дают «The system cannot find the drive specified»,
- * метка последней строкой блока — «) was unexpected at this time», метка перед
- * пустой строкой — «The syntax of the command is incorrect». Поэтому внутри
- * блоков пишем `rem`, а `::` оставляем только на верхнем уровне.
+ * Метки внутри блока `(...)`: и `::` (это метка, а не комментарий), и `:метка`.
+ * cmd не поддерживает метки внутри скобочных блоков — разбор ломается
+ * по-разному в зависимости от версии Windows. Внутри блоков пишем `rem`,
+ * `::` оставляем на верхнем уровне, а `goto`/метки — вне блоков.
  */
 /**
  * Скобки в `echo` внутри блока: современный cmd понимает, что после echo идёт
@@ -120,10 +125,36 @@ export function findParenthesesInEchoBlocks(name, text) {
 export function findLabelCommentsInBlocks(name, text) {
   const problems = [];
 
-  forEachCodeLine(text, ({ index, trimmed, depth, isComment }) => {
-    if (isComment && trimmed.startsWith('::') && depth > 0) {
+  forEachCodeLine(text, ({ index, trimmed, depth }) => {
+    if (depth === 0 || !trimmed.startsWith(':')) return;
+
+    if (trimmed.startsWith('::')) {
       problems.push(
         `${name}:${index + 1}: «::» внутри блока — это метка, а не комментарий; нужен rem — ${trimmed}`
+      );
+    } else {
+      problems.push(
+        `${name}:${index + 1}: метка «${trimmed.split(/[\s(]/)[0]}» внутри блока — cmd не поддерживает метки в скобочных блоках; вынесите goto из блока — ${trimmed}`
+      );
+    }
+  });
+
+  return problems;
+}
+
+/**
+ * `%ERRORLEVEL%` в `echo` внутри блока: та же ловушка, что и в `if %ERRORLEVEL%`,
+ * только без падения скрипта — проценты раскрываются при разборе скобки, и в
+ * сообщении печатается код от предыдущей команды, а не от выполненной выше по
+ * блоку. Проверка 3 такие строки не видит: для `echo` структурный `scan` пуст.
+ */
+export function findErrorlevelInEchoBlocks(name, text) {
+  const problems = [];
+
+  forEachCodeLine(text, ({ index, trimmed, depth, isEcho }) => {
+    if (isEcho && depth > 0 && /%ERRORLEVEL%/i.test(trimmed)) {
+      problems.push(
+        `${name}:${index + 1}: %ERRORLEVEL% в echo внутри блока раскроется до выполнения — нужен !ERRORLEVEL! или вывод вне блока — ${trimmed}`
       );
     }
   });
@@ -146,11 +177,12 @@ export function checkLaunchers(files) {
     const text = files[name];
 
     text.split(/\r?\n/).forEach((line, index) => {
-      // `npx npm …`, `call npm.cmd …` и `start /wait npm …` — тоже npm-вызовы: без
-      // префиксов они бы выпали из проверки флагов (в текущих лаунчерах их нет, но
-      // правило должно работать на будущее). Оговорка: вызов через
-      // `call :метка` статически не разворачивается — это осознанное ограничение.
-      if (!/^\s*(?:call\s+)?(?:start\s+(?:\/wait\s+)?)?(?:npx\s+)?npm(?:\.cmd)?\s+(?:ci|install)\b/.test(line)) return;
+      // `npx npm …`, `call npm.cmd …`, `start /wait npm …` и
+      // `start /wait "Заголовок окна" npm …` — тоже npm-вызовы: без префиксов они
+      // бы выпали из проверки флагов (в текущих лаунчерах их нет, но правило
+      // должно работать на будущее). Оговорка: вызов через `call :метка`
+      // статически не разворачивается — это осознанное ограничение.
+      if (!/^\s*(?:call\s+)?(?:start\s+(?:\/wait\s+)?(?:"[^"]*"\s+)?)?(?:npx\s+)?npm(?:\.cmd)?\s+(?:ci|install)\b/.test(line)) return;
       if (!/--no-audit/.test(line) || !/--no-fund/.test(line)) {
         problems.push(`${name}:${index + 1}: npm-вызов без --no-audit --no-fund — ${line.trim()}`);
       }
@@ -165,6 +197,7 @@ export function checkLaunchers(files) {
       problems.push(...findErrorlevelInBlocks(name, text));
       problems.push(...findLabelCommentsInBlocks(name, text));
       problems.push(...findParenthesesInEchoBlocks(name, text));
+      problems.push(...findErrorlevelInEchoBlocks(name, text));
     }
   }
 

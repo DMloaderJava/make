@@ -6,7 +6,7 @@ title Manga Voice Studio - Launcher
 :MENU
 cls
 echo ========================================
-echo  Manga Voice Studio v1.3.13
+echo  Manga Voice Studio v1.3.14
 echo  Студия без хлама - Launcher
 echo ========================================
 echo.

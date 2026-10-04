@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
-import { checkLaunchers, findErrorlevelInBlocks, findLabelCommentsInBlocks, findParenthesesInEchoBlocks } from '../scripts/check-launchers.mjs';
+import { checkLaunchers, findErrorlevelInBlocks, findErrorlevelInEchoBlocks, findLabelCommentsInBlocks, findParenthesesInEchoBlocks } from '../scripts/check-launchers.mjs';
 
 /**
  * Тесты на скрипт проверки .bat: он выполняется в CI и должен ловить реальные
@@ -126,9 +126,23 @@ test('«::» внутри блока — ошибка (это метка, а н�
   const twoLabels = shell(['setlocal', 'if exist x (', '    :: раз', '    :: два', '    echo шаг', ')']);
   assert.equal(findLabelCommentsInBlocks('two.bat', twoLabels).length, 2);
 
+  // Одиночная метка в блоке ломает разбор так же, как `::`: cmd не поддерживает
+  // метки в скобочных блоках.
+  const singleLabel = shell([
+    'setlocal',
+    'if exist x (',
+    '    :loop',
+    '    echo шаг',
+    ')',
+  ]);
+  const singleProblems = findLabelCommentsInBlocks('single.bat', singleLabel);
+  assert.equal(singleProblems.length, 1);
+  assert.match(singleProblems[0], /метка «:loop» внутри блока/);
+
   const safe = shell([
     'setlocal',
     ':: верхний уровень — можно',
+    ':MENU',
     'if exist x (',
     '    rem внутри блока — можно',
     '    echo (скобки в echo не считаются)',
@@ -169,11 +183,44 @@ test('скобки в echo внутри блока — ошибка (стары�
   assert.equal(checkLaunchers(five(inside)).length, 1);
 });
 
+test('echo %ERRORLEVEL% внутри блока — ошибка (раскроется до выполнения), !ERRORLEVEL! — норма', () => {
+  const inside = shell([
+    'setlocal enabledelayedexpansion',
+    'if exist x (',
+    '    echo %ERRORLEVEL%',
+    '    echo шаг',
+    ')',
+  ]);
+  const problems = findErrorlevelInEchoBlocks('echoerr.bat', inside);
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /%ERRORLEVEL% в echo внутри блока/);
+
+  // Проверка 3 (по структуре) такие строки не видит — для echo структурный scan пуст,
+  // поэтому правило живёт отдельной функцией и подключено к общему прогону.
+  assert.deepEqual(findErrorlevelInBlocks('echoerr.bat', inside), []);
+  const five = (text: string) => Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`l${i}.bat`, i === 0 ? text : shell(['setlocal'])]));
+  assert.equal(checkLaunchers(five(inside)).length, 1);
+
+  const safe = shell([
+    'setlocal enabledelayedexpansion',
+    'echo %ERRORLEVEL%',
+    'if exist x (',
+    '    echo !ERRORLEVEL!',
+    ')',
+  ]);
+  assert.deepEqual(findErrorlevelInEchoBlocks('safe.bat', safe), []);
+});
+
 test('npm-вызов с префиксом start /wait тоже проверяется', () => {
   const five = (text: string) => Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`l${i}.bat`, i === 0 ? text : shell(['setlocal'])]));
   const problems = checkLaunchers(five(shell(['setlocal', 'start /wait npm ci --legacy-peer-deps --no-audit'])));
   assert.equal(problems.length, 1);
   assert.match(problems[0], /--no-audit --no-fund/);
+
+  // У `start` первым аргументом может идти заголовок окна — он не должен прятать вызов.
+  const titled = checkLaunchers(five(shell(['setlocal', 'start /wait "Установка зависимостей" npm ci --legacy-peer-deps --no-audit'])));
+  assert.equal(titled.length, 1, 'npm-вызов с заголовком окна у start должен ловиться');
+  assert.match(titled[0], /--no-audit --no-fund/);
 });
 
 test('репозиторные .sh проходят проверку флагов npm', () => {
