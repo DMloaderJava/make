@@ -12,7 +12,7 @@ check_port() {
 while true; do
     clear
     echo "========================================"
-    echo " Manga Voice Studio v1.3.6 - Launcher"
+    echo " Manga Voice Studio v1.3.9 - Launcher"
     echo "========================================"
     echo ""
     echo " 1. Установить зависимости"

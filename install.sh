@@ -3,7 +3,7 @@ set -e
 
 echo "========================================"
 echo " Manga Voice Studio - Установка"
-echo " v1.3.6"
+echo " v1.3.9"
 echo "========================================"
 echo ""
 
@@ -43,6 +43,8 @@ echo ""
 echo "[2/3] Опционально:"
 echo "  - Polly: npm install @aws-sdk/client-polly --no-save --no-audit --no-fund"
 echo "  - Whisper: npm install nodejs-whisper --no-save --no-audit --no-fund"
+echo "  В защищённой сети (TLS-прокси/антивирус) добавьте --ignore-scripts: "
+echo "    npm install <пакет> --no-save --no-audit --no-fund --ignore-scripts"
 echo ""
 
 echo "[3/3] Проверка сборки..."

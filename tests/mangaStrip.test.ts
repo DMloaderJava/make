@@ -8,7 +8,10 @@ import {
   computeStripLayout,
   maxScrollY,
   pageIndexAtScroll,
+  resolveStripViewport,
   sampleScroll,
+  STRIP_ZOOM_MAX,
+  STRIP_ZOOM_MIN,
   targetScrollForSlot,
   visibleSlots,
 } from '../src/lib/pipeline/mangaStrip';
@@ -56,6 +59,19 @@ for (const scenario of STRIP_SCENARIOS) {
     }
   });
 }
+
+test('лента: зум клампится к диапазону ползунка — битые настройки не ломают раскладку', () => {
+  assert.equal(resolveStripViewport(1080, 1080), 1080, 'нормальное значение не трогаем');
+  assert.equal(resolveStripViewport(1080, undefined), 1080, 'без настройки — дефолт');
+  assert.equal(resolveStripViewport(1080, Number.NaN), 1080, 'NaN — дефолт, а не NaN в раскладке');
+  assert.equal(resolveStripViewport(1080, 0), 1080, 'ноль — дефолт');
+  assert.equal(resolveStripViewport(1080, 100000), 1080 / STRIP_ZOOM_MIN, 'слишком мелкий зум зажат');
+  assert.equal(resolveStripViewport(1080, 10), 1080 / STRIP_ZOOM_MAX, 'слишком крупный зум зажат');
+
+  const wild = computeStripLayout(PAGES, { ...FRAME, viewport: 100000, gap: 24 });
+  const bounded = computeStripLayout(PAGES, { ...FRAME, viewport: resolveStripViewport(1080, 100000), gap: 24 });
+  assert.deepEqual(wild, bounded, 'computeStripLayout клампит сам, а не полагается на вызывающего');
+});
 
 test('computeStripLayout: viewport меньше кадра → крупнее (лента шире кадра)', () => {
   const zoom = computeStripLayout(PAGES, { ...FRAME, viewport: 720, gap: 0 });

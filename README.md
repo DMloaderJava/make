@@ -1,4 +1,4 @@
-# Manga Voice Studio — Self-hosted озвучка манги с AI (v1.3.8)
+# Manga Voice Studio — Self-hosted озвучка манги с AI (v1.3.9)
 
 Self-hosted веб-инструмент для автоматической генерации озвученных видео из изображений (манга/комикс) с BYOK, 25+ LLM и 15+ TTS провайдерами, OPFS кэшем, WebCodecs MP4 и SEO-пакетом.
 
@@ -66,6 +66,9 @@ Electron. Для веб-режима Electron не требуется, для д
 
 CI (`.github/workflows/ci.yml`) гоняет typecheck/test/lint/build на
 **ubuntu-latest и windows-latest**, поэтому Windows-регрессии не доживают до релиза.
+Плюс кроссплатформенные node-проверки (`npm run check:versions`, `npm run check:launchers`):
+версия в `package.json` не разъехалась по баннерам лаунчеров/README/electron-моста,
+а `.bat` соблюдают правила npm-флагов, delayed expansion и `%ERRORLEVEL%` вне блоков.
 
 `/settings` → добавь ключи (см таблицы ниже). Все в localStorage, прямые запросы из браузера для CORS-friendly.
 
@@ -198,6 +201,33 @@ CI (`.github/workflows/ci.yml`) гоняет typecheck/test/lint/build на
 - **Инфра**: `npm run typecheck|verify`, версия 1.3.2, Electron считает 401/302 живым сервером,
   `clearAllInfo` закрывает соединение IDB перед удалением, форма входа — POST с хэшем в cookie
   (пароль больше не попадает в URL), флаг `MVS_SECURE_COOKIE`.
+
+## 🧭 v1.3.9 — единый источник версии и тестируемые проверки
+
+- **Версия снова разъехалась — теперь это ловится автоматически**: `install.sh`
+  и `run.sh` печатали `v1.3.6`, `electron/preload.js` — `1.3.1`, при том что в
+  `package.json` уже стояло 1.3.8. Добавлен `scripts/check-version.mjs`
+  (единый источник — `package.json`): проверяет баннеры лаунчеров, заголовок
+  README, lock-файл и electron-мост. Входит в `npm run verify` и в CI.
+- **Проверка `.bat` переехала с pwsh на Node** (`scripts/check-launchers.mjs`):
+  её можно прогнать локально на любой ОС, и она покрыта тестами
+  (`tests/launcherChecks.test.ts`). Заодно закрыт пропуск, о котором писал ревьюер:
+  `%ERRORLEVEL%` внутри блока теперь находится по глубине скобок, а не по отступу —
+  сработает и на строке без пробелов в начале (и не сработает на `echo (текст)`
+  или комментарии).
+- **`* text=auto`** в `.gitattributes`: обычные текстовые файлы нормализуются к LF
+  в репозитории независимо от `core.autocrlf` разработчика — пропадает класс
+  «изменён весь файл» при смешанных настройках.
+- **Зум ленты клампится**: `stripViewport` из старого проекта/IDB мог быть любым
+  (ползунок зажимал только отображение) — теперь `computeStripLayout` и
+  `resolveStripViewport` приводят его к диапазону 50–170 % (`STRIP_ZOOM_MIN/MAX`,
+  общие с UI). Тест: битые значения не меняют раскладку.
+- **Тест `supportsSpeed` больше не хрупкий**: проверяет тело запроса по URL и не
+  привязан к форме ответа провайдера — смена формата ответа его не уронит.
+- **Подсказки про optional-пакеты** (`@aws-sdk/client-polly`, `nodejs-whisper`)
+  в `install.sh`/`install.bat` получили `--no-audit --no-fund` и упоминание
+  `--ignore-scripts` для защищённых сетей — скопированная команда больше не падает
+  по TLS на postinstall.
 
 ## 🪟 v1.3.8 — первый запуск на Windows и мёртвые параметры
 

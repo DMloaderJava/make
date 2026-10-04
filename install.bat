@@ -5,7 +5,7 @@ title Manga Voice Studio - Установка
 
 echo ========================================
 echo  Manga Voice Studio - Установка
-echo  v1.3.8
+echo  v1.3.9
 echo ========================================
 echo.
 
@@ -67,8 +67,9 @@ echo.
 echo [2/3] Проверка опциональных зависимостей...
 echo  - @aws-sdk/client-polly (для Amazon Polly TTS) - опционально
 echo  - nodejs-whisper (для локального Whisper STT) - опционально
-echo  Если нужен Polly: npm install @aws-sdk/client-polly --no-save
-echo  Если нужен локальный Whisper: npm install nodejs-whisper --no-save
+echo  Если нужен Polly: npm install @aws-sdk/client-polly --no-save --no-audit --no-fund
+echo  Если нужен локальный Whisper: npm install nodejs-whisper --no-save --no-audit --no-fund
+echo  В защищённой сети (TLS-прокси/антивирус) добавьте --ignore-scripts
 echo.
 
 echo [3/3] Проверка сборки...

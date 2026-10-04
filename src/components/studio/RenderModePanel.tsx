@@ -1,7 +1,7 @@
 "use client";
 
 import { Label } from '@/components/ui/label';
-import { STRIP_DEFAULTS } from '@/lib/pipeline/mangaStrip';
+import { STRIP_DEFAULTS, STRIP_ZOOM_MAX, STRIP_ZOOM_MIN } from '@/lib/pipeline/mangaStrip';
 
 export interface RenderSettings {
   renderMode: 'panels' | 'strip';
@@ -15,8 +15,10 @@ interface RenderModePanelProps extends RenderSettings {
 
 /** Настройки ленты хранятся в координатах кадра 1080p. */
 const EXPORT_FRAME_H = 1080;
-const MIN_ZOOM = 0.5;
-const MAX_ZOOM = 1.7;
+// Границы общие с раскладкой (mangaStrip): ползунок не может задать зум,
+// который потом отклонит/обрежет рендер.
+const MIN_ZOOM = STRIP_ZOOM_MIN;
+const MAX_ZOOM = STRIP_ZOOM_MAX;
 
 function zoomOf(stripViewport: number): number {
   return EXPORT_FRAME_H / Math.max(1, stripViewport);

@@ -81,7 +81,7 @@ export function computeStripLayout(
 ): StripLayout {
   const frameWidth = Math.max(1, options.frameWidth);
   const frameHeight = Math.max(1, options.frameHeight);
-  const viewport = Math.max(1, options.viewport ?? frameHeight);
+  const viewport = clampStripViewport(frameHeight, Math.max(1, options.viewport ?? frameHeight));
   const gap = Math.max(0, options.gap ?? 24);
   // scale переводит «ширину кадра» в ширину ленты: viewport = frameHeight → 1.
   const scale = frameHeight / viewport;
@@ -438,9 +438,28 @@ export const STRIP_DEFAULTS = {
   kenBurnsAmount: 0.03,
 } as const;
 
+/** Границы масштаба страницы (zoom = высота кадра / высота окна) — те же, что у ползунка UI. */
+export const STRIP_ZOOM_MIN = 0.5;
+export const STRIP_ZOOM_MAX = 1.7;
+
+/**
+ * Клампит высоту окна ленты в допустимый зум.
+ *
+ * Настройки ленты приходят из проекта/IDB, где значение могло оказаться любым
+ * (ползунок зажимает только своё отображение): без клампа одно битое число
+ * растягивало или сжимало всю ленту.
+ */
+export function clampStripViewport(frameHeight: number, viewport: number): number {
+  const min = frameHeight / STRIP_ZOOM_MAX;
+  const max = frameHeight / STRIP_ZOOM_MIN;
+  return Math.min(max, Math.max(min, viewport));
+}
+
 export function resolveStripViewport(frameHeight: number, viewport?: number): number {
-  if (!viewport || viewport <= 0) return frameHeight * STRIP_DEFAULTS.viewportRatio;
-  return viewport;
+  if (!viewport || viewport <= 0 || !Number.isFinite(viewport)) {
+    return frameHeight * STRIP_DEFAULTS.viewportRatio;
+  }
+  return clampStripViewport(frameHeight, viewport);
 }
 
 export interface StripSceneOptions extends StripLayoutOptions {
