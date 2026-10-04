@@ -52,11 +52,10 @@ export async function resolveVoice(
 ): Promise<string> {
   const provider = getTTSProvider(providerId);
 
-  // 'default' — исторический сентинел «голос не выбран». Но у resemble это же
-  // значение — реальный id из его списка, поэтому для экспериментальных
-  // провайдеров явный 'default' считаем выбором пользователя, а не пустотой.
-  const explicitIsReal = explicit && explicit.trim() && (explicit !== 'default' || provider?.experimental);
-  if (explicitIsReal) return explicit;
+  // 'default' — сентинел «голос не выбран» и у resemble, и у fish это лишь
+  // заглушка из курированного списка: в API уйдёт voice_id='default', и ошибку
+  // сформулирует провайдер. Поэтому сентинел не считается выбором нигде.
+  if (explicit && explicit.trim() && explicit !== 'default') return explicit;
 
   // Экспериментальные провайдеры: голос НИКОГДА не резолвится автоматически.
   // Их списки голосов без ключа — заглушки-примеры (speechify 'matthew'), а id

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { pcmToWav } from '@/lib/providers/tts/wav';
 import { resolveAudioMime } from '@/lib/providers/tts/mime';
-import { buildCartesiaBody } from '@/lib/providers/tts/cartesia';
+import { generateCartesia } from '@/lib/providers/tts/cartesia';
 import { mustUseProxy } from '@/lib/providers/tts/cors';
 import { getServerGenerate } from '@/lib/providers/tts/catalog';
 
@@ -177,21 +177,14 @@ export async function POST(req: NextRequest) {
       }
 
       case 'cartesia': {
-        const res = await fetch('https://api.cartesia.ai/tts/bytes', {
-          method: 'POST',
-          headers: {
-            'Cartesia-Version': '2024-06-10',
-            'X-API-Key': apiKey,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(buildCartesiaBody(text, { voice, language, speed, model }))
-        });
-        if (!res.ok) {
-          const err = await res.text();
-          return NextResponse.json({ error: `Cartesia error: ${err}` }, { status: res.status });
+        // Тот же путь, что и у клиента (включая ретрай без speed): тела больше
+        // не дублируются, ошибки приходят со статусом от Cartesia.
+        try {
+          const buf = await generateCartesia(text, { apiKey, voice, language, speed, model });
+          return new NextResponse(buf, { headers: { 'Content-Type': resolveAudioMime(providerId, buf) } });
+        } catch (e: any) {
+          return NextResponse.json({ error: e.message }, { status: typeof e?.status === 'number' ? e.status : 502 });
         }
-        const buf = await res.arrayBuffer();
-        return new NextResponse(buf, { headers: { 'Content-Type': 'audio/mpeg' } });
       }
 
       case 'deepgram': {
@@ -253,7 +246,7 @@ export async function POST(req: NextRequest) {
         // Экспериментальные провайдеры: их дефолтные голоса не проверены живым
         // ключом, поэтому без явного voice честно просим указать его, а не
         // отправляем в API выдуманный id.
-        if (provider.experimental && !voice) {
+        if (provider.experimental && (!voice || voice === 'default')) {
           return NextResponse.json(
             {
               error: `${providerId}: укажите голос вручную — провайдер помечен как экспериментальный, дефолтный голос может быть невалиден.`,

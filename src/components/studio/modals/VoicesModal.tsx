@@ -200,8 +200,9 @@ export function VoicesModal({ open, onClose, characters, assignments, onChange, 
           {selectedProviderMeta?.experimental && (
             <p className="text-[11px] leading-4 text-[#C9B27A] bg-[#1E1A10] border border-[#3A2E14] rounded-[6px] px-3 py-2">
               Провайдер помечен как <span className="font-medium">непроверенный</span>: запросы к нему написаны
-              по документации и вживую не тестировались. Сначала проверьте синтез на короткой реплике —
-              результат можно зафиксировать через <span className="font-mono">npm run smoke:tts</span>.
+              по документации и вживую не тестировались. Голос подставляется только вручную — дефолтный id не
+              угадываем. Сначала проверьте синтез на короткой реплике — результат можно зафиксировать через{' '}
+              <span className="font-mono">npm run smoke:tts</span>.
             </p>
           )}
 

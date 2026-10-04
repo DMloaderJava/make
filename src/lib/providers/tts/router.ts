@@ -42,12 +42,13 @@ export function mimeTypeForProvider(providerId: string): string {
  * поэтому падаем сразу и громко, а не после таймаута.
  */
 export function assertClientContext(): void {
-  // NEXT_RUNTIME намеренно НЕ используется: в клиентском бандле значение
-  // process.env может быть заинлайнено сборщиком, и тогда проверка ложно
-  // срабатывала бы в браузере («на сервере используйте…» на обычной кнопке).
-  // Признак сервера структурный: нет ни window (браузер), ни self (воркер).
-  const browserLike = typeof window !== 'undefined' || typeof self !== 'undefined';
-  if (!browserLike) {
+  // NEXT_RUNTIME намеренно НЕ используется: в клиентском бандле process.env
+  // может быть заинлайнено сборщиком, и проверка ложно срабатывала бы в браузере.
+  // Признак сервера — отсутствие window: `self` не подходит, потому что его
+  // может выставить полифилл (jsdom, globalThis.self = globalThis), и тогда
+  // серверная рекурсия прошла бы молча. Воркеров в проекте нет (проверено
+  // grep'ом: new Worker/worker_threads не используются).
+  if (typeof window === 'undefined') {
     throw new Error(
       'generateTTS() — клиентский путь (обращается к /api/tts). На сервере используйте getServerGenerate(provider) или serverGenerate у провайдера.'
     );

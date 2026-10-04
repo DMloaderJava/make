@@ -13,6 +13,12 @@ import { TTSProvider, TTSOptions, Voice } from './types';
  * Общий для клиентского пути и серверной ветки /api/tts: раньше тела дублировались
  * и расходились.
  */
+/** Дефолтный голос Cartesia — единое место (раньше дублировался в теле и в UI-списке). */
+export const CARTESIA_DEFAULT_VOICE = '79a125e8-cd45-4c13-8a67-188112f4dd22';
+
+const CARTESIA_URL = 'https://api.cartesia.ai/tts/bytes';
+const CARTESIA_VERSION = '2024-06-10';
+
 export function buildCartesiaBody(text: string, options: {
   voice?: string;
   language?: string;
@@ -20,14 +26,55 @@ export function buildCartesiaBody(text: string, options: {
   model?: string;
 }): Record<string, unknown> {
   const speed = options.speed ?? 1;
-  return {
+  const body: Record<string, unknown> = {
     model_id: options.model || 'sonic-3',
     transcript: text,
-    voice: { mode: 'id', id: options.voice || '79a125e8-cd45-4c13-8a67-188112f4dd22' },
+    voice: { mode: 'id', id: options.voice || CARTESIA_DEFAULT_VOICE },
     language: options.language || 'en',
     output_format: { container: 'mp3', sample_rate: 44100, bit_rate: 128000 },
-    speed: speed < 0.95 ? 'slow' : speed > 1.05 ? 'fast' : 'normal',
   };
+  // 'normal' — дефолт API. Если темп не меняли, поле не отправляем: меньше полей —
+  // меньше шансов разойтись со схемой конкретной версии API (см. комментарий выше).
+  if (speed < 0.95) body.speed = 'slow';
+  else if (speed > 1.05) body.speed = 'fast';
+  return body;
+}
+
+/**
+ * Единственный путь запроса к Cartesia: используется и клиентской generate(),
+ * и серверной веткой /api/tts (раньше это были две копии с разными телами).
+ *
+ * Страховка от расхождения схемы: если API отверг тело и в тексте ошибки есть
+ * `speed` — пробуем ещё раз уже без этого поля (в части версий это enum, в
+ * части — число). Остальные 400 не повторяем: это не наша схема, а входные
+ * данные (ключ/голос).
+ */
+export async function generateCartesia(text: string, options: TTSOptions): Promise<ArrayBuffer> {
+  const headers = {
+    'Cartesia-Version': CARTESIA_VERSION,
+    'X-API-Key': options.apiKey,
+    'Content-Type': 'application/json',
+  };
+  const body = buildCartesiaBody(text, options);
+
+  let res = await fetch(CARTESIA_URL, { method: 'POST', headers, body: JSON.stringify(body) });
+  if (!res.ok) {
+    const errText = await res.text();
+    if (res.status === 400 && /speed/i.test(errText) && 'speed' in body) {
+      const retry = { ...body };
+      delete retry.speed;
+      res = await fetch(CARTESIA_URL, { method: 'POST', headers, body: JSON.stringify(retry) });
+      if (res.ok) return res.arrayBuffer();
+      const retryText = await res.text();
+      const error = new Error(`Cartesia error: ${res.status} — ${retryText.slice(0, 500)}`) as Error & { status?: number };
+      error.status = res.status;
+      throw error;
+    }
+    const error = new Error(`Cartesia error: ${res.status} — ${errText.slice(0, 500)}`) as Error & { status?: number };
+    error.status = res.status;
+    throw error;
+  }
+  return res.arrayBuffer();
 }
 
 export const cartesiaTTS: TTSProvider = {
@@ -39,27 +86,14 @@ export const cartesiaTTS: TTSProvider = {
   defaultModel: 'sonic-3',
   baseUrl: 'https://api.cartesia.ai',
 
-  async generate(text: string, { voice, apiKey, speed, language, model }: TTSOptions): Promise<ArrayBuffer> {
-    const res = await fetch('https://api.cartesia.ai/tts/bytes', {
-      method: 'POST',
-      headers: {
-        'Cartesia-Version': '2024-06-10',
-        'X-API-Key': apiKey,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(buildCartesiaBody(text, { voice, language, speed, model }))
-    });
-    if (!res.ok) {
-      const err = await res.text();
-      throw new Error(`Cartesia error: ${res.status} — ${err.slice(0,500)}`);
-    }
-    return res.arrayBuffer();
+  async generate(text: string, options: TTSOptions): Promise<ArrayBuffer> {
+    return generateCartesia(text, options);
   },
 
   async getVoices(apiKey: string): Promise<Voice[]> {
     if (!apiKey) {
       return [
-        { id: '79a125e8-cd45-4c13-8a67-188112f4dd22', name: 'Barbershop Man (муж)', language: 'en', gender: 'male', provider: 'cartesia' },
+        { id: CARTESIA_DEFAULT_VOICE, name: 'Barbershop Man (муж)', language: 'en', gender: 'male', provider: 'cartesia' },
         { id: 'a0e0a6d2-8a94-4b5d-9c9a-8a94a6d2a0e0', name: 'Sonic (жен, демо-ID)', language: 'en', gender: 'female', provider: 'cartesia' },
       ];
     }
@@ -77,7 +111,7 @@ export const cartesiaTTS: TTSProvider = {
         provider: 'cartesia'
       }));
     } catch {
-      return [{ id: '79a125e8-cd45-4c13-8a67-188112f4dd22', name: 'Barbershop Man', language: 'en', gender: 'male', provider: 'cartesia' }];
+      return [{ id: CARTESIA_DEFAULT_VOICE, name: 'Barbershop Man', language: 'en', gender: 'male', provider: 'cartesia' }];
     }
   }
 };

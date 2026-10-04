@@ -87,6 +87,22 @@ test('generateTTS на сервере падает сразу (структур�
   );
 });
 
+test('assertClientContext: полифилл self не отключает защиту от рекурсии', () => {
+  // Признак сервера — отсутствие window, а не наличие self: self может
+  // появиться от полифилла (jsdom, globalThis.self = globalThis), и проверка
+  // на «нет window и нет self» молча пропустила бы серверный вызов.
+  const globals = globalThis as Record<string, unknown>;
+  const hadSelf = 'self' in globals;
+  const previousSelf = globals.self;
+  globals.self = globals;
+  try {
+    assert.throws(() => assertClientContext(), /клиентский путь/, 'self не должен считаться браузером');
+  } finally {
+    if (hadSelf) globals.self = previousSelf;
+    else delete globals.self;
+  }
+});
+
 test('mustUseProxy покрывает и CORS-провайдеров, и «клиентских»', () => {
   for (const id of ['elevenlabs', 'openai', 'polly', 'azure', 'deepgram', 'playht', 'resemble', 'murf', 'fish', 'hume', 'speechify']) {
     assert.equal(mustUseProxy(id), true, `${id} должен идти через /api/tts`);
