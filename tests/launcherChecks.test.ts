@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
-import { checkLaunchers, findErrorlevelInBlocks } from '../scripts/check-launchers.mjs';
+import { checkLaunchers, findErrorlevelInBlocks, findLabelCommentsInBlocks, findParenthesesInEchoBlocks } from '../scripts/check-launchers.mjs';
 
 /**
  * Тесты на скрипт проверки .bat: он выполняется в CI и должен ловить реальные
@@ -108,6 +108,72 @@ test('npm-вызовы требуют оба флага, !VAR! требует de
   assert.match(shBad[0], /install\.sh.*--no-audit --no-fund/);
   const shGood = checkLaunchers(shFive('npm ci --legacy-peer-deps --no-audit --no-fund\n'));
   assert.deepEqual(shGood, []);
+});
+
+test('«::» внутри блока — ошибка (это метка, а не комментарий), rem — норма', () => {
+  const labelInside = shell([
+    'setlocal',
+    'if exist x (',
+    '    :: комментарий меткой',
+    '    echo шаг',
+    ')',
+  ]);
+  const problems = findLabelCommentsInBlocks('label.bat', labelInside);
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /это метка, а не комментарий/);
+
+  // Две подряд — тот самый случай, который даёт «cannot find the drive specified».
+  const twoLabels = shell(['setlocal', 'if exist x (', '    :: раз', '    :: два', '    echo шаг', ')']);
+  assert.equal(findLabelCommentsInBlocks('two.bat', twoLabels).length, 2);
+
+  const safe = shell([
+    'setlocal',
+    ':: верхний уровень — можно',
+    'if exist x (',
+    '    rem внутри блока — можно',
+    '    echo (скобки в echo не считаются)',
+    ')',
+  ]);
+  assert.deepEqual(findLabelCommentsInBlocks('safe.bat', safe), []);
+
+  // И то же правило в общем прогоне: файл с «::» в блоке не проходит проверку.
+  const five = (text: string) => Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`l${i}.bat`, i === 0 ? text : shell(['setlocal'])]));
+  assert.equal(checkLaunchers(five(labelInside)).length, 1);
+});
+
+test('скобки в echo внутри блока — ошибка (старые cmd), вне блока и в комментариях — норма', () => {
+  const inside = shell([
+    'setlocal',
+    'if exist x (',
+    '    echo [INFO] Запускаю режим (быстрый)',
+    '    echo шаг',
+    ')',
+  ]);
+  const problems = findParenthesesInEchoBlocks('paren.bat', inside);
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /скобки в echo внутри блока/);
+
+  const safe = shell([
+    'setlocal',
+    'echo (вне блока можно)',
+    'if exist x (',
+    '    echo без скобок',
+    '    rem (скобки в комментарии не считаются)',
+    '    :: и здесь (тоже)',
+    ')',
+  ]);
+  assert.deepEqual(findParenthesesInEchoBlocks('safe.bat', safe), []);
+
+  // Правило подключено к общему прогону, а не живёт отдельной функцией.
+  const five = (text: string) => Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`l${i}.bat`, i === 0 ? text : shell(['setlocal'])]));
+  assert.equal(checkLaunchers(five(inside)).length, 1);
+});
+
+test('npm-вызов с префиксом start /wait тоже проверяется', () => {
+  const five = (text: string) => Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`l${i}.bat`, i === 0 ? text : shell(['setlocal'])]));
+  const problems = checkLaunchers(five(shell(['setlocal', 'start /wait npm ci --legacy-peer-deps --no-audit'])));
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /--no-audit --no-fund/);
 });
 
 test('репозиторные .sh проходят проверку флагов npm', () => {

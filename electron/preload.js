@@ -2,7 +2,7 @@
 const { contextBridge } = require('electron');
 
 contextBridge.exposeInMainWorld('mangaStudio', {
-  version: '1.3.12',
+  version: '1.3.13',
   isElectron: true,
   platform: process.platform
 });

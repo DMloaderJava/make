@@ -5,7 +5,7 @@ title Manga Voice Studio - Установка
 
 echo ========================================
 echo  Manga Voice Studio - Установка
-echo  v1.3.12
+echo  v1.3.13
 echo ========================================
 echo.
 
@@ -46,7 +46,7 @@ if exist package-lock.json (
     call npm ci --legacy-peer-deps --no-audit --no-fund
     if !ERRORLEVEL! NEQ 0 (
         echo [ВНИМАНИЕ] npm ci упал — вероятная причина: postinstall Electron не может
-        echo  проверить TLS-сертификат (корпоративный прокси/антивирус).
+        echo  проверить TLS-сертификат: корпоративный прокси или антивирус.
         echo  Повторяю установку без запуска postinstall-скриптов...
         call npm ci --legacy-peer-deps --no-audit --no-fund --ignore-scripts
     )

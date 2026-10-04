@@ -19,7 +19,7 @@
  *
  * Запуск: `npm run smoke:server` после `npm run build`.
  */
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 
 /**
@@ -56,6 +56,23 @@ server.stdout.on('data', chunk => { log += chunk; });
 server.stderr.on('data', chunk => { log += chunk; });
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+/**
+ * Гасит сервер вместе с потомками.
+ *
+ * На Windows SIGTERM/SIGKILL — не сигналы: Node эмулирует их терминацией
+ * процесса, но дочерние процессы next (если появятся) выживут, и порт 3311
+ * останется занятым — следующий запуск упадёт с EADDRINUSE. `taskkill /T /F`
+ * снимает всё дерево.
+ */
+function killServerTree(child, force = false) {
+  if (!child || child.exitCode !== null || child.pid === undefined) return;
+  if (process.platform === 'win32') {
+    spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+    return;
+  }
+  child.kill(force ? 'SIGKILL' : 'SIGTERM');
+}
 
 async function waitForServer() {
   const deadline = Date.now() + START_TIMEOUT_MS;
@@ -97,9 +114,9 @@ try {
   failed = true;
   console.error(`smoke:server — ${error.message}`);
 } finally {
-  server.kill('SIGTERM');
+  killServerTree(server);
   await sleep(500);
-  if (server.exitCode === null) server.kill('SIGKILL');
+  if (server.exitCode === null) killServerTree(server, true);
 }
 
 if (failed) {

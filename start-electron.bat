@@ -29,7 +29,7 @@ if not exist node_modules (
     ) else (
         call npm install --legacy-peer-deps --no-audit --no-fund
     )
-    :: См. комментарий в start-browser.bat: внутри блока нужен !ERRORLEVEL!.
+    rem См. start-browser.bat: внутри блока нужен отложенный ERRORLEVEL.
     if !ERRORLEVEL! NEQ 0 (
         echo [ОШИБКА] Установка не удалась
         pause
@@ -39,14 +39,27 @@ if not exist node_modules (
 
 :: Проверка electron — не модифицируем package.json, используем --no-save
 if not exist node_modules\electron (
-    echo [INFO] Устанавливаю Electron (для оконного режима, без сохранения в package.json)...
+    echo [INFO] Устанавливаю Electron для оконного режима, без сохранения в package.json...
     call npm install --no-save electron --legacy-peer-deps --no-audit --no-fund
     if !ERRORLEVEL! NEQ 0 (
-        echo [ОШИБКА] Не удалось установить Electron
+        echo [ОШИБКА] Не удалось установить Electron.
+        echo   Бинарь Electron качается postinstall-скриптом, поэтому --ignore-scripts тут
+        echo   не поможет: загрузчик будет пропущен и оконный режим всё равно не заработает.
+        echo   В защищённой сети настройте npm proxy/https-proxy, поставьте Electron вручную
+        echo   или используйте браузерный режим.
         echo [INFO] Fallback на Chrome App режим - запускаю start-window.bat
         call start-window.bat
         exit /b !ERRORLEVEL!
     )
+)
+
+rem Проверяем, что postinstall действительно скачал бинарь: npm мог установить пакет,
+rem но не бинарь (прерванная загрузка, частичный кэш, ручной --ignore-scripts).
+if not exist node_modules\electron\dist\electron.exe (
+    echo [ОШИБКА] Пакет Electron есть, но бинарь не найден - postinstall не завершился.
+    echo [INFO] Fallback на Chrome App режим - запускаю start-window.bat
+    call start-window.bat
+    exit /b 1
 )
 
 echo [INFO] Запускаю в Electron...

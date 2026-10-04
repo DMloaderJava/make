@@ -10,6 +10,11 @@
  *     cmd раскрывает проценты один раз при разборе всей скобки, то есть ДО
  *     выполнения команд внутри неё. Именно на этом лаунчеры «падали» после
  *     успешной установки.
+ *  4. `::` не используется внутри блоков: это метка, а не комментарий, и метки в
+ *     скобочных блоках ломают разбор на части версий Windows («syntax of the
+ *     command is incorrect», исчезающие команды). Внутри блоков — только `rem`.
+ *  5. В `echo` внутри блоков нет круглых скобок: на старых версиях cmd скобка в
+ *     тексте сообщения может оборвать блок.
  *
  * Для правила 3 считается глубина скобок; из подсчёта исключаются комментарии
  * (`::`, `rem`), строки `echo` и содержимое кавычек. Это эвристика (без полного
@@ -32,23 +37,43 @@ function depthAt(scan, upTo, base) {
   return depth;
 }
 
-/** Ищет `%ERRORLEVEL%` на строках, которые находятся внутри блока. */
-export function findErrorlevelInBlocks(name, text) {
-  const problems = [];
+/**
+ * Построчный разбор .bat с подсчётом глубины скобок.
+ *
+ * Правила подсчёта (общие для всех проверок ниже): комментарии (`::`, `rem`) и
+ * строки `echo` не влияют на структуру; из строки вырезаются кавычки и строки
+ * `for /f`, чтобы скобки в тексте не сбивали счёт.
+ */
+function forEachCodeLine(text, callback) {
   let depth = 0;
 
   text.split(/\r?\n/).forEach((line, index) => {
     const trimmed = line.trim();
+    const isComment = /^(::|rem\b)/i.test(trimmed);
+    const isEcho = /^\s*echo\b/i.test(trimmed);
 
-    // Комментарии не влияют ни на структуру, ни на поиск.
-    if (/^(::|rem\b)/i.test(trimmed)) return;
-
-    let scan = line;
-    if (/^\s*echo\b/i.test(scan)) {
-      scan = ''; // echo — не структурная строка: скобки в тексте не считаем
-    } else {
-      scan = scan.replace(/"[^"]*"/g, '').replace(/'[^']*'/g, ''); // кавычки и строки for /f
+    let scan = '';
+    if (!isComment) {
+      scan = isEcho ? '' : line.replace(/"[^"]*"/g, '').replace(/'[^']*'/g, '');
     }
+
+    callback({ index, line, trimmed, scan, depth, isComment, isEcho });
+
+    if (!isComment && !isEcho) {
+      for (const ch of scan) {
+        if (ch === '(') depth++;
+        else if (ch === ')') depth = Math.max(0, depth - 1);
+      }
+    }
+  });
+}
+
+/** Ищет `%ERRORLEVEL%` на строках, которые находятся внутри блока. */
+export function findErrorlevelInBlocks(name, text) {
+  const problems = [];
+
+  forEachCodeLine(text, ({ index, trimmed, scan, depth, isComment }) => {
+    if (isComment) return;
 
     let from = 0;
     let found = scan.indexOf('%ERRORLEVEL%', from);
@@ -61,10 +86,45 @@ export function findErrorlevelInBlocks(name, text) {
       from = found + 1;
       found = scan.indexOf('%ERRORLEVEL%', from);
     }
+  });
 
-    for (const ch of scan) {
-      if (ch === '(') depth++;
-      else if (ch === ')') depth = Math.max(0, depth - 1);
+  return problems;
+}
+
+/**
+ * `::` — это не комментарий, а метка. Внутри блока `(...)` метки cmd не
+ * поддерживает: две подряд дают «The system cannot find the drive specified»,
+ * метка последней строкой блока — «) was unexpected at this time», метка перед
+ * пустой строкой — «The syntax of the command is incorrect». Поэтому внутри
+ * блоков пишем `rem`, а `::` оставляем только на верхнем уровне.
+ */
+/**
+ * Скобки в `echo` внутри блока: современный cmd понимает, что после echo идёт
+ * литерал, но на старых версиях (и части редакций Server) скобка в тексте ломает
+ * разбор блока. Внутри блоков такие сообщения лучше писать без скобок.
+ */
+export function findParenthesesInEchoBlocks(name, text) {
+  const problems = [];
+
+  forEachCodeLine(text, ({ index, line, trimmed, depth, isEcho }) => {
+    if (isEcho && depth > 0 && /[()]/.test(line)) {
+      problems.push(
+        `${name}:${index + 1}: скобки в echo внутри блока — на части версий cmd это ломает разбор; перепишите без скобок — ${trimmed}`
+      );
+    }
+  });
+
+  return problems;
+}
+
+export function findLabelCommentsInBlocks(name, text) {
+  const problems = [];
+
+  forEachCodeLine(text, ({ index, trimmed, depth, isComment }) => {
+    if (isComment && trimmed.startsWith('::') && depth > 0) {
+      problems.push(
+        `${name}:${index + 1}: «::» внутри блока — это метка, а не комментарий; нужен rem — ${trimmed}`
+      );
     }
   });
 
@@ -86,10 +146,11 @@ export function checkLaunchers(files) {
     const text = files[name];
 
     text.split(/\r?\n/).forEach((line, index) => {
-      // `npx npm …` и `call npm.cmd …` — тоже npm-вызовы: без префиксов они бы
-      // выпали из проверки флагов (в текущих лаунчерах их нет, но правило должно
-      // работать на будущее).
-      if (!/^\s*(?:call\s+)?(?:npx\s+)?npm(?:\.cmd)?\s+(?:ci|install)\b/.test(line)) return;
+      // `npx npm …`, `call npm.cmd …` и `start /wait npm …` — тоже npm-вызовы: без
+      // префиксов они бы выпали из проверки флагов (в текущих лаунчерах их нет, но
+      // правило должно работать на будущее). Оговорка: вызов через
+      // `call :метка` статически не разворачивается — это осознанное ограничение.
+      if (!/^\s*(?:call\s+)?(?:start\s+(?:\/wait\s+)?)?(?:npx\s+)?npm(?:\.cmd)?\s+(?:ci|install)\b/.test(line)) return;
       if (!/--no-audit/.test(line) || !/--no-fund/.test(line)) {
         problems.push(`${name}:${index + 1}: npm-вызов без --no-audit --no-fund — ${line.trim()}`);
       }
@@ -102,6 +163,8 @@ export function checkLaunchers(files) {
       }
 
       problems.push(...findErrorlevelInBlocks(name, text));
+      problems.push(...findLabelCommentsInBlocks(name, text));
+      problems.push(...findParenthesesInEchoBlocks(name, text));
     }
   }
 
