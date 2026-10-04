@@ -5,10 +5,21 @@
  * какие провайдеры действительно отвечают аудио, а какие — «мы написали URL
  * из документации, вдруг сработает».
  *
- * Запуск:
+ * Запуск (bash / zsh, включая Git Bash на Windows):
  *   PROVIDER_KEYS='{"openai":"sk-...","cartesia":"..."}' npm run smoke:tts
- *   или через файл:  npm run smoke:tts -- --keys-file .keys.json
- *   отдельные провайдеры:  npm run smoke:tts -- openai cartesia
+ *
+ * PowerShell (Windows):
+ *   $env:PROVIDER_KEYS = '{"openai":"sk-..."}'
+ *   npm run smoke:tts
+ *
+ * cmd.exe (Windows):
+ *   set PROVIDER_KEYS={"openai":"sk-..."}
+ *   npm run smoke:tts
+ *
+ * Ещё варианты (одинаково работают во всех оболочках):
+ *   файл с ключами:   npm run smoke:tts -- --keys-file .keys.json
+ *   отдельные провайдеры: npm run smoke:tts -- openai cartesia
+ *   (в PowerShell аргументы после -- тоже передаются: npm run smoke:tts -- openai)
  *
  * Результат (OK/FAIL/skip) выводится таблицей — его же стоит вставлять в README,
  * снимая флаг `experimental` у проверенных провайдеров.
@@ -34,11 +45,31 @@ function parseArgs(): { keys: Record<string, string>; only: string[] } {
   let keys: Record<string, string> = {};
 
   const fromEnv = process.env.PROVIDER_KEYS;
-  if (fromEnv) {
+  if (fromEnv !== undefined) {
+    if (fromEnv.trim() === '') {
+      // Типичный случай на Windows: переменную задали в другом окне терминала
+      // или через `set VAR=` без значения. Молчаливый skip всех провайдеров
+      // выглядел бы как «ничего не работает».
+      console.error(
+        'PROVIDER_KEYS задан, но пуст. Укажите JSON, например:\n' +
+        '  bash/zsh:    PROVIDER_KEYS=\'{"openai":"sk-..."}\' npm run smoke:tts\n' +
+        '  PowerShell:  $env:PROVIDER_KEYS = \'{"openai":"sk-..."}\'  ; npm run smoke:tts\n' +
+        '  cmd.exe:     set PROVIDER_KEYS={"openai":"sk-..."}         && npm run smoke:tts'
+      );
+      process.exit(2);
+    }
     try {
-      keys = JSON.parse(fromEnv);
-    } catch {
-      console.error('PROVIDER_KEYS не является JSON — ожидаю {"providerId":"ключ"}');
+      const parsed = JSON.parse(fromEnv);
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('ожидался объект вида {"providerId":"ключ"}');
+      }
+      keys = parsed as Record<string, string>;
+    } catch (e) {
+      console.error(
+        `PROVIDER_KEYS не является корректным JSON-объектом: ${(e as Error).message}\n` +
+        'Ожидается: {"openai":"sk-...","cartesia":"..."}\n' +
+        'Подсказки по оболочкам — в шапке scripts/smoke-tts.ts и в README.'
+      );
       process.exit(2);
     }
   }
@@ -67,6 +98,10 @@ async function run(): Promise<void> {
   const results: Result[] = [];
 
   console.log(`Smoke-тест ${providers.length} провайдеров, текст: «${TEST_TEXT}»\n`);
+  if (Object.keys(keys).length === 0) {
+    console.log('Ключи не переданы (PROVIDER_KEYS пуст или не задан) — все провайдеры будут пропущены.');
+    console.log('Это НЕ значит, что они не работают: проверять нечем. Пример задания ключей см. выше.\n');
+  }
   if (mustUseProxy(providers[0]?.id ?? '')) {
     console.log('(внимание: часть провайдеров в браузере идёт через /api/tts — здесь вызывается их прямая generate)\n');
   }

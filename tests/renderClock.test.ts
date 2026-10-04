@@ -1,7 +1,5 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { frameTime, startDelayMs, waitForStart } from '../src/lib/pipeline/renderClock';
 
 const LEAD_IN = 0.25;

@@ -1,4 +1,4 @@
-# Manga Voice Studio — Self-hosted озвучка манги с AI (v1.3.6)
+# Manga Voice Studio — Self-hosted озвучка манги с AI (v1.3.7)
 
 Self-hosted веб-инструмент для автоматической генерации озвученных видео из изображений (манга/комикс) с BYOK, 25+ LLM и 15+ TTS провайдерами, OPFS кэшем, WebCodecs MP4 и SEO-пакетом.
 
@@ -32,6 +32,35 @@ npm install
 npm run dev
 # http://localhost:3000
 ```
+
+### Windows
+
+Есть готовые лаунчеры (двойной клик): `install.bat` → `run.bat` (меню режимов),
+либо `start-browser.bat` / `start-window.bat` / `start-electron.bat`.
+Они дублируют `.sh`-скрипты: та же проверка Node, тот же `npm ci --no-audit --no-fund`
+и тот же фолбэк `--ignore-scripts`, если postinstall Electron не смог проверить
+TLS-сертификат (корпоративный прокси, антивирус).
+
+Через терминал:
+
+```cmd
+:: cmd.exe
+npm ci --ignore-scripts
+npm run dev
+```
+
+```powershell
+# PowerShell
+npm ci --ignore-scripts
+npm run dev
+```
+
+`--ignore-scripts` нужен только если `npm ci` падает на postinstall Electron;
+для веб-режима Electron не требуется, для десктопного — поставьте его отдельно:
+`npm install --no-save electron --legacy-peer-deps`.
+
+CI (`.github/workflows/ci.yml`) гоняет typecheck/test/lint/build на
+**ubuntu-latest и windows-latest**, поэтому Windows-регрессии не доживают до релиза.
 
 `/settings` → добавь ключи (см таблицы ниже). Все в localStorage, прямые запросы из браузера для CORS-friendly.
 
@@ -165,6 +194,26 @@ npm run dev
   `clearAllInfo` закрывает соединение IDB перед удалением, форма входа — POST с хэшем в cookie
   (пароль больше не попадает в URL), флаг `MVS_SECURE_COOKIE`.
 
+## 🪟 v1.3.7 — Windows-совместимость и запрет мёртвого кода
+
+- **CI на двух ОС**: матрица `ubuntu-latest` + `windows-latest`; на Windows дополнительно
+  проверяется, что все `npm ci/install` в `.bat`-лаунчерах содержат `--no-audit --no-fund`
+  (проверка уже нашла одно расхождение в `start-electron.bat`).
+- **`.bat` синхронизированы с `.sh`**: `--no-audit --no-fund` везде, фолбэк
+  `--ignore-scripts` при провале установки из-за TLS на postinstall Electron, актуальные
+  версии в заголовках (были v1.3.1).
+- **README**: отдельный раздел «Windows» (лаунчеры + команды для cmd/PowerShell)
+  и три варианта задания `PROVIDER_KEYS` для `smoke:tts`.
+- **`smoke:tts`**: внятные сообщения при пустом `PROVIDER_KEYS` и при невалидном JSON,
+  с примерами для bash/PowerShell/cmd.
+- **`noUnusedLocals` включён в `tsconfig.json`** — это корневая причина класса проблем
+  «мёртвый импорт в тесте». Правило сразу нашло 12 мест с неиспользуемым кодом,
+  все вычищены: `execAsync` в whisper-роуте, `z` в `extractPanels`, `mimeType` в
+  `generateAudio`, неиспользуемые импорты в `db.ts`/`local.ts`/`migrate.ts`,
+  целиком мёртвые функции `tryRemoveDir` и `ensureDir` в `info.ts`, недостижимая
+  ветка `shouldCopy` в миграции OPFS и остатки regex-теста в `renderClock.test.ts`.
+  Теперь такое ловится на этапе `npm run typecheck` — на любой ОС.
+
 ## 🔬 v1.3.6 — пятый раунд: честность вместо обещаний
 
 ### Что починено в коде
@@ -211,8 +260,31 @@ npm run dev
 - **Шесть провайдеров помечены `experimental`** (`playht`, `resemble`, `murf`, `fish`,
   `hume`, `speechify`): их эндпоинты написаны по документации и вживую не проверялись.
   В модалке голосов они подписаны «не проверен» и показывают предупреждение.
-- **`npm run smoke:tts`** — скрипт ручной проверки на реальных ключах:
-  `PROVIDER_KEYS='{"openai":"sk-…"}' npm run smoke:tts`. Печатает OK/FAIL/skip,
+- **`npm run smoke:tts`** — скрипт ручной проверки на реальных ключах.
+  Синтаксис задания ключа зависит от оболочки:
+
+  ```bash
+  # bash / zsh, в т.ч. Git Bash на Windows
+  PROVIDER_KEYS='{"openai":"sk-…"}' npm run smoke:tts
+  ```
+  ```powershell
+  # PowerShell (Windows)
+  $env:PROVIDER_KEYS = '{"openai":"sk-…"}'
+  npm run smoke:tts
+  ```
+  ```cmd
+  :: cmd.exe (Windows)
+  set PROVIDER_KEYS={"openai":"sk-…"}
+  npm run smoke:tts
+  ```
+  ```bash
+  # одинаково во всех оболочках — файл с ключами
+  npm run smoke:tts -- --keys-file .keys.json
+  ```
+
+  Если `PROVIDER_KEYS` пуст или не является корректным JSON, скрипт скажет об этом
+  явно (раньше все провайдеры молча уходили в `skip`, что читалось как «ничего не работает»).
+  Печатает OK/FAIL/skip,
   байты, определённый MIME, время отклика; exit code 1 при провале. Требует доступа
   в сеть к хостам провайдеров. Результат стоит вписать сюда, снимая бейдж.
   Статус на момент релиза: **провайдеры не проверялись вживую, ключей нет**.

@@ -2,7 +2,7 @@
  * One-shot migration from old namespaces to mvs-info
  */
 
-import { INFO_LS_PREFIX, lsKey, INFO_IDB_NAME, INFO_OPFS_ROOT, LS_KEYS } from './info';
+import { lsKey, INFO_IDB_NAME, INFO_OPFS_ROOT, LS_KEYS } from './info';
 
 const OLD_LS = {
   KEYS: 'manga-voice-keys',
@@ -169,25 +169,18 @@ export async function runMigration(): Promise<void> {
           const oldHandle = await root.getDirectoryHandle(oldName);
           // If old exists, check if new already has content
           const newSubName = oldName; // projects stays projects, tts-cache stays tts-cache
-          let shouldCopy = true;
+          // Раньше здесь была проверка «есть ли уже новая папка» и флаг shouldCopy,
+          // который всегда оставался true: решение всё равно было «мержим».
+          // Оставляем честный merge: create:true не затирает существующее,
+          // copyDirRecursive докапывает недостающие файлы.
+          const destSub = await infoRoot.getDirectoryHandle(newSubName, { create: true });
+          await copyDirRecursive(oldHandle, destSub);
+          console.log(`[migrate] OPFS ${oldName} -> ${INFO_OPFS_ROOT}/${newSubName} copied`);
+          // Delete old only after copy
           try {
-            const existingNew = await infoRoot.getDirectoryHandle(newSubName);
-            // If new exists and has files, skip to avoid overwrite? We merge.
-            // We'll still copy missing files
-          } catch {
-            // new doesn't exist, need to create
-          }
-
-          if (shouldCopy) {
-            const destSub = await infoRoot.getDirectoryHandle(newSubName, { create: true });
-            await copyDirRecursive(oldHandle, destSub);
-            console.log(`[migrate] OPFS ${oldName} -> ${INFO_OPFS_ROOT}/${newSubName} copied`);
-            // Delete old only after copy
-            try {
-              await root.removeEntry(oldName, { recursive: true } as any);
-              console.log(`[migrate] OPFS old ${oldName} removed`);
-            } catch {}
-          }
+            await root.removeEntry(oldName, { recursive: true } as any);
+            console.log(`[migrate] OPFS old ${oldName} removed`);
+          } catch {}
         } catch {
           // old dir doesn't exist, skip
         }

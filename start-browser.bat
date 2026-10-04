@@ -28,9 +28,9 @@ if %ERRORLEVEL% EQU 0 (
 if not exist node_modules (
     echo [INFO] node_modules не найден, устанавливаю...
     if exist package-lock.json (
-        call npm ci --legacy-peer-deps
+        call npm ci --legacy-peer-deps --no-audit --no-fund
     ) else (
-        call npm install --legacy-peer-deps
+        call npm install --legacy-peer-deps --no-audit --no-fund
     )
     if %ERRORLEVEL% NEQ 0 (
         echo [ОШИБКА] Установка зависимостей не удалась

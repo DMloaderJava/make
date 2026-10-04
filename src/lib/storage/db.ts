@@ -1,5 +1,5 @@
 import { openDB, IDBPDatabase } from 'idb';
-import { isOPFSSupported, saveProjectImage, loadProjectImageAsDataURL, deleteProjectImages, writeFile, readFile } from './opfs';
+import { isOPFSSupported, saveProjectImage, loadProjectImageAsDataURL, deleteProjectImages } from './opfs';
 import { INFO_IDB_NAME } from './info';
 
 const DB_NAME = INFO_IDB_NAME;

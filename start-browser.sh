@@ -19,9 +19,13 @@ fi
 if [ ! -d "node_modules" ]; then
     echo "[INFO] Устанавливаю зависимости..."
     if [ -f "package-lock.json" ]; then
-        npm ci --legacy-peer-deps --no-audit --no-fund
+        # при провале npm ci (частая причина — TLS на postinstall Electron)
+        # повторяем установку без postinstall-скриптов
+        npm ci --legacy-peer-deps --no-audit --no-fund || \
+            npm ci --legacy-peer-deps --no-audit --no-fund --ignore-scripts
     else
-        npm install --legacy-peer-deps --no-audit --no-fund
+        npm install --legacy-peer-deps --no-audit --no-fund || \
+            npm install --legacy-peer-deps --no-audit --no-fund --ignore-scripts
     fi
 fi
 

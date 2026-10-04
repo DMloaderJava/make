@@ -1,11 +1,11 @@
 @echo off
-setlocal
+setlocal enabledelayedexpansion
 chcp 65001 >nul
 title Manga Voice Studio - Установка
 
 echo ========================================
 echo  Manga Voice Studio - Установка
-echo  v1.3.1 Студия без хлама
+echo  v1.3.6
 echo ========================================
 echo.
 
@@ -43,9 +43,19 @@ echo.
 echo [1/3] Установка основных зависимостей...
 if exist package-lock.json (
     echo   Найден package-lock.json — использую npm ci
-    call npm ci --legacy-peer-deps
+    call npm ci --legacy-peer-deps --no-audit --no-fund
+    if !ERRORLEVEL! NEQ 0 (
+        echo [ВНИМАНИЕ] npm ci упал — вероятная причина: postinstall Electron не может
+        echo  проверить TLS-сертификат (корпоративный прокси/антивирус).
+        echo  Повторяю установку без запуска postinstall-скриптов...
+        call npm ci --legacy-peer-deps --no-audit --no-fund --ignore-scripts
+    )
 ) else (
-    call npm install --legacy-peer-deps
+    call npm install --legacy-peer-deps --no-audit --no-fund
+    if !ERRORLEVEL! NEQ 0 (
+        echo [ВНИМАНИЕ] npm install упал — повторяю с --ignore-scripts...
+        call npm install --legacy-peer-deps --no-audit --no-fund --ignore-scripts
+    )
 )
 if %ERRORLEVEL% NEQ 0 (
     echo [ОШИБКА] Установка не удалась

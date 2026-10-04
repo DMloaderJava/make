@@ -1,7 +1,6 @@
 import { LLMProvider, LLMOptions } from '../providers/llm/types';
 import { VISION_SYSTEM_PROMPT } from '../prompts/vision-prompt';
 import { validateVisionResult, normalizeCharacters } from '../validators';
-import { z } from 'zod';
 
 export interface PanelData {
   id: number;

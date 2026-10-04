@@ -11,7 +11,7 @@
  */
 
 import { getTTSProvider, TTS_PROVIDERS } from '../providers/tts';
-import { generateTTS, mimeTypeForProvider } from '../providers/tts/router';
+import { generateTTS } from '../providers/tts/router';
 import { resolveAudioMime } from '../providers/tts/mime';
 import { resolveVoice } from '../providers/tts/voice-resolver';
 import { getAllKeys } from '../storage/local';
@@ -152,8 +152,8 @@ export async function generateAllAudio(options: AudioGenerationOptions): Promise
   if (!apiKey) throw new Error(`No API key for ${options.ttsProviderId}. Add in settings.`);
 
   const language = options.language || 'ru';
-  // базовый MIME на случай, если не получится определить по сигнатуре
-  const mimeType = mimeTypeForProvider(options.ttsProviderId);
+  // MIME больше не вычисляется заранее: для каждых полученных байтов он
+  // определяется по сигнатуре через resolveAudioMime (таблица — лишь фолбэк).
 
   // Панели, которые реально надо переозвучить
   const targetPanels = options.onlyPanelIds

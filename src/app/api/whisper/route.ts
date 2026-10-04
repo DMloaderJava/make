@@ -56,9 +56,8 @@ export async function POST(req: NextRequest) {
     }
 
     try {
-      const { exec } = await import('child_process');
-      const { promisify } = await import('util');
-      const execAsync = promisify(exec);
+      // exec/promisify здесь не нужны: whisper вызывается через nodejs-whisper,
+      // а не через командную строку (мёртвый код удалён — ловится noUnusedLocals).
       const fs = await import('fs/promises');
       const path = await import('path');
       const os = await import('os');

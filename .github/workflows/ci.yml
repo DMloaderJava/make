@@ -7,7 +7,13 @@ on:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    # Windows проверяем отдельно: пути, npm-скрипты и .bat-лаунчеры ломаются
+    # именно там, а без матрицы такие регрессии всплывают только у пользователей.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -31,3 +37,19 @@ jobs:
 
       - name: Сборка
         run: npm run build
+
+      # Проверяем, что .bat-лаунчеры хотя бы существуют и не деградировали:
+      # в них не должно остаться npm-вызовов без --no-audit --no-fund.
+      - name: Лаунчеры согласованы (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # ^ якорим на начало строки: в .bat есть подсказки вида
+          # «echo ... npm install @aws-sdk/client-polly --no-save», их не считаем.
+          $bad = Select-String -Path *.bat -Pattern '^\s*(call\s+)?npm\s+(ci|install)\b(?!.*--no-audit)'
+          if ($bad) {
+            $bad | ForEach-Object { Write-Error "$($_.Filename):$($_.LineNumber): $($_.Line.Trim())" }
+            exit 1
+          }
+          Write-Host "Все npm-вызовы в .bat содержат --no-audit --no-fund"
+

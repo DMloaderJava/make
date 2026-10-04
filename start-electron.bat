@@ -25,9 +25,9 @@ if %ERRORLEVEL% EQU 0 (
 if not exist node_modules (
     echo [INFO] Устанавливаю зависимости...
     if exist package-lock.json (
-        call npm ci --legacy-peer-deps
+        call npm ci --legacy-peer-deps --no-audit --no-fund
     ) else (
-        call npm install --legacy-peer-deps
+        call npm install --legacy-peer-deps --no-audit --no-fund
     )
     if %ERRORLEVEL% NEQ 0 (
         echo [ОШИБКА] Установка не удалась
@@ -39,7 +39,7 @@ if not exist node_modules (
 :: Проверка electron — не модифицируем package.json, используем --no-save
 if not exist node_modules\electron (
     echo [INFO] Устанавливаю Electron (для оконного режима, без сохранения в package.json)...
-    call npm install --no-save electron --legacy-peer-deps
+    call npm install --no-save electron --legacy-peer-deps --no-audit --no-fund
     if %ERRORLEVEL% NEQ 0 (
         echo [ОШИБКА] Не удалось установить Electron
         echo [INFO] Fallback на Chrome App режим - запускаю start-window.bat

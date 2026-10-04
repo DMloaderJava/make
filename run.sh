@@ -12,7 +12,7 @@ check_port() {
 while true; do
     clear
     echo "========================================"
-    echo " Manga Voice Studio v1.3.1 - Launcher"
+    echo " Manga Voice Studio v1.3.6 - Launcher"
     echo "========================================"
     echo ""
     echo " 1. Установить зависимости"
@@ -33,7 +33,7 @@ while true; do
         4) 
             if [ ! -d "node_modules/electron" ]; then
                 echo "[INFO] Устанавливаю Electron (без сохранения)..."
-                npm install --no-save electron --legacy-peer-deps || { echo "[ОШИБКА] Electron install failed"; read -p "Enter..."; continue; }
+                npm install --no-save electron --legacy-peer-deps --no-audit --no-fund || { echo "[ОШИБКА] Electron install failed"; read -p "Enter..."; continue; }
             fi
             npx electron electron/main.js || echo "[ОШИБКА] Electron упал"
             read -p "Enter..."
