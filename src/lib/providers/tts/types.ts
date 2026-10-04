@@ -1,6 +1,10 @@
 export interface TTSOptions {
   apiKey: string;
-  voice: string;
+  /**
+   * Голос. Необязателен: у каждого провайдера есть дефолт в сигнатуре generate
+   * (voice = '...'), который срабатывает только на undefined — не на ''.
+   */
+  voice?: string;
   language?: 'ru' | 'en' | string;
   speed?: number;
   emotion?: string;

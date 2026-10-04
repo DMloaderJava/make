@@ -1,4 +1,4 @@
-# Manga Voice Studio — Self-hosted озвучка манги с AI (v1.3.9)
+# Manga Voice Studio — Self-hosted озвучка манги с AI (v1.3.10)
 
 Self-hosted веб-инструмент для автоматической генерации озвученных видео из изображений (манга/комикс) с BYOK, 25+ LLM и 15+ TTS провайдерами, OPFS кэшем, WebCodecs MP4 и SEO-пакетом.
 
@@ -201,6 +201,52 @@ CI (`.github/workflows/ci.yml`) гоняет typecheck/test/lint/build на
 - **Инфра**: `npm run typecheck|verify`, версия 1.3.2, Electron считает 401/302 живым сервером,
   `clearAllInfo` закрывает соединение IDB перед удалением, форма входа — POST с хэшем в cookie
   (пароль больше не попадает в URL), флаг `MVS_SECURE_COOKIE`.
+
+## 🔬 v1.3.10 — правки протоколов и аудит «на 100%»
+
+### Исправлено по коду
+- **Deepgram получал MIME от Cartesia**: в ветке `/api/tts` ответ помечался
+  `resolveAudioMime('cartesia', buf)`. Теперь MIME определяется по фактической
+  сигнатуре аудио и по id самого провайдера (`resolveAudioMime(providerId, buf)`) —
+  эвристика одинаковая, но больше не привязана к чужому имени.
+- **Пустой голос больше не блокирует дефолт провайдера**: `voice || ''` в
+  серверной ветке и в клиентском `router.ts` заменён на `voice || undefined`.
+  Раньше `voice = '...'` в сигнатуре `generate()` не срабатывал, и в API мог
+  уйти пустой id (а `TTSOptions.voice` был обязательным — теперь нет).
+- **Cartesia приведена к своей версии API (2024-06-10)**: `output_format` для mp3 —
+  `{ container: 'mp3', sample_rate: 44100, bit_rate: 128000 }` (поле `encoding`
+  принимает только PCM: `pcm_f32le/pcm_s16le/pcm_mulaw/pcm_alaw`), а top-level
+  `speed` — строка `slow|normal|fast`, не число; ползунок темпа переводится в
+  ступень. Тело собирает общий `buildCartesiaBody`, которым пользуются и клиент,
+  и серверная ветка (до этого тела дублировались и расходились).
+- **`assertClientContext` больше не смотрит на `NEXT_RUNTIME`**: признак сервера
+  структурный — нет ни `window` (браузер), ни `self` (воркер). Инлайн
+  `process.env` сборщиком больше не может дать ложное «на сервере…» на обычной
+  кнопке в браузере.
+- **Экспериментальные провайдеры (playht, resemble, murf, fish, hume, speechify)
+  не получают голос автоматически**: `resolveVoice` требует явный выбор из
+  диалога «Голоса» и не подставляет `FALLBACK_VOICE`; серверная ветка отвечает
+  `400 voice_required`, если голос не передан. Раньше в API мог уйти `matthew`
+  (speechify) — и ошибка выглядела как проблема провайдера, а не наша.
+  Явный `default` у resemble при этом считается выбором: это его настоящий id.
+- **`check:launchers` проверяет и `.sh`**: правило `--no-audit --no-fund`
+  распространено на shell-лаунчеры (5 `.bat` + 4 `.sh`) — флаги не разъедутся
+  между ОС.
+
+### Проверено по коду, правок не потребовало
+- `VISION_JSON_SCHEMA` (`extractPanels.ts`) и `SEO_JSON_SCHEMA` (`generateSEO.ts`) —
+  обычные JSON Schema (`type/properties/required`), Zod в проекте не используется.
+- `durationCache` — `WeakMap<Blob, number>`: длительность декодированного Blob
+  детерминирована, повторный экспорт того же Blob получает то же значение, а
+  записи уходят вместе с Blob. Кэш декодированных буферов ограничен бюджетом.
+- `/api/whisper`: кнопки «субтитры из аудио» в UI нет — SRT собирается из
+  таймлайна (`generateSRT`) и выгружается клиентом. Роут остаётся опциональным
+  серверным путём (вызов вручную, с ключом OpenAI или `nodejs-whisper`) и при
+  отсутствии зависимости отвечает мягко (`method: 'unavailable'`), а не падает.
+
+### Тесты
+84/84: `tests/voiceResolver.test.ts` (6 — политика голосов и тело Cartesia),
+`tests/launcherChecks.test.ts` (+1 — `.sh`-лаунчеры).
 
 ## 🧭 v1.3.9 — единый источник версии и тестируемые проверки
 

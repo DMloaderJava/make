@@ -2,7 +2,8 @@
 /**
  * Проверки .bat-лаунчеров, которые нельзя сделать одним регекспом по строке.
  *
- *  1. Все `npm ci` / `npm install` используют оба флага `--no-audit --no-fund`.
+ *  1. Все `npm ci` / `npm install` — и в .bat, и в .sh — используют оба флага
+ *     `--no-audit --no-fund` (флаги не должны расходиться между ОС).
  *  2. Файл, использующий `!VAR!`, включает `setlocal enabledelayedexpansion`
  *     (иначе cmd.exe считает `!VAR!` литеральной строкой).
  *  3. `%ERRORLEVEL%` не используется внутри блоков `if (...)` / `for (...) do (...)`:
@@ -74,10 +75,11 @@ export function findErrorlevelInBlocks(name, text) {
 export function checkLaunchers(files) {
   const problems = [];
   const names = Object.keys(files).sort();
+  const bats = names.filter(name => name.endsWith('.bat'));
 
   // Страховка от «проверка ничего не проверила»: без файлов все регекспы молчат.
-  if (names.length < 5) {
-    problems.push(`найдено ${names.length} .bat-файлов — ожидали минимум 5 (проверка не должна проходить молча)`);
+  if (bats.length < 5) {
+    problems.push(`найдено ${bats.length} .bat-файлов — ожидали минимум 5 (проверка не должна проходить молча)`);
   }
 
   for (const name of names) {
@@ -90,11 +92,14 @@ export function checkLaunchers(files) {
       }
     });
 
-    if (/![A-Za-z_][A-Za-z0-9_]*!/.test(text) && !/enabledelayedexpansion/.test(text)) {
-      problems.push(`${name}: использует !VAR!, но не включает setlocal enabledelayedexpansion`);
-    }
+    // Правила 2–3 — только для cmd: в bash нет ни !VAR!, ни %ERRORLEVEL%.
+    if (name.endsWith('.bat')) {
+      if (/![A-Za-z_][A-Za-z0-9_]*!/.test(text) && !/enabledelayedexpansion/.test(text)) {
+        problems.push(`${name}: использует !VAR!, но не включает setlocal enabledelayedexpansion`);
+      }
 
-    problems.push(...findErrorlevelInBlocks(name, text));
+      problems.push(...findErrorlevelInBlocks(name, text));
+    }
   }
 
   return problems;
@@ -103,14 +108,21 @@ export function checkLaunchers(files) {
 const isCli = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isCli) {
   const files = {};
-  for (const file of readdirSync('.').filter(f => f.endsWith('.bat'))) {
+  for (const file of readdirSync('.').filter(f => f.endsWith('.bat') || f.endsWith('.sh'))) {
     files[file] = readFileSync(file, 'utf8');
   }
 
   const problems = checkLaunchers(files);
+  // .sh-лаунчеры тоже часть поставки: если их вдруг не окажется, правило флагов
+  // проверит только половину файлов — пусть это будет явная ошибка, а не тишина.
+  const shCount = Object.keys(files).filter(name => name.endsWith('.sh')).length;
+  if (shCount < 3) {
+    problems.push(`найдено ${shCount} .sh-файлов — ожидали минимум 3 (проверка не должна проходить молча)`);
+  }
   if (problems.length > 0) {
     console.error(`check:launchers — ${problems.length} проблем:\n  - ${problems.join('\n  - ')}`);
     process.exit(1);
   }
-  console.log(`check:launchers — ok: ${Object.keys(files).length} .bat-файлов, правила npm-флагов, delayed expansion и ERRORLEVEL соблюдены`);
+  const batCount = Object.keys(files).filter(name => name.endsWith('.bat')).length;
+  console.log(`check:launchers — ok: ${batCount} .bat + ${shCount} .sh, правила npm-флагов, delayed expansion и ERRORLEVEL соблюдены`);
 }

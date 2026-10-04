@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { pcmToWav } from '@/lib/providers/tts/wav';
 import { resolveAudioMime } from '@/lib/providers/tts/mime';
+import { buildCartesiaBody } from '@/lib/providers/tts/cartesia';
 import { mustUseProxy } from '@/lib/providers/tts/cors';
 import { getServerGenerate } from '@/lib/providers/tts/catalog';
 
@@ -183,14 +184,7 @@ export async function POST(req: NextRequest) {
             'X-API-Key': apiKey,
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({
-            model_id: model || 'sonic-3',
-            transcript: text,
-            voice: { mode: 'id', id: voice || '79a125e8-cd45-4c13-8a67-188112f4dd22' },
-            language: language || 'en',
-            output_format: { container: 'mp3', encoding: 'mp3', sample_rate: 44100 },
-            speed: speed || 1.0,
-          })
+          body: JSON.stringify(buildCartesiaBody(text, { voice, language, speed, model }))
         });
         if (!res.ok) {
           const err = await res.text();
@@ -211,7 +205,7 @@ export async function POST(req: NextRequest) {
           return NextResponse.json({ error: `Deepgram error: ${err}` }, { status: res.status });
         }
         const buf = await res.arrayBuffer();
-        return new NextResponse(buf, { headers: { 'Content-Type': resolveAudioMime('cartesia', buf) } });
+        return new NextResponse(buf, { headers: { 'Content-Type': resolveAudioMime(providerId, buf) } });
       }
 
       case 'qwen': {
@@ -256,6 +250,18 @@ export async function POST(req: NextRequest) {
         if (!provider) {
           return NextResponse.json({ error: `Provider ${providerId} not found` }, { status: 404 });
         }
+        // Экспериментальные провайдеры: их дефолтные голоса не проверены живым
+        // ключом, поэтому без явного voice честно просим указать его, а не
+        // отправляем в API выдуманный id.
+        if (provider.experimental && !voice) {
+          return NextResponse.json(
+            {
+              error: `${providerId}: укажите голос вручную — провайдер помечен как экспериментальный, дефолтный голос может быть невалиден.`,
+              code: 'voice_required',
+            },
+            { status: 400 }
+          );
+        }
         const serverGenerate = getServerGenerate(provider);
         if (!serverGenerate) {
           return NextResponse.json(
@@ -268,7 +274,9 @@ export async function POST(req: NextRequest) {
         }
         const buffer = await serverGenerate(text, {
           apiKey,
-          voice: voice || '',
+          // undefined, а не '': дефолт в сигнатуре провайдера срабатывает только
+          // на undefined, а пустая строка ушла бы в API как voiceId=''.
+          voice: voice || undefined,
           language: language || 'ru',
           speed,
           model,

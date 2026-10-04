@@ -42,13 +42,12 @@ export function mimeTypeForProvider(providerId: string): string {
  * поэтому падаем сразу и громко, а не после таймаута.
  */
 export function assertClientContext(): void {
-  // NEXT_RUNTIME выставляется Next.js и однозначно говорит, что мы на сервере
-  // (nodejs/edge). Проверка на отсутствие window — запасной вариант для
-  // не-Next окружений: на серверном рендере клиентского компонента window тоже
-  // нет, но generateTTS из рендера не вызывается, только из обработчиков.
-  const runtime = typeof process !== 'undefined' ? process.env?.NEXT_RUNTIME : undefined;
-  const isServer = runtime === 'nodejs' || runtime === 'edge' || typeof window === 'undefined';
-  if (isServer) {
+  // NEXT_RUNTIME намеренно НЕ используется: в клиентском бандле значение
+  // process.env может быть заинлайнено сборщиком, и тогда проверка ложно
+  // срабатывала бы в браузере («на сервере используйте…» на обычной кнопке).
+  // Признак сервера структурный: нет ни window (браузер), ни self (воркер).
+  const browserLike = typeof window !== 'undefined' || typeof self !== 'undefined';
+  if (!browserLike) {
     throw new Error(
       'generateTTS() — клиентский путь (обращается к /api/tts). На сервере используйте getServerGenerate(provider) или serverGenerate у провайдера.'
     );
@@ -88,7 +87,8 @@ export async function generateTTS(req: GenerateTTSRequest): Promise<GenerateTTSR
 
   const buffer = await provider.generate(req.text, {
     apiKey: req.apiKey,
-    voice: req.voice || '',
+    // undefined, а не '': иначе дефолт `voice = '...'` в сигнатуре не сработает.
+    voice: req.voice || undefined,
     language: req.language,
     speed: req.speed,
     model: req.model,

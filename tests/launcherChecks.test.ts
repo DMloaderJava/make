@@ -89,7 +89,33 @@ test('npm-вызовы требуют оба флага, !VAR! требует de
   const bangProblems = checkLaunchers(five(bang));
   assert.equal(bangProblems.length, 1);
   assert.match(bangProblems[0], /enabledelayedexpansion/);
+
+  // .sh проверяются тем же правилом флагов: иначе --no-fund мог бы пропасть
+  // из install.sh/start-*.sh незамеченным.
+  const shFive = (text: string) => ({ ...five(shell(['setlocal'])), 'install.sh': text });
+  const shBad = checkLaunchers(shFive('npm ci --legacy-peer-deps --no-audit\n'));
+  assert.equal(shBad.length, 1);
+  assert.match(shBad[0], /install\.sh.*--no-audit --no-fund/);
+  const shGood = checkLaunchers(shFive('npm ci --legacy-peer-deps --no-audit --no-fund\n'));
+  assert.deepEqual(shGood, []);
 });
+
+test('репозиторные .sh проходят проверку флагов npm', () => {
+  // Правила cmd (!VAR!, %ERRORLEVEL%) к bash не применяются, но npm-вызовы
+  // должны быть с обоими флагами — тем же правилом, что и .bat.
+  const shFiles: Record<string, string> = {};
+  for (const file of readdirSync('.').filter(f => f.endsWith('.sh'))) {
+    shFiles[file] = readFileSync(file, 'utf8');
+  }
+  assert.ok(Object.keys(shFiles).length >= 3, 'в репозитории должно быть минимум 3 .sh');
+  const problems = checkLaunchers({ ...fiveBatStub(), ...shFiles });
+  assert.deepEqual(problems, []);
+});
+
+/** Заглушки .bat, чтобы не читать их повторно: минимум 5 нужен только для счётчика. */
+function fiveBatStub(): Record<string, string> {
+  return Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`stub${i}.bat`, 'setlocal enabledelayedexpansion\n']));
+}
 
 test('checkLaunchers: пустой список файлов не проходит молча', () => {
   const problems = checkLaunchers({});
