@@ -42,6 +42,7 @@ export interface AppSettings {
   defaultTTSProvider: string;
   defaultLLMProvider: string;
   defaultVisionModel: string;
+  cloudflareAccountId: string;
   siteName: string;
   ctaType: 'profile' | 'description';
   backgroundMusicVolume: number;
@@ -53,7 +54,8 @@ export interface AppSettings {
 export const DEFAULT_SETTINGS: AppSettings = {
   defaultTTSProvider: 'gemini',
   defaultLLMProvider: 'openrouter',
-  defaultVisionModel: 'inclusionai/ling-3.0-flash-vl:free',
+  defaultVisionModel: 'google/gemma-4-31b-it:free',
+  cloudflareAccountId: '',
   siteName: 'Manga Voice Studio',
   ctaType: 'profile',
   backgroundMusicVolume: 0.15,
@@ -72,7 +74,17 @@ export function getSettings(): AppSettings {
   try {
     const stored = localStorage.getItem(SETTINGS_KEY);
     if (!stored) return DEFAULT_SETTINGS;
-    return { ...DEFAULT_SETTINGS, ...JSON.parse(stored) };
+    const settings = { ...DEFAULT_SETTINGS, ...JSON.parse(stored) } as AppSettings;
+    // Before the catalog update this was the OpenRouter default; it is a
+    // text-only coding model and must not remain the saved manga vision model.
+    if (
+      settings.defaultLLMProvider === 'openrouter'
+      && ['qwen/qwen3-coder', 'qwen/qwen3-coder:free'].includes(settings.defaultVisionModel)
+    ) {
+      settings.defaultVisionModel = DEFAULT_SETTINGS.defaultVisionModel;
+      try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch {}
+    }
+    return settings;
   } catch {
     return DEFAULT_SETTINGS;
   }

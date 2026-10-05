@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { ImageUploader } from '@/components/upload/ImageUploader';
 import { getAllProjects, createProject, Project } from '@/lib/storage/db';
 import { getAllKeys, getSettings } from '@/lib/storage/local';
-import { getLLMProvider } from '@/lib/providers/llm';
+import { getLLMProvider, resolveLLMVisionModel } from '@/lib/providers/llm';
 import { processAllImages, mergeVisionResults } from '@/lib/pipeline/extractPanels';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
@@ -51,11 +51,25 @@ export default function HomePage() {
   const handleUpload = async (files: File[], dataUrls: string[]) => {
     const settings = getSettings();
     const keys = getAllKeys();
-    const llmId = settings.defaultLLMProvider || 'openrouter';
-    const provider = getLLMProvider(llmId);
-    const apiKey = keys[llmId];
+    const provider = getLLMProvider(settings.defaultLLMProvider) || getLLMProvider('openrouter')!;
+    const llmId = provider.id;
+    const apiKey = keys[llmId] || (llmId === 'gemini' ? keys['google-ai'] : '');
+    const custom = localStorage.getItem('mvs-info:custom-llm-config') || localStorage.getItem('custom-llm-config');
+    let baseUrl: string | undefined;
+    let model = resolveLLMVisionModel(provider, settings.defaultVisionModel);
+    if (llmId === 'custom' && custom) {
+      try {
+        const cfg = JSON.parse(custom);
+        baseUrl = cfg.baseUrl;
+        model = cfg.model || model;
+      } catch {}
+    }
 
-    if (!provider) { alert('LLM провайдер не найден'); return; }
+    if (!model) {
+      alert(`${provider.name} не имеет доступной модели для анализа изображений. Выберите vision-провайдера в настройках.`);
+      router.push('/settings');
+      return;
+    }
     if (!apiKey) { alert(`Добавь ключ для ${provider.name} в Провайдерах`); router.push('/settings'); return; }
 
     setIsProcessing(true);
@@ -64,16 +78,14 @@ export default function HomePage() {
     let project: Project | null = null;
     try {
       project = await createProject(`Проект ${new Date().toLocaleDateString('ru-RU')}`, files as any);
-      const custom = localStorage.getItem('mvs-info:custom-llm-config') || localStorage.getItem('custom-llm-config');
-      let baseUrl, model = settings.defaultVisionModel || provider.defaultModel;
-      if (llmId === 'custom' && custom) {
-        try { const cfg = JSON.parse(custom); baseUrl = cfg.baseUrl; model = cfg.model || model; } catch {}
-      }
-      if (llmId === 'cloudflare' && custom) {
-        try { const cfg = JSON.parse(custom); baseUrl = cfg.baseUrl || baseUrl; } catch {}
-      }
-
-      const results = await processAllImages(dataUrls, provider, { apiKey, model, baseUrl, temperature: 0.2, maxTokens: 4000 } as any, (c, t) => setProgress({ current: c, total: t, stage: `Анализ ${c}/${t}` }));
+      const results = await processAllImages(dataUrls, provider, {
+        apiKey,
+        model,
+        baseUrl,
+        accountId: settings.cloudflareAccountId,
+        temperature: 0.2,
+        maxTokens: 4000,
+      }, (c, t) => setProgress({ current: c, total: t, stage: `Анализ ${c}/${t}` }));
       const merged = mergeVisionResults(results);
 
       const updated: Project = {
@@ -122,7 +134,7 @@ export default function HomePage() {
         sceneDescription: 'Эпическая битва, напряжённый диалог перед кульминацией.',
         intro: 'Вы когда-нибудь видели момент, когда всё решается одним ударом? Эта сцена именно такая. Сейчас вы увидите.',
         outro: 'Спасибо за просмотр! Больше — в шапке профиля. Подписывайтесь!',
-        settings: { ttsProvider: 'gemini', llmProvider: 'openrouter', visionModel: 'inclusionai/ling-3.0-flash-vl:free', musicVolume: 0.15 },
+        settings: { ttsProvider: 'gemini', llmProvider: 'openrouter', visionModel: 'google/gemma-4-31b-it:free', musicVolume: 0.15 },
         introDuration: 8,
         outroDuration: 5,
       };

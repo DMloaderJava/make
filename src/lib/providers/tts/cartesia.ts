@@ -1,9 +1,9 @@
 import { TTSProvider, TTSOptions, Voice } from './types';
 
 /**
- * Тело запроса к Cartesia «Text to Speech (Bytes)» для версии API 2024-06-10.
+ * Тело запроса к Cartesia «Text to Speech (Bytes)» для версии API 2026-03-01.
  *
- * Исправлено по документации этой версии (docs.cartesia.ai/2024-06-10/api-reference/tts/bytes):
+ * Формат mp3 и скорость заданы по текущей схеме API (docs.cartesia.ai):
  *  - `output_format.encoding` принимает только PCM (pcm_f32le/pcm_s16le/pcm_mulaw/
  *    pcm_alaw); для контейнера mp3 обязателен `bit_rate`, а `encoding: 'mp3'`
  *    не существует — сервер мог отвечать 400;
@@ -17,7 +17,8 @@ import { TTSProvider, TTSOptions, Voice } from './types';
 export const CARTESIA_DEFAULT_VOICE = '79a125e8-cd45-4c13-8a67-188112f4dd22';
 
 const CARTESIA_URL = 'https://api.cartesia.ai/tts/bytes';
-const CARTESIA_VERSION = '2024-06-10';
+export const CARTESIA_VERSION = '2026-03-01';
+export const CARTESIA_DEFAULT_MODEL = 'sonic-3.5';
 
 export function buildCartesiaBody(text: string, options: {
   voice?: string;
@@ -27,7 +28,7 @@ export function buildCartesiaBody(text: string, options: {
 }): Record<string, unknown> {
   const speed = options.speed ?? 1;
   const body: Record<string, unknown> = {
-    model_id: options.model || 'sonic-3',
+    model_id: options.model || CARTESIA_DEFAULT_MODEL,
     transcript: text,
     voice: { mode: 'id', id: options.voice || CARTESIA_DEFAULT_VOICE },
     language: options.language || 'en',
@@ -79,11 +80,11 @@ export async function generateCartesia(text: string, options: TTSOptions): Promi
 
 export const cartesiaTTS: TTSProvider = {
   id: 'cartesia',
-  name: 'Cartesia Sonic 3',
+  name: 'Cartesia Sonic 3.5',
   description: 'Free tier, 40ms latency · SSM architecture',
   freeTier: true,
   languages: ['ru', 'en', 'multi'],
-  defaultModel: 'sonic-3',
+  defaultModel: CARTESIA_DEFAULT_MODEL,
   baseUrl: 'https://api.cartesia.ai',
 
   async generate(text: string, options: TTSOptions): Promise<ArrayBuffer> {
@@ -99,7 +100,7 @@ export const cartesiaTTS: TTSProvider = {
     }
     try {
       const res = await fetch('https://api.cartesia.ai/voices', {
-        headers: { 'X-API-Key': apiKey, 'Cartesia-Version': '2024-06-10' }
+        headers: { 'X-API-Key': apiKey, 'Cartesia-Version': CARTESIA_VERSION }
       });
       if (!res.ok) throw new Error('fail');
       const data = await res.json();

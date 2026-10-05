@@ -1,4 +1,5 @@
 import { LLMProvider, LLMOptions } from '../providers/llm/types';
+import { generateLLM, getLLMHttpError } from '../providers/llm/router';
 import { VISION_SYSTEM_PROMPT } from '../prompts/vision-prompt';
 import { validateVisionResult, normalizeCharacters } from '../validators';
 
@@ -95,47 +96,42 @@ export async function extractPanels(
   options: LLMOptions,
   imageIndex: number = 0
 ): Promise<VisionResult> {
-  let resultText: string;
-  
-  // Try structured output if provider supports it
-  const useStructured = ['openai', 'openrouter', 'nvidia-nim', 'groq'].includes(llm.id);
-  
-  if (llm.vision) {
-    try {
-      resultText = await llm.vision(imageBase64, VISION_SYSTEM_PROMPT, {
-        ...options,
-        // json_schema/json_object — теперь реально уходит в тело запроса
-        // (см. buildResponseFormat в openai-compatible.ts).
-        // strict: false, т.к. схема не помечена additionalProperties: false.
-        ...(useStructured ? { responseFormat: { name: 'vision_result', schema: VISION_JSON_SCHEMA, strict: false } } : {})
-      });
-    } catch (e) {
-      // Fallback to chat with image
-      const imageUrl = imageBase64.startsWith('data:') ? imageBase64 : `data:image/jpeg;base64,${imageBase64}`;
-      resultText = await llm.chat([
-        { role: 'system', content: VISION_SYSTEM_PROMPT },
-        { 
-          role: 'user', 
-          content: [
-            { type: 'text', text: 'Проанализируй это изображение и верни JSON по схеме. Отвечай ТОЛЬКО JSON, без markdown.' },
-            { type: 'image_url', image_url: { url: imageUrl } }
-          ]
+  // Try structured output only where the OpenAI-compatible adapter supports it.
+  const useStructured = ['openrouter', 'nvidia-nim', 'groq'].includes(llm.id);
+  const imageUrl = imageBase64.startsWith('data:') ? imageBase64 : `data:image/jpeg;base64,${imageBase64}`;
+  const chatMessages = [
+    { role: 'system' as const, content: VISION_SYSTEM_PROMPT },
+    {
+      role: 'user' as const,
+      content: [
+        { type: 'text' as const, text: 'Проанализируй это изображение и верни JSON по схеме. Отвечай ТОЛЬКО JSON, без markdown.' },
+        { type: 'image_url' as const, image_url: { url: imageUrl } },
+      ],
+    },
+  ];
+  const resultText = await generateLLM({
+    provider: llm,
+    task: 'vision',
+    options: {
+      ...options,
+      ...(useStructured ? { responseFormat: { name: 'vision_result', schema: VISION_JSON_SCHEMA, strict: false } } : {}),
+    },
+    invoke: async (candidate, candidateOptions) => {
+      if (candidate.vision) {
+        try {
+          return await candidate.vision(imageBase64, VISION_SYSTEM_PROMPT, candidateOptions);
+        } catch (error) {
+          const httpError = getLLMHttpError(error);
+          // Preserve quota/rate-limit errors for the cross-provider fallback router.
+          if (httpError && ([429, 402].includes(httpError.status) || (candidate.id === 'gemini' && httpError.status === 403))) {
+            throw error;
+          }
+          // Other vision-format errors retain the existing fallback to chat + image.
         }
-      ], { ...options, temperature: 0.2 });
-    }
-  } else {
-    const imageUrl = imageBase64.startsWith('data:') ? imageBase64 : `data:image/jpeg;base64,${imageBase64}`;
-    resultText = await llm.chat([
-      { role: 'system', content: VISION_SYSTEM_PROMPT },
-      { 
-        role: 'user', 
-        content: [
-          { type: 'text', text: 'Проанализируй это изображение и верни JSON по схеме. Отвечай ТОЛЬКО JSON, без markdown.' },
-          { type: 'image_url', image_url: { url: imageUrl } }
-        ]
       }
-    ], { ...options, temperature: 0.2 });
-  }
+      return candidate.chat(chatMessages, { ...candidateOptions, temperature: 0.2 });
+    },
+  });
   
   const parsed = safeParseJSON(resultText);
   

@@ -39,6 +39,9 @@ export interface TTSProvider {
   supportsSpeed?: boolean;
   /** Модель по умолчанию — единый источник для настроек и UI (раньше хардкодилась в VoicesModal). */
   defaultModel?: string;
+  /** Поддерживаемые/доступные модели; если есть getModels, UI может сверить их с API. */
+  supportedModels?: string[];
+  getModels?(apiKey: string): Promise<string[]>;
   getVoices(apiKey: string): Promise<Voice[]>;
   generate(text: string, options: TTSOptions): Promise<ArrayBuffer>;
   /**

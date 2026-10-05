@@ -243,7 +243,7 @@ export async function createProject(name: string, images: string[] | Blob[]): Pr
     settings: {
       ttsProvider: 'gemini',
       llmProvider: 'openrouter',
-      visionModel: 'inclusionai/ling-3.0-flash-vl:free',
+      visionModel: 'google/gemma-4-31b-it:free',
       musicVolume: 0.15,
     },
     createdAt: Date.now(),

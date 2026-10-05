@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { Character, Project } from '@/lib/storage/db';
-import { TTS_PROVIDERS, Voice, getTTSProvider } from '@/lib/providers/tts';
+import { TTS_PROVIDERS, Voice, getModels, getTTSProvider } from '@/lib/providers/tts';
 import { getAllKeys } from '@/lib/storage/local';
 import { Button } from '@/components/ui/button';
 import { normalizeCharactersWithMap } from '@/lib/validators';
@@ -26,24 +26,106 @@ function defaultModelFor(providerId: string): string {
   return getTTSProvider(providerId)?.defaultModel || '';
 }
 
+type LanguageOption = { value: string; label: string };
+
+const DEFAULT_LANGUAGE_OPTIONS: LanguageOption[] = [
+  { value: 'ru', label: 'Русский' },
+  { value: 'en', label: 'English' },
+  { value: 'multi', label: 'Мультиязычный' },
+];
+
+const PROVIDER_LANGUAGE_OPTIONS: Record<string, LanguageOption[]> = {
+  deepgram: [
+    { value: 'en', label: 'English' },
+    { value: 'es', label: 'Español' },
+    { value: 'de', label: 'Deutsch' },
+    { value: 'fr', label: 'Français' },
+    { value: 'nl', label: 'Nederlands' },
+    { value: 'it', label: 'Italiano' },
+    { value: 'ja', label: '日本語' },
+  ],
+  speechify: [
+    { value: 'en-US', label: 'English (US)' },
+    { value: 'de-DE', label: 'Deutsch' },
+    { value: 'es-ES', label: 'Español (España)' },
+    { value: 'es-MX', label: 'Español (México)' },
+    { value: 'fr-FR', label: 'Français' },
+    { value: 'it-IT', label: 'Italiano' },
+    { value: 'pt-BR', label: 'Português (Brasil)' },
+  ],
+};
+
+function languageOptionsFor(providerId: string): LanguageOption[] {
+  return PROVIDER_LANGUAGE_OPTIONS[providerId] || DEFAULT_LANGUAGE_OPTIONS;
+}
+
+function normalizeLanguageForProvider(providerId: string, language: string): string {
+  const options = languageOptionsFor(providerId);
+  const exact = options.find(option => option.value.toLowerCase() === language.toLowerCase());
+  if (exact) return exact.value;
+  const baseLanguage = language.toLowerCase().split('-')[0];
+  return options.find(option => option.value.toLowerCase().split('-')[0] === baseLanguage)?.value
+    || options[0]?.value
+    || language;
+}
+
+function modelForLanguage(providerId: string, language: string): string {
+  if (providerId !== 'speechify') return defaultModelFor(providerId);
+  return language.toLowerCase().startsWith('en') ? 'simba-3.2' : 'simba-3.0';
+}
+
+function normalizeSpeechifyModel(model: string, language: string): string {
+  const supported = ['simba-3.2', 'simba-3.0'];
+  if (model === 'simba-base') return modelForLanguage('speechify', language);
+  if (model === 'simba-3.2' && !language.toLowerCase().startsWith('en')) return 'simba-3.0';
+  return supported.includes(model) ? model : modelForLanguage('speechify', language);
+}
+
 export function VoicesModal({ open, onClose, characters, assignments, onChange, onCharactersChange, onPanelsRename, settings, onSettingsChange }: VoicesModalProps) {
   const [voicesByProvider, setVoicesByProvider] = useState<Record<string, Voice[]>>({});
   const [selectedProvider, setSelectedProvider] = useState(settings?.ttsProvider || 'gemini');
   const [loadingPreview, setLoadingPreview] = useState<string | null>(null);
   const [model, setModel] = useState(settings?.ttsModel || '');
+  const [modelDiscovery, setModelDiscovery] = useState<Record<string, { models: string[]; error: string | null }>>({});
   const [language, setLanguage] = useState(settings?.ttsLanguage || 'ru');
   // Скорость держим строкой: пустое поле при наборе «1.» не должно превращаться в 0.
   const [speed, setSpeed] = useState(String(settings?.ttsSpeed ?? 1));
+  const selectedProviderMeta = TTS_PROVIDERS.find(p => p.id === selectedProvider);
+  const selectedProviderApiKey = getAllKeys()[selectedProvider] || '';
+  const languageOptions = languageOptionsFor(selectedProvider);
+  const speechifyModelLanguageMismatch = selectedProvider === 'speechify'
+    && model === 'simba-3.2'
+    && !language.toLowerCase().startsWith('en');
+  const selectedModelLookupKey = JSON.stringify([selectedProvider, selectedProviderApiKey]);
+  const selectedModelResult = modelDiscovery[selectedModelLookupKey];
+  const catalogModels = selectedProviderMeta?.supportedModels || (selectedProviderMeta?.defaultModel ? [selectedProviderMeta.defaultModel] : []);
+  const availableModels = selectedModelResult?.models.length ? selectedModelResult.models : catalogModels;
+  const loadingModels = Boolean(open && selectedProviderMeta?.getModels && selectedProviderApiKey && !selectedModelResult);
+  const modelsError = selectedProviderMeta?.getModels
+    ? (!selectedProviderApiKey
+      ? `Добавьте API-ключ ${selectedProviderMeta.name}, чтобы проверить доступность моделей. Показан список из каталога.`
+      : selectedModelResult?.error || null)
+    : null;
 
-  // Провайдер проекта мог измениться извне — синхронизируем при открытии
+  // Провайдер проекта мог измениться извне — синхронизируем при открытии.
+  // У Speechify Simba 3.2 только английский; остальные доступные языки идут через 3.0.
   useEffect(() => {
     if (!open) return;
-    if (settings?.ttsProvider && settings.ttsProvider !== selectedProvider) {
-      setSelectedProvider(settings.ttsProvider);
-    }
-    setModel(settings?.ttsModel || '');
-    setLanguage(settings?.ttsLanguage || 'ru');
+    const providerId = settings?.ttsProvider || selectedProvider;
+    const nextLanguage = normalizeLanguageForProvider(providerId, settings?.ttsLanguage || 'ru');
+    const storedModel = settings?.ttsModel || '';
+    const nextModel = providerId === 'speechify'
+      ? normalizeSpeechifyModel(storedModel, nextLanguage)
+      : storedModel;
+    setSelectedProvider(providerId);
+    setModel(nextModel);
+    setLanguage(nextLanguage);
     setSpeed(String(settings?.ttsSpeed ?? 1));
+
+    const updates: Partial<Project['settings']> = {};
+    if (settings?.ttsLanguage !== nextLanguage) updates.ttsLanguage = nextLanguage;
+    if (providerId === 'speechify' && storedModel !== nextModel) updates.ttsModel = nextModel;
+    if (Object.keys(updates).length) onSettingsChange?.(updates);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
@@ -64,7 +146,41 @@ export function VoicesModal({ open, onClose, characters, assignments, onChange, 
     load();
   }, [open]);
 
-  const selectedProviderMeta = TTS_PROVIDERS.find(p => p.id === selectedProvider);
+  useEffect(() => {
+    if (!open || !selectedProviderMeta?.getModels || !selectedProviderApiKey) return;
+    let cancelled = false;
+    const lookupKey = selectedModelLookupKey;
+
+    void getModels(selectedProvider, selectedProviderApiKey)
+      .then(models => {
+        if (cancelled) return;
+        setModelDiscovery(current => ({
+          ...current,
+          [lookupKey]: {
+            models,
+            error: models.length === 0 ? 'API не вернул доступные TTS-модели. Показан список из каталога.' : null,
+          },
+        }));
+      })
+      .catch(error => {
+        if (cancelled) return;
+        setModelDiscovery(current => ({
+          ...current,
+          [lookupKey]: {
+            models: [],
+            error: `Не удалось проверить модели: ${error instanceof Error ? error.message : String(error)}. Показан список из каталога.`,
+          },
+        }));
+      });
+
+    return () => { cancelled = true; };
+  }, [open, selectedProvider, selectedProviderApiKey, selectedProviderMeta, selectedModelLookupKey]);
+
+  const isModelSelect = Boolean(
+    selectedProviderMeta?.supportedModels?.length
+    || (selectedProviderMeta?.getModels && availableModels.length > 0)
+  );
+  const modelOptions = Array.from(new Set([...(model ? [model] : []), ...availableModels]));
   // Темп — общая настройка, но часть провайдеров его не принимает: не молчим об этом.
   const speedUnsupported = selectedProviderMeta?.supportsSpeed === false;
 
@@ -82,10 +198,12 @@ export function VoicesModal({ open, onClose, characters, assignments, onChange, 
     }
 
     setSelectedProvider(nextProvider);
-    // Модель предыдущего провайдера к новому отношения не имеет — берём дефолт каталога.
-    const nextModel = defaultModelFor(nextProvider);
+    const nextLanguage = normalizeLanguageForProvider(nextProvider, language);
+    // Для Speechify выбираем рекомендованную модель, совместимую с языком.
+    const nextModel = modelForLanguage(nextProvider, nextLanguage);
     setModel(nextModel);
-    onSettingsChange?.({ ttsProvider: nextProvider, ttsModel: nextModel, ttsLanguage: language });
+    setLanguage(nextLanguage);
+    onSettingsChange?.({ ttsProvider: nextProvider, ttsModel: nextModel, ttsLanguage: nextLanguage });
   };
 
   const handleMerge = () => {
@@ -197,6 +315,12 @@ export function VoicesModal({ open, onClose, characters, assignments, onChange, 
             </Button>
           </div>
 
+          {!selectedProviderApiKey && (
+            <p className="text-[11px] leading-4 text-[#C97A66] bg-[#1E1010] border border-[#3A1414] rounded-[6px] px-3 py-2">
+              Ключ для {selectedProviderMeta?.name || selectedProvider} не добавлен — озвучка не запустится. Добавьте его в «Настройки → Провайдеры».
+            </p>
+          )}
+
           {selectedProviderMeta?.experimental && (
             <p className="text-[11px] leading-4 text-[#C9B27A] bg-[#1E1A10] border border-[#3A2E14] rounded-[6px] px-3 py-2">
               Провайдер помечен как <span className="font-medium">непроверенный</span>: запросы к нему написаны
@@ -208,26 +332,66 @@ export function VoicesModal({ open, onClose, characters, assignments, onChange, 
 
           {/* Провайдер/модель/язык озвучки — на проект, а не только глобально в /settings */}
           <div className="grid grid-cols-3 gap-2">
-            <div className="space-y-1">
-              <label className="text-[10px] text-[#8A8A93]">Модель TTS</label>
-              <input
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                onBlur={() => onSettingsChange?.({ ttsModel: model.trim() })}
-                placeholder={defaultModelFor(selectedProvider) || 'по умолчанию'}
-                className="w-full h-8 rounded-[6px] bg-[#0B0B0C] border border-[#26262C] px-2 text-[11px] text-[#F5F5F7] placeholder:text-[#8A8A93]/50"
-              />
+            <div className={`space-y-1 ${isModelSelect ? 'col-span-3' : ''}`}>
+              <label className="text-[10px] text-[#8A8A93]">
+                Модель TTS{selectedProviderMeta?.getModels && loadingModels ? ' · проверка доступности…' : ''}
+              </label>
+              {isModelSelect ? (
+                <select
+                  value={model}
+                  onChange={(e) => {
+                    setModel(e.target.value);
+                    onSettingsChange?.({ ttsModel: e.target.value });
+                  }}
+                  className="w-full h-8 rounded-[6px] bg-[#0B0B0C] border border-[#26262C] px-2 text-[11px] text-[#F5F5F7]"
+                >
+                  <option value="">По умолчанию ({defaultModelFor(selectedProvider)})</option>
+                  {modelOptions.map(candidate => (
+                    <option key={candidate} value={candidate}>
+                      {candidate}{candidate === defaultModelFor(selectedProvider) ? ' · рекомендована' : ''}{!availableModels.includes(candidate) ? ' · не проверена' : ''}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                  onBlur={() => onSettingsChange?.({ ttsModel: model.trim() })}
+                  placeholder={defaultModelFor(selectedProvider) || 'по умолчанию'}
+                  className="w-full h-8 rounded-[6px] bg-[#0B0B0C] border border-[#26262C] px-2 text-[11px] text-[#F5F5F7] placeholder:text-[#8A8A93]/50"
+                />
+              )}
+              {selectedProviderMeta?.getModels && modelsError && (
+                <p className="text-[10px] leading-4 text-[#C9B27A]">{modelsError}</p>
+              )}
+              {selectedProvider === 'speechify' && (
+                <p className="text-[10px] leading-4 text-[#8A8A93]">Simba 3.2 — только английский; для немецкого, испанского, французского, итальянского и португальского используется Simba 3.0. Русский не поддерживается.</p>
+              )}
+              {speechifyModelLanguageMismatch && (
+                <p className="text-[10px] leading-4 text-[#C97A66]">Simba 3.2 не поддерживает выбранный язык. Выберите Simba 3.0.</p>
+              )}
+              {selectedProvider === 'deepgram' && (
+                <p className="text-[10px] leading-4 text-[#8A8A93]">Flux доступен для английского; выберите Aura-2 в списке голосов для испанского, немецкого, французского, нидерландского, итальянского или японского. Русский не поддерживается.</p>
+              )}
             </div>
             <div className="space-y-1">
               <label className="text-[10px] text-[#8A8A93]">Язык</label>
               <select
                 value={language}
-                onChange={(e) => { setLanguage(e.target.value); onSettingsChange?.({ ttsLanguage: e.target.value }); }}
+                onChange={(event) => {
+                  const nextLanguage = event.target.value;
+                  setLanguage(nextLanguage);
+                  if (selectedProvider === 'speechify') {
+                    const nextModel = modelForLanguage(selectedProvider, nextLanguage);
+                    setModel(nextModel);
+                    onSettingsChange?.({ ttsLanguage: nextLanguage, ttsModel: nextModel });
+                  } else {
+                    onSettingsChange?.({ ttsLanguage: nextLanguage });
+                  }
+                }}
                 className="w-full h-8 rounded-[6px] bg-[#0B0B0C] border border-[#26262C] px-2 text-[11px] text-[#F5F5F7]"
               >
-                <option value="ru">ru</option>
-                <option value="en">en</option>
-                <option value="multi">multi</option>
+                {languageOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
               </select>
             </div>
             <div className="space-y-1">

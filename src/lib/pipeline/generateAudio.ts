@@ -68,6 +68,8 @@ export interface AudioGenerationResult {
   outroAudio: Blob | null;
   durations: Map<number, number>;
   totalCost: { characters: number; cost: string };
+  /** Ошибки отдельных задач не прерывают очередь; отдаём их редактору вместо console-only. */
+  errors: string[];
 }
 
 // Singleton AudioContext to avoid leak (Chrome limit ~6 contexts)
@@ -165,6 +167,7 @@ export async function generateAllAudio(options: AudioGenerationOptions): Promise
 
   const panelAudios = new Map<number, { blob: Blob; duration: number }>();
   const durations = new Map<number, number>();
+  const errors: string[] = [];
 
   let introAudio: Blob | null = null;
   let outroAudio: Blob | null = null;
@@ -175,12 +178,13 @@ export async function generateAllAudio(options: AudioGenerationOptions): Promise
   const resolveVoiceCached = async (
     providerId: string,
     key: string,
-    explicit?: string
+    explicit?: string,
+    voiceLanguage?: string
   ): Promise<string> => {
-    const cacheKey = `${providerId}|${explicit || '__default__'}`;
+    const cacheKey = `${providerId}|${explicit || '__default__'}|${voiceLanguage || ''}`;
     const hit = voiceCache.get(cacheKey);
     if (hit) return hit;
-    const resolved = await resolveVoice(providerId, key, explicit);
+    const resolved = await resolveVoice(providerId, key, explicit, voiceLanguage);
     voiceCache.set(cacheKey, resolved);
     return resolved;
   };
@@ -189,7 +193,8 @@ export async function generateAllAudio(options: AudioGenerationOptions): Promise
   const introVoice = await resolveVoiceCached(
     options.ttsProviderId,
     apiKey,
-    Object.values(options.voiceAssignments).find(v => !!v)
+    Object.values(options.voiceAssignments).find(v => !!v),
+    language
   );
 
   // intro/outro: сначала «свежий» кэш проекта (подпись совпала), потом общий TTS-кэш
@@ -264,7 +269,7 @@ export async function generateAllAudio(options: AudioGenerationOptions): Promise
     queue.add({
       id: `panel-${panel.id}`,
       fn: async () => {
-        const voiceId = await resolveVoiceCached(options.ttsProviderId, apiKey, explicitVoice);
+        const voiceId = await resolveVoiceCached(options.ttsProviderId, apiKey, explicitVoice, language);
         const signature = await buildAudioSignature({
           text: panel.dialogue,
           voice: voiceId,
@@ -342,7 +347,7 @@ export async function generateAllAudio(options: AudioGenerationOptions): Promise
           const fallbackKey = keys[fallbackProvider.id];
           if (!fallbackKey) throw new Error(`No key for fallback ${fallbackProvider.id}`);
 
-          const voice = await resolveVoiceCached(fallbackProvider.id, fallbackKey);
+          const voice = await resolveVoiceCached(fallbackProvider.id, fallbackKey, undefined, language);
 
           const { buffer } = await generateTTS({
             providerId: fallbackProvider.id,
@@ -371,7 +376,9 @@ export async function generateAllAudio(options: AudioGenerationOptions): Promise
       panelAudios.set(panel.id, { blob, duration });
       durations.set(panel.id, duration);
     } else {
+      const message = result?.error?.message || 'Неизвестная ошибка синтеза.';
       console.error(`Failed panel ${panel.id}:`, result?.error);
+      errors.push(`Панель ${panel.id}: ${message}`);
       const estimated = Math.max(1.5, panel.dialogue.length / 14);
       durations.set(panel.id, estimated);
     }
@@ -409,7 +416,9 @@ export async function generateAllAudio(options: AudioGenerationOptions): Promise
         })
       );
     } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
       console.error('Intro generation failed', e);
+      errors.push(`Интро: ${message}`);
     } finally {
       completedSteps = targetPanels.length + introStep;
       reportProgress('intro');
@@ -448,7 +457,9 @@ export async function generateAllAudio(options: AudioGenerationOptions): Promise
         })
       );
     } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
       console.error('Outro generation failed', e);
+      errors.push(`Аутро: ${message}`);
     } finally {
       completedSteps = targetPanels.length + introStep + outroStep;
       reportProgress('outro');
@@ -467,7 +478,8 @@ export async function generateAllAudio(options: AudioGenerationOptions): Promise
     introAudio,
     outroAudio,
     durations,
-    totalCost: { characters: costEstimate.characters, cost: costEstimate.estimatedCost }
+    totalCost: { characters: costEstimate.characters, cost: costEstimate.estimatedCost },
+    errors,
   };
 }
 

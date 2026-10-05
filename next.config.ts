@@ -1,6 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // Optional native integrations are loaded dynamically by API routes. Keep
+  // them external so Next does not try to bundle missing optional packages.
+  serverExternalPackages: ['@aws-sdk/client-polly', 'nodejs-whisper'],
   turbopack: {},
   webpack: (config) => {
     config.resolve.fallback = {

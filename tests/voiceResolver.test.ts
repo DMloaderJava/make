@@ -88,6 +88,13 @@ test('resolveVoice: проверенный провайдер без сети п
   });
 });
 
+test('resolveVoice: Deepgram chooses Aura-2 by requested language and Flux by default', async () => {
+  assert.equal(await resolveVoice('deepgram', 'key'), 'flux-hannah-en');
+  assert.equal(await resolveVoice('deepgram', 'key', undefined, 'es-ES'), 'aura-2-celeste-es');
+  assert.equal(await resolveVoice('deepgram', 'key', undefined, 'ja-JP'), 'aura-2-izanami-ja');
+  await assert.rejects(() => resolveVoice('deepgram', 'key', undefined, 'ru'), /не поддерживает язык ru/);
+});
+
 test('resolveVoice: проверенный провайдер с рабочим API отдаёт первый реальный голос', async () => {
   await withFetch(jsonFetch({ data: [{ id: 'real-voice-1', name: 'Real 1' }] }), async () => {
     const voice = await resolveVoice('cartesia', 'key');

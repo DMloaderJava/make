@@ -3,10 +3,11 @@ import { TTSProvider, TTSOptions, Voice } from './types';
 export const speechifyTTS: TTSProvider = {
   id: 'speechify',
   name: 'Speechify',
-  description: '1000+ голосов, celebrity voices, Simba 3.2, 60+ языков',
+  description: 'Simba 3.2 для английского · Simba 3.0 для 6 других языков',
   freeTier: false,
-  defaultModel: 'simba-base',
-  languages: ['ru', 'en', 'multi'],
+  defaultModel: 'simba-3.2',
+  supportedModels: ['simba-3.2', 'simba-3.0'],
+  languages: ['en-US', 'de-DE', 'es-ES', 'es-MX', 'fr-FR', 'it-IT', 'pt-BR'],
   // Не проверено вживую: эндпоинт/поля взяты из документации (см. npm run smoke:tts).
   experimental: true,
   // Параметр темпа в используемом эндпоинте не подтверждён — не отправляем
@@ -14,8 +15,19 @@ export const speechifyTTS: TTSProvider = {
   supportsSpeed: false,
   baseUrl: 'https://api.sws.speechify.com',
 
-  async generate(text: string, { voice = 'matthew', apiKey, speed: _speed = 1.0, language = 'ru-RU', model }: TTSOptions): Promise<ArrayBuffer> {
-    // Speechify API - simplified
+  async generate(text: string, { voice = 'matthew', apiKey, speed: _speed = 1.0, language = 'en-US', model }: TTSOptions): Promise<ArrayBuffer> {
+    // simba-base was used by older project settings; migrate it to the supported
+    // Simba 3 model selected for the request language.
+    const languageBase = language.toLowerCase().split('-')[0];
+    const supportedLanguageBases = new Set(['en', 'de', 'es', 'fr', 'it', 'pt']);
+    if (!supportedLanguageBases.has(languageBase)) {
+      throw new Error(`Speechify does not support ${language}; use English, German, Spanish, French, Italian, or Brazilian Portuguese.`);
+    }
+    const isEnglish = languageBase === 'en';
+    const requestedModel = model && model !== 'simba-base' ? model : undefined;
+    const modelId = !isEnglish && requestedModel === 'simba-3.2'
+      ? 'simba-3.0'
+      : requestedModel || (isEnglish ? 'simba-3.2' : 'simba-3.0');
     const response = await fetch('https://api.sws.speechify.com/v1/audio/speech', {
       method: 'POST',
       headers: {
@@ -26,8 +38,8 @@ export const speechifyTTS: TTSProvider = {
         input: text,
         voice_id: voice,
         audio_format: 'mp3',
-        language: language,
-        model: model || 'simba-base',
+        language,
+        model: modelId,
       })
     });
 

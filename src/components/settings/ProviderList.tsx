@@ -3,7 +3,9 @@
 import { useEffect, useState, useCallback } from 'react';
 import { getAllKeys, saveApiKey } from '@/lib/storage/local';
 import { getSettings, saveSettings, AppSettings, DEFAULT_SETTINGS } from '@/lib/storage/local';
-import { LLM_PROVIDERS, getLLMProvider } from '@/lib/providers/llm';
+import { LLM_PROVIDERS, getLLMProvider, getLLMProviderVisionModels, resolveLLMVisionModel } from '@/lib/providers/llm';
+import type { LLMProvider } from '@/lib/providers/llm/types';
+import { getLLMHttpError, mapLLMProviderError } from '@/lib/providers/llm/router';
 import { TTS_PROVIDERS, getTTSProvider } from '@/lib/providers/tts';
 import { getProviderLink, ProviderLink } from '@/lib/providers/links';
 import { ExternalLink, Check, X, Eye, EyeOff, Trash2, Beaker, Loader2 } from 'lucide-react';
@@ -14,6 +16,10 @@ function ProviderRow({
   link,
   providerId,
   type,
+  llmProvider,
+  accountId,
+  onAccountIdChange,
+  onAccountIdCommit,
   storedKey,
   onSave,
   testing,
@@ -25,6 +31,10 @@ function ProviderRow({
   link: ProviderLink;
   providerId: string;
   type: Tab;
+  llmProvider?: LLMProvider;
+  accountId?: string;
+  onAccountIdChange?: (value: string) => void;
+  onAccountIdCommit?: () => void;
   storedKey: string;
   onSave: (id: string, key: string) => void;
   testing: 'idle' | 'loading' | 'ok' | 'error';
@@ -45,19 +55,33 @@ function ProviderRow({
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-[14px] font-medium text-[#F5F5F7]">{link.name}</span>
+            <span className="text-[14px] font-medium text-[#F5F5F7]">{type === 'llm' ? llmProvider?.name || link.name : link.name}</span>
             <span className={`w-1.5 h-1.5 rounded-full ${storedKey ? 'bg-[#E8B44C]' : 'bg-[#26262C]'}`} />
             <span className={`text-[11px] font-mono ${storedKey ? 'text-[#E8B44C]' : 'text-[#8A8A93]'}`}>{storedKey ? 'активен' : 'не активен'}</span>
-            {link.freeTier && <span className="text-[10px] px-1.5 py-0.5 rounded-[6px] bg-[#E8B44C]/15 text-[#E8B44C] font-medium">FREE</span>}
-            {type === 'llm' && link.supportsVision && <span className="text-[10px] px-1.5 py-0.5 rounded-[6px] bg-[#1E1E23] border border-[#26262C] text-[#8A8A93]">VISION</span>}
-            {type === 'tts' && link.supportsRussian && <span className="text-[10px] px-1.5 py-0.5 rounded-[6px] bg-[#1E1E23] border border-[#26262C] text-[#8A8A93]">RU</span>}
+            {type === 'llm' ? (
+              <>
+                {llmProvider?.freeTier && <span className="text-[10px] px-1.5 py-0.5 rounded-[6px] bg-green-900/40 text-green-300 border border-green-800 font-medium">FREE</span>}
+                {llmProvider?.trialOnly && <span title={llmProvider.freeTierNote || 'Пробный период'} className="text-[10px] px-1.5 py-0.5 rounded-[6px] bg-yellow-900/40 text-yellow-300 border border-yellow-800 font-medium">TRIAL</span>}
+                {llmProvider?.supportsVision && <span className="text-[10px] px-1.5 py-0.5 rounded-[6px] bg-[#1E1E23] border border-[#26262C] text-[#8A8A93]">VISION</span>}
+                {llmProvider?.limitsUrl && <a href={llmProvider.limitsUrl} target="_blank" rel="noopener noreferrer" className="text-[11px] text-[#8A8A93] hover:text-[#E8B44C]">Лимиты</a>}
+              </>
+            ) : (
+              <>
+                {link.freeTier && <span className="text-[10px] px-1.5 py-0.5 rounded-[6px] bg-[#E8B44C]/15 text-[#E8B44C] font-medium">FREE</span>}
+                {link.supportsRussian && <span className="text-[10px] px-1.5 py-0.5 rounded-[6px] bg-[#1E1E23] border border-[#26262C] text-[#8A8A93]">RU</span>}
+              </>
+            )}
           </div>
-          <div className="mt-1 text-[12px] text-[#8A8A93] leading-[1.4]">
-            <span className="font-mono text-[11px]">{link.limits}</span>
-            <span className="mx-1.5">·</span>
-            <span>{link.freeTierDetail}</span>
-          </div>
-          <div className="mt-0.5 text-[11px] text-[#8A8A93]/70">{link.description}</div>
+          {type === 'llm' && llmProvider?.freeTierNote ? (
+            <p className="mt-1 text-[11px] text-[#8A8A93] leading-[1.4]">{llmProvider.freeTierNote}</p>
+          ) : (
+            <div className="mt-1 text-[12px] text-[#8A8A93] leading-[1.4]">
+              <span className="font-mono text-[11px]">{link.limits}</span>
+              <span className="mx-1.5">·</span>
+              <span>{link.freeTierDetail}</span>
+            </div>
+          )}
+          <div className="mt-0.5 text-[11px] text-[#8A8A93]/70">{type === 'llm' ? llmProvider?.description : link.description}</div>
         </div>
         {link.keyUrl && (
           <a href={link.keyUrl} target="_blank" rel="noopener noreferrer" className="shrink-0 h-7 px-2.5 rounded-[6px] bg-[#1E1E23] border border-[#26262C] text-[12px] text-[#8A8A93] hover:text-[#F5F5F7] hover:bg-[#26262C] flex items-center gap-1 transition-colors">
@@ -74,7 +98,9 @@ function ProviderRow({
             onChange={(e) => setLocalKey(e.target.value)}
             onBlur={commit}
             onKeyDown={(e) => { if (e.key === 'Enter') { (e.target as HTMLInputElement).blur(); } }}
-            placeholder={providerId === 'polly' ? '{"accessKeyId":"...","secretAccessKey":"..."}' : providerId === 'playht' ? 'userId:apiKey' : 'sk-...'}
+            placeholder={type === 'llm'
+              ? (llmProvider?.apiKeyPrefix ? `${llmProvider.apiKeyPrefix}...` : providerId === 'cloudflare' ? 'Cloudflare API token' : 'API key')
+              : providerId === 'polly' ? '{"accessKeyId":"...","secretAccessKey":"..."}' : providerId === 'playht' ? 'userId:apiKey' : 'sk-...'}
             className="w-full h-8 rounded-[6px] bg-[#0B0B0C] border border-[#26262C] px-3 pr-8 text-[13px] text-[#F5F5F7] placeholder:text-[#8A8A93]/50 focus:outline-none focus:border-[#E8B44C]/50 focus:ring-1 focus:ring-[#E8B44C]/20"
           />
           <button type="button" onClick={onToggleShow} className="absolute right-2 top-1/2 -translate-y-1/2 text-[#8A8A93] hover:text-[#F5F5F7]">
@@ -91,6 +117,18 @@ function ProviderRow({
           </button>
         )}
       </div>
+      {type === 'llm' && llmProvider?.requiresAccountId && (
+        <div className="mt-3 space-y-1">
+          <label className="text-[10px] text-[#8A8A93]">Account ID</label>
+          <input
+            value={accountId || ''}
+            onChange={event => onAccountIdChange?.(event.target.value)}
+            onBlur={onAccountIdCommit}
+            placeholder="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+            className="w-full h-8 rounded-[6px] bg-[#0B0B0C] border border-[#26262C] px-2 text-[11px] text-[#F5F5F7]"
+          />
+        </div>
+      )}
       {testError && testing === 'error' && (
         <div className="mt-2 text-[11px] font-mono text-[#F87171] bg-[#F87171]/10 border border-[#F87171]/20 rounded-[6px] px-2 py-1">{testError}</div>
       )}
@@ -102,6 +140,7 @@ export function ProviderList() {
   const [keys, setKeys] = useState<Record<string, string>>({});
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [tab, setTab] = useState<Tab>('llm');
+  const [cloudflareAccountId, setCloudflareAccountId] = useState('');
   const [customLLMBaseUrl, setCustomLLMBaseUrl] = useState('');
   const [customLLMModel, setCustomLLMModel] = useState('');
   const [showKeys, setShowKeys] = useState<Record<string, boolean>>({});
@@ -112,9 +151,26 @@ export function ProviderList() {
   const [localOutro, setLocalOutro] = useState<number | string>('');
 
   useEffect(() => {
-    const s = getSettings();
-    setKeys(getAllKeys());
+    const storedSettings = getSettings();
+    const selectedProvider = getLLMProvider(storedSettings.defaultLLMProvider) || getLLMProvider('openrouter')!;
+    const defaultVisionModel = resolveLLMVisionModel(selectedProvider, storedSettings.defaultVisionModel) || '';
+    const s: AppSettings = {
+      ...storedSettings,
+      defaultLLMProvider: selectedProvider.id,
+      defaultVisionModel,
+      cloudflareAccountId: storedSettings.cloudflareAccountId || '',
+    };
+    const storedKeys = getAllKeys();
+    if (!storedKeys.gemini && storedKeys['google-ai']) {
+      storedKeys.gemini = storedKeys['google-ai'];
+      saveApiKey('gemini', storedKeys.gemini);
+    }
+    if (s.defaultLLMProvider !== storedSettings.defaultLLMProvider || defaultVisionModel !== storedSettings.defaultVisionModel) {
+      saveSettings(s);
+    }
+    setKeys(storedKeys);
     setSettings(s);
+    setCloudflareAccountId(s.cloudflareAccountId);
     setLocalSiteName(s.siteName);
     setLocalIntro(s.introDuration);
     setLocalOutro(s.outroDuration);
@@ -158,20 +214,25 @@ export function ProviderList() {
       if (type === 'llm') {
         const provider = getLLMProvider(id);
         if (!provider) throw new Error('Provider not found');
-        if (id === 'cloudflare' && !customLLMBaseUrl) {
-          throw new Error('Укажи Account ID в кастомном endpoint для Cloudflare: https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1');
+        if (id === 'cloudflare' && !cloudflareAccountId.trim()) {
+          throw new Error('Cloudflare error: 400 — Укажи Account ID в поле провайдера Cloudflare.');
         }
-        const model = id === 'custom' ? (customLLMModel || provider.defaultModel) : provider.defaultModel;
-        const baseUrl = id === 'custom' ? customLLMBaseUrl : (id === 'cloudflare' ? customLLMBaseUrl : undefined);
+        const model = id === 'custom'
+          ? (customLLMModel || provider.defaultModel)
+          : id === settings.defaultLLMProvider && provider.models.includes(settings.defaultVisionModel)
+            ? settings.defaultVisionModel
+            : provider.defaultModel;
+        const baseUrl = id === 'custom' ? customLLMBaseUrl : undefined;
+        const accountId = id === 'cloudflare' ? cloudflareAccountId.trim() : undefined;
         try {
-          const result = await provider.chat([{ role: 'user', content: 'hi' }], { apiKey: key, model, baseUrl, maxTokens: 10 } as any);
+          const result = await provider.chat([{ role: 'user', content: 'hi' }], { apiKey: key, model, baseUrl, accountId, maxTokens: 10 });
           if (!result) throw new Error('Пустой ответ');
         } catch (directErr: any) {
           if (directErr.message?.includes('Failed to fetch') || directErr.message?.includes('CORS') || directErr.message?.includes('NetworkError')) {
             const res = await fetch('/api/llm', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ providerId: id, messages: [{ role: 'user', content: 'hi' }], apiKey: key, model, baseUrl, maxTokens: 10 })
+              body: JSON.stringify({ providerId: id, messages: [{ role: 'user', content: 'hi' }], apiKey: key, model, baseUrl, accountId, maxTokens: 10 })
             });
             if (!res.ok) {
               const err = await res.json().catch(() => ({ error: res.statusText }));
@@ -207,8 +268,12 @@ export function ProviderList() {
       setTesting(prev => ({ ...prev, [id]: 'ok' }));
       setTimeout(() => setTesting(prev => ({ ...prev, [id]: 'idle' })), 3000);
     } catch (e: any) {
+      const httpError = type === 'llm' ? getLLMHttpError(e) : null;
+      const errorMessage = httpError
+        ? mapLLMProviderError({ providerId: id, status: httpError.status, responseBody: httpError.responseBody })
+        : e.message?.slice(0, 200) || 'Ошибка';
       setTesting(prev => ({ ...prev, [id]: 'error' }));
-      setTestErrors(prev => ({ ...prev, [id]: e.message?.slice(0, 200) || 'Ошибка' }));
+      setTestErrors(prev => ({ ...prev, [id]: errorMessage.slice(0, 200) }));
       setTimeout(() => { setTesting(p => ({ ...p, [id]: 'idle' })); setTestErrors(p => ({ ...p, [id]: '' })); }, 5000);
     }
   };
@@ -219,6 +284,10 @@ export function ProviderList() {
       .map(p => ({ link: getProviderLink(p.id, type), providerId: p.id }))
       .filter((x): x is { link: ProviderLink; providerId: string } => !!x.link);
   };
+
+  const selectedLLMProvider = getLLMProvider(settings.defaultLLMProvider) || getLLMProvider('openrouter')!;
+  const selectedVisionModel = resolveLLMVisionModel(selectedLLMProvider, settings.defaultVisionModel) || '';
+  const availableVisionModels = getLLMProviderVisionModels(selectedLLMProvider);
 
   return (
     <div className="max-w-[960px] mx-auto space-y-6">
@@ -282,17 +351,47 @@ export function ProviderList() {
         </div>
         <div className="space-y-2">
           <label className="text-[12px] text-[#8A8A93]">LLM по умолчанию</label>
-          <select value={settings.defaultLLMProvider} onChange={(e) => handleSettingsSave({ defaultLLMProvider: e.target.value })} className="w-full h-8 rounded-[6px] bg-[#0B0B0C] border border-[#26262C] px-3 text-[13px] text-[#F5F5F7]">
+          <select
+            value={selectedLLMProvider.id}
+            onChange={(e) => {
+              const provider = getLLMProvider(e.target.value) || getLLMProvider('openrouter')!;
+              const visionModel = resolveLLMVisionModel(provider, settings.defaultVisionModel) || '';
+              handleSettingsSave({ defaultLLMProvider: provider.id, defaultVisionModel: visionModel });
+            }}
+            className="w-full h-8 rounded-[6px] bg-[#0B0B0C] border border-[#26262C] px-3 text-[13px] text-[#F5F5F7]"
+          >
             {LLM_PROVIDERS.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
           </select>
         </div>
+        {selectedLLMProvider.id !== 'custom' && availableVisionModels.length > 0 && (
+          <div className="space-y-2">
+            <label className="text-[12px] text-[#8A8A93]">Модель для анализа изображений</label>
+            <select
+              value={selectedVisionModel}
+              onChange={event => handleSettingsSave({ defaultVisionModel: event.target.value })}
+              className="w-full h-8 rounded-[6px] bg-[#0B0B0C] border border-[#26262C] px-3 text-[12px] text-[#F5F5F7]"
+            >
+              {availableVisionModels.map(model => <option key={model} value={model}>{model}</option>)}
+            </select>
+            {selectedLLMProvider.trialOnly && (
+              <div className="text-[11px] leading-4 text-[#C9B27A] bg-[#1E1A10] border border-[#3A2E14] rounded-[6px] px-3 py-2">
+                ⚠ {selectedLLMProvider.freeTierNote}. После окончания пробного периода запросы будут отклонены.
+              </div>
+            )}
+          </div>
+        )}
+        {selectedLLMProvider.id !== 'custom' && availableVisionModels.length === 0 && (
+          <div className="text-[11px] leading-4 text-[#C97A66] bg-[#1E1010] border border-[#3A1414] rounded-[6px] px-3 py-2">
+            {selectedLLMProvider.name} не имеет доступной модели для анализа изображений. Выберите провайдера с поддержкой vision в списке выше, чтобы загружать мангу.
+          </div>
+        )}
       </div>
 
       <div className="rounded-[10px] border border-dashed border-[#26262C] bg-[#16161A]/50 p-4 space-y-3">
         <div className="text-[13px] font-medium text-[#F5F5F7]">Кастомный OpenAI-совместимый endpoint</div>
-        <div className="text-[12px] text-[#8A8A93]">Для LM Studio, Ollama, vLLM, Cloudflare Workers AI (укажи account_id в URL)</div>
+        <div className="text-[12px] text-[#8A8A93]">Для пользовательских OpenAI-совместимых endpoint. Cloudflare настраивается выше отдельным Account ID.</div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          <input value={customLLMBaseUrl} onChange={(e) => setCustomLLMBaseUrl(e.target.value)} placeholder="https://api.example.com/v1 или https://api.cloudflare.com/client/v4/accounts/xxx/ai/v1" className="h-8 rounded-[6px] bg-[#0B0B0C] border border-[#26262C] px-3 text-[13px] text-[#F5F5F7]" />
+          <input value={customLLMBaseUrl} onChange={(e) => setCustomLLMBaseUrl(e.target.value)} placeholder="https://api.example.com/v1" className="h-8 rounded-[6px] bg-[#0B0B0C] border border-[#26262C] px-3 text-[13px] text-[#F5F5F7]" />
           <input value={customLLMModel} onChange={(e) => setCustomLLMModel(e.target.value)} placeholder="my-model-name" className="h-8 rounded-[6px] bg-[#0B0B0C] border border-[#26262C] px-3 text-[13px] text-[#F5F5F7]" />
         </div>
         <button onClick={handleCustomLLMSave} className="h-8 px-3 rounded-[6px] bg-[#1E1E23] border border-[#26262C] text-xs text-[#F5F5F7] hover:bg-[#26262C]">Сохранить endpoint</button>
@@ -310,6 +409,10 @@ export function ProviderList() {
             link={link}
             providerId={providerId}
             type={tab}
+            llmProvider={tab === 'llm' ? getLLMProvider(providerId) : undefined}
+            accountId={providerId === 'cloudflare' ? cloudflareAccountId : undefined}
+            onAccountIdChange={providerId === 'cloudflare' ? setCloudflareAccountId : undefined}
+            onAccountIdCommit={providerId === 'cloudflare' ? () => handleSettingsSave({ cloudflareAccountId: cloudflareAccountId.trim() }) : undefined}
             storedKey={keys[providerId] || ''}
             onSave={handleSave}
             testing={testing[providerId] || 'idle'}
@@ -323,7 +426,7 @@ export function ProviderList() {
 
       <div className="rounded-[10px] bg-[#16161A] border border-[#26262C] p-4 text-[12px] text-[#8A8A93] space-y-2 leading-[1.5]">
         <p>🔒 <span className="text-[#F5F5F7] font-medium">Приватность:</span> Все ключи только в localStorage, никакого Supabase.</p>
-        <p>💡 <span className="text-[#F5F5F7] font-medium">Старт:</span> OpenRouter free (ling-3.0-flash-vl:free 262K) + Google AI Studio (Gemini 2.5 Flash) + Azure TTS (500k/мес F0) — покрывают 90% задач без карты.</p>
+        <p>💡 <span className="text-[#F5F5F7] font-medium">Старт:</span> OpenRouter (Gemma 4 31B :free для vision) или Gemini AI Studio + Azure TTS (500k/мес F0) — бесплатные тарифы зависят от лимитов провайдера.</p>
         <p>📚 Больше free: <a href="https://github.com/open-free-llm-api/awesome-freellm-apis" target="_blank" className="text-[#E8B44C] hover:underline">awesome-freellm-apis</a> · <a href="https://github.com/nejib1/Free-LLM" target="_blank" className="text-[#E8B44C] hover:underline">Free-LLM</a> · <a href="https://free-llm.com" target="_blank" className="text-[#E8B44C] hover:underline">free-llm.com</a></p>
       </div>
 

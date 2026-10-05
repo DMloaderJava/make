@@ -1,7 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { createRequire } from 'node:module';
 
 export const runtime = 'nodejs';
 export const maxDuration = 120;
+
+const nodeRequire = createRequire(import.meta.url);
+const whisperModuleName = ['nodejs', 'whisper'].join('-');
+type NodeWhisper = (audioPath: string, options: Record<string, unknown>) => Promise<unknown>;
+type NodeWhisperModule = NodeWhisper & { nodewhisper?: NodeWhisper; default?: NodeWhisper };
 
 export async function POST(req: NextRequest) {
   try {
@@ -68,9 +74,8 @@ export async function POST(req: NextRequest) {
       await fs.writeFile(audioPath, buffer);
 
       try {
-        // @ts-ignore - optional
-        const whisperModule = await import('nodejs-whisper');
-        const nodewhisper = (whisperModule as any).nodewhisper || whisperModule.default || whisperModule;
+        const whisperModule = nodeRequire(whisperModuleName) as NodeWhisperModule;
+        const nodewhisper: NodeWhisper = whisperModule.nodewhisper || whisperModule.default || whisperModule;
         const result = await nodewhisper(audioPath, {
           modelName: 'base',
           autoDownloadModelName: 'base',
