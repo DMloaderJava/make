@@ -1,4 +1,5 @@
 import { LLMProvider, LLMOptions } from '../providers/llm/types';
+import { generateLLM } from '../providers/llm/router';
 import { INTRO_SYSTEM_PROMPT, INTRO_USER_PROMPT, OUTRO_SYSTEM_PROMPT, OUTRO_USER_PROMPT } from '../prompts/intro-prompt';
 
 function safeParseText(text: string): string {
@@ -19,10 +20,10 @@ export async function generateIntro(
     { role: 'user' as const, content: INTRO_USER_PROMPT(sceneDescription, characters) }
   ];
 
-  const result = await llm.chat(messages, {
-    ...options,
-    temperature: 0.8,
-    maxTokens: 500
+  const result = await generateLLM({
+    provider: llm,
+    options: { ...options, temperature: 0.8, maxTokens: 500 },
+    invoke: (candidate, candidateOptions) => candidate.chat(messages, candidateOptions),
   });
 
   return safeParseText(result);
@@ -39,10 +40,10 @@ export async function generateOutro(
     { role: 'user' as const, content: OUTRO_USER_PROMPT(siteName, ctaType) }
   ];
 
-  const result = await llm.chat(messages, {
-    ...options,
-    temperature: 0.7,
-    maxTokens: 300
+  const result = await generateLLM({
+    provider: llm,
+    options: { ...options, temperature: 0.7, maxTokens: 300 },
+    invoke: (candidate, candidateOptions) => candidate.chat(messages, candidateOptions),
   });
 
   return safeParseText(result);

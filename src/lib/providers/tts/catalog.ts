@@ -37,6 +37,15 @@ export function getTTSProvider(id: string): TTSProvider | undefined {
   return TTS_PROVIDERS.find(p => p.id === id);
 }
 
+/** Модели из API провайдера или его каталога, если динамическая проверка не реализована. */
+export async function getModels(providerId: string, apiKey: string): Promise<string[]> {
+  const provider = getTTSProvider(providerId);
+  if (!provider) return [];
+  if (provider.getModels) return provider.getModels(apiKey);
+  if (provider.supportedModels) return provider.supportedModels;
+  return provider.defaultModel ? [provider.defaultModel] : [];
+}
+
 /**
  * Чем синтезировать звук на сервере. Возвращает null, если это небезопасно:
  * клиентская generate() ходит через прокси, а серверной реализации нет —

@@ -1,4 +1,5 @@
 import { LLMProvider, LLMOptions } from '../providers/llm/types';
+import { generateLLM } from '../providers/llm/router';
 import { SEO_SYSTEM_PROMPT, SEO_USER_PROMPT } from '../prompts/seo-prompt';
 import { SEOPackage } from '../storage/db';
 import { validateSEOPackage } from '../validators';
@@ -84,11 +85,15 @@ export async function generateSEO(
     { role: 'user' as const, content: SEO_USER_PROMPT(sceneDescription, characters, duration) }
   ];
   
-  const result = await llm.chat(messages, {
-    ...options,
-    temperature: 0.7,
-    maxTokens: 4000,
-    responseFormat: { name: 'seo_package', schema: SEO_JSON_SCHEMA, strict: false }
+  const result = await generateLLM({
+    provider: llm,
+    options: {
+      ...options,
+      temperature: 0.7,
+      maxTokens: 4000,
+      responseFormat: { name: 'seo_package', schema: SEO_JSON_SCHEMA, strict: false },
+    },
+    invoke: (candidate, candidateOptions) => candidate.chat(messages, candidateOptions),
   });
   
   const parsed = safeParseJSON(result);

@@ -1,16 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildCartesiaBody, generateCartesia, CARTESIA_DEFAULT_VOICE } from '../src/lib/providers/tts/cartesia';
+import { buildCartesiaBody, generateCartesia, CARTESIA_DEFAULT_VOICE, CARTESIA_DEFAULT_MODEL, CARTESIA_VERSION } from '../src/lib/providers/tts/cartesia';
 
 /**
- * Cartesia — самое «схемозависимое» место в патче: тело собрано по документации
- * версии API 2024-06-10, а живого ключа при разработке нет. Здесь зафиксировано
- * и само тело, и страховка: если API отвергнет `speed`, запрос повторяется без
- * него (единственное поле, которое в разных версиях бывает и строкой, и числом).
+ * Cartesia — самое «схемозависимое» место в патче: тело и заголовки зафиксированы
+ * для API 2026-03-01 и sonic-3.5. Здесь также проверяется retry без `speed`, если
+ * API отвергнет это поле. Для живой проверки нужен реальный ключ.
  */
 
 interface Call {
   url: string;
+  headers: Record<string, string>;
   body: Record<string, unknown>;
 }
 
@@ -23,7 +23,11 @@ function mockFetch(responses: Array<{ status: number; text?: string; bytes?: num
   const calls: Call[] = [];
   let index = 0;
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-    calls.push({ url: String(input), body: JSON.parse(String(init?.body || '{}')) });
+    calls.push({
+      url: String(input),
+      headers: Object.fromEntries(new Headers(init?.headers).entries()),
+      body: JSON.parse(String(init?.body || '{}')),
+    });
     const spec = responses[Math.min(index, responses.length - 1)];
     index++;
     if (spec.bytes) {
@@ -38,8 +42,7 @@ test('buildCartesiaBody: mp3 — через bit_rate, без encoding; speed т�
   const body = buildCartesiaBody('привет', { speed: 1.6 });
   const output = body.output_format as Record<string, unknown>;
 
-  // В API Cartesia «Text to Speech (Bytes)» версии 2024-06-10 encoding принимает
-  // только PCM (pcm_f32le/pcm_s16le/pcm_mulaw/pcm_alaw), а для mp3 нужен bit_rate.
+  // Для API Cartesia «Text to Speech (Bytes)» mp3 задаётся через bit_rate.
   assert.deepEqual(output, { container: 'mp3', sample_rate: 44100, bit_rate: 128000 });
   assert.ok(!('encoding' in output), 'encoding для mp3 не передаётся');
 
@@ -53,9 +56,10 @@ test('buildCartesiaBody: mp3 — через bit_rate, без encoding; speed т�
 
   assert.equal((body.voice as Record<string, unknown>).id, CARTESIA_DEFAULT_VOICE);
   assert.equal(body.language, 'en');
-  assert.equal(body.model_id, 'sonic-3');
+  assert.equal(body.model_id, CARTESIA_DEFAULT_MODEL);
+  assert.equal(CARTESIA_DEFAULT_MODEL, 'sonic-3.5');
 
-  const explicit = buildCartesiaBody('x', { voice: 'v-1', language: 'ru', model: 'sonic-3', speed: 1.2 });
+  const explicit = buildCartesiaBody('x', { voice: 'v-1', language: 'ru', model: 'sonic-3.5', speed: 1.2 });
   assert.equal((explicit.voice as Record<string, unknown>).id, 'v-1');
   assert.equal(explicit.language, 'ru');
 });
@@ -67,6 +71,9 @@ test('generateCartesia: успешный ответ возвращает бай�
     assert.equal(buffer.byteLength, 4);
     assert.equal(calls.length, 1);
     assert.match(calls[0].url, /api\.cartesia\.ai\/tts\/bytes/);
+    assert.equal(calls[0].headers['cartesia-version'], CARTESIA_VERSION);
+    assert.equal(CARTESIA_VERSION, '2026-03-01');
+    assert.equal(calls[0].body.model_id, CARTESIA_DEFAULT_MODEL);
     assert.equal(calls[0].body.speed, 'fast');
     assert.equal(calls[0].body.transcript, 'привет');
   } finally {

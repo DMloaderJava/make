@@ -2,9 +2,9 @@ import { LLMProvider, LLMOptions, Message, ResponseFormatSchema } from './types'
 
 /**
  * Провайдеры, у которых нет json_schema, но есть json_object.
- * Остальные (OpenAI/OpenRouter/Groq/Together/Mistral/...) поддерживают json_schema.
+ * OpenRouter, NVIDIA NIM, Groq и Mistral поддерживают json_schema.
  */
-const JSON_OBJECT_ONLY_PROVIDERS = new Set(['custom', 'cloudflare', 'deepinfra', 'novita', 'siliconflow', 'zhipu', 'moonshot', '01ai', 'huggingface', 'cohere']);
+const JSON_OBJECT_ONLY_PROVIDERS = new Set(['custom', 'cloudflare', 'novita', 'siliconflow', 'zhipu', 'moonshot', 'huggingface']);
 
 export type ResponseFormatMode = 'schema' | 'object' | 'none';
 
@@ -150,7 +150,29 @@ export function createOpenAICompatibleProvider(config: {
   defaultModel: string;
   freeTier: boolean;
   vision: boolean;
+  visionModels?: string[];
+  freeTierNote?: string;
+  trialOnly?: boolean;
+  limitsUrl?: string;
+  rateLimits?: { rpm?: number; rpd?: number };
+  apiKeyPrefix?: string;
+  requiresAccountId?: boolean;
 }): LLMProvider {
+  const resolveBaseUrl = (options: LLMOptions): string => {
+    let baseUrl = options.baseUrl || config.baseUrl;
+    if (!config.requiresAccountId) return baseUrl;
+
+    const accountId = options.accountId?.trim();
+    if (!accountId) {
+      throw new Error('Cloudflare error: 400 — Укажите Account ID в настройках провайдера.');
+    }
+    baseUrl = baseUrl.replace('{account_id}', encodeURIComponent(accountId));
+    if (baseUrl.includes('{account_id}')) {
+      throw new Error('Cloudflare error: 400 — Не удалось подставить Account ID в endpoint.');
+    }
+    return baseUrl;
+  };
+
   const isLocalHost = (url: string) => {
     if (!url) return false;
     try {
@@ -175,9 +197,16 @@ export function createOpenAICompatibleProvider(config: {
     models: config.models,
     defaultModel: config.defaultModel,
     freeTier: config.freeTier,
+    freeTierNote: config.freeTierNote,
+    trialOnly: config.trialOnly,
+    limitsUrl: config.limitsUrl,
+    rateLimits: config.rateLimits,
+    apiKeyPrefix: config.apiKeyPrefix,
+    requiresAccountId: config.requiresAccountId,
     supportsVision: config.vision,
+    visionModels: config.visionModels,
     async chat(messages: Message[], options: LLMOptions): Promise<string> {
-      const baseUrl = options.baseUrl || config.baseUrl;
+      const baseUrl = resolveBaseUrl(options);
       const model = options.model || config.defaultModel;
       
       // Convert messages to OpenAI format
@@ -198,7 +227,8 @@ export function createOpenAICompatibleProvider(config: {
             model,
             temperature: options.temperature,
             maxTokens: options.maxTokens,
-            baseUrl,
+            baseUrl: options.baseUrl || config.baseUrl,
+            accountId: options.accountId,
           })
         });
         if (!res.ok) {
@@ -229,7 +259,7 @@ export function createOpenAICompatibleProvider(config: {
     },
 
     async vision(imageBase64: string, prompt: string, options: LLMOptions): Promise<string> {
-      const baseUrl = options.baseUrl || config.baseUrl;
+      const baseUrl = resolveBaseUrl(options);
       const model = options.model || config.defaultModel;
 
       // Ensure base64 has data URL prefix
@@ -263,7 +293,8 @@ export function createOpenAICompatibleProvider(config: {
             model,
             temperature: 0.2,
             maxTokens: options.maxTokens,
-            baseUrl,
+            baseUrl: options.baseUrl || config.baseUrl,
+            accountId: options.accountId,
           })
         });
         if (!res.ok) {

@@ -25,7 +25,7 @@ export const FALLBACK_VOICE: Record<string, string> = {
   polly: 'Maxim',
   qwen: 'Chelsie',
   cartesia: '79a125e8-cd45-4c13-8a67-188112f4dd22',
-  deepgram: 'aura-2-thalia-en',
+  deepgram: 'flux-hannah-en',
   playht: 's3://voice-cloning-zero-shot/d9ff78ba-d016-47f6-b0ef-dd630f59414e/female-cs/manifest.json',
   resemble: 'default',
   murf: 'en-US-natalie',
@@ -48,9 +48,19 @@ export function fallbackVoice(providerId: string): string {
 export async function resolveVoice(
   providerId: string,
   apiKey: string,
-  explicit?: string
+  explicit?: string,
+  language?: string
 ): Promise<string> {
   const provider = getTTSProvider(providerId);
+
+  // Deepgram model IDs encode the spoken language; fail clearly for a language
+  // outside Aura-2/Flux rather than silently selecting an English voice.
+  if (providerId === 'deepgram' && language && language !== 'multi') {
+    const languageBase = language.toLowerCase().split('-')[0];
+    if (!getTTSProvider('deepgram')?.languages.includes(languageBase)) {
+      throw new Error(`Deepgram TTS не поддерживает язык ${language}. Доступны English, Spanish, German, French, Dutch, Italian и Japanese.`);
+    }
+  }
 
   // 'default' — сентинел «голос не выбран» и у resemble, и у fish это лишь
   // заглушка из курированного списка: в API уйдёт voice_id='default', и ошибку
@@ -71,6 +81,11 @@ export async function resolveVoice(
   try {
     if (provider) {
       const voices = await provider.getVoices(apiKey || '');
+      const languageBase = language && language !== 'multi' ? language.toLowerCase().split('-')[0] : '';
+      const matchingVoice = languageBase
+        ? voices.find(voice => voice.language.toLowerCase().split('-')[0] === languageBase)
+        : undefined;
+      if (matchingVoice?.id) return matchingVoice.id;
       if (voices.length > 0 && voices[0].id) return voices[0].id;
     }
   } catch {

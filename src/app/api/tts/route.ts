@@ -1,12 +1,35 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { pcmToWav } from '@/lib/providers/tts/wav';
+import { createRequire } from 'node:module';
+import { generateGeminiTTS } from '@/lib/providers/tts/gemini';
 import { resolveAudioMime } from '@/lib/providers/tts/mime';
 import { generateCartesia } from '@/lib/providers/tts/cartesia';
+import { generateDeepgramTTS } from '@/lib/providers/tts/deepgram';
 import { mustUseProxy } from '@/lib/providers/tts/cors';
 import { getServerGenerate } from '@/lib/providers/tts/catalog';
+import { mapTTSProviderError } from '@/lib/providers/tts/router';
 
 export const runtime = 'nodejs';
 export const maxDuration = 60;
+
+// These optional packages are intentionally not part of package.json. Resolve
+// them at runtime so Turbopack/webpack do not emit missing-module warnings.
+const nodeRequire = createRequire(import.meta.url);
+// Build the optional name at runtime so Turbopack won't resolve it while compiling.
+const pollyModuleName = ['@aws-sdk', 'client-polly'].join('/');
+
+type PollyRuntimeModule = {
+  PollyClient: new (config: {
+    region: string;
+    credentials: { accessKeyId: string; secretAccessKey: string };
+  }) => { send(command: unknown): Promise<{ AudioStream?: AsyncIterable<Uint8Array> }> };
+  SynthesizeSpeechCommand: new (input: {
+    Text: string;
+    VoiceId: string;
+    OutputFormat: string;
+    Engine: string;
+    LanguageCode: string;
+  }) => unknown;
+};
 
 function escapeXml(s: string) {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
@@ -79,53 +102,34 @@ export async function POST(req: NextRequest) {
       }
 
       case 'gemini': {
-        const modelName = model || 'gemini-2.5-flash-preview-tts';
-        const res = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [{ parts: [{ text }] }],
-              generationConfig: {
-                responseModalities: ['AUDIO'],
-                speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voice || 'Puck' } } }
-              }
-            })
-          }
-        );
-        if (!res.ok) {
-          const err = await res.text();
-          return NextResponse.json({ error: `Gemini TTS error: ${err}` }, { status: res.status });
+        try {
+          const wav = await generateGeminiTTS(text, { apiKey, voice, model, language, speed });
+          return new NextResponse(wav, { headers: { 'Content-Type': 'audio/wav' } });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          const status = Number(message.match(/Gemini TTS error: (\d{3})/)?.[1]) || 500;
+          return NextResponse.json({ error: message }, { status });
         }
-        const data = await res.json();
-        const base64Audio = data.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-        if (!base64Audio) return NextResponse.json({ error: 'No audio data from Gemini' }, { status: 500 });
-        const pcm = Buffer.from(base64Audio, 'base64');
-        // Gemini TTS → raw L16 PCM 24kHz mono: оборачиваем в WAV, иначе клиент не декодирует
-        const wav = pcmToWav(
-          pcm.buffer.slice(pcm.byteOffset, pcm.byteOffset + pcm.byteLength) as ArrayBuffer,
-          { sampleRate: 24000, channels: 1, bitsPerSample: 16 }
-        );
-        return new NextResponse(wav, { headers: { 'Content-Type': 'audio/wav' } });
       }
 
       case 'polly': {
         try {
           const creds = JSON.parse(apiKey);
           const { accessKeyId, secretAccessKey, region = 'eu-central-1' } = creds;
-          // @ts-ignore
-          const awsModule = await import('@aws-sdk/client-polly').catch(() => { throw new Error('AWS SDK not installed. Run npm install @aws-sdk/client-polly'); });
+          let awsModule: PollyRuntimeModule;
+          try {
+            awsModule = nodeRequire(pollyModuleName);
+          } catch {
+            throw new Error('AWS SDK not installed. Run npm install @aws-sdk/client-polly --no-save --no-audit --no-fund');
+          }
           const { PollyClient, SynthesizeSpeechCommand } = awsModule;
           const client = new PollyClient({ region, credentials: { accessKeyId, secretAccessKey } });
           const command = new SynthesizeSpeechCommand({ Text: text, VoiceId: voice || 'Maxim', OutputFormat: 'mp3', Engine: 'neural', LanguageCode: language || 'ru-RU' });
-          // @ts-ignore
           const response = await client.send(command);
           const audioStream = response.AudioStream;
           if (!audioStream) throw new Error('No audio stream');
           const chunks: Uint8Array[] = [];
-          // @ts-ignore
-          for await (const chunk of audioStream as any) chunks.push(chunk);
+          for await (const chunk of audioStream) chunks.push(chunk);
           const totalLength = chunks.reduce((acc, c) => acc + c.length, 0);
           const merged = new Uint8Array(totalLength);
           let offset = 0;
@@ -188,17 +192,19 @@ export async function POST(req: NextRequest) {
       }
 
       case 'deepgram': {
-        const res = await fetch(`https://api.deepgram.com/v1/speak?model=${voice || 'aura-2-thalia-en'}&encoding=mp3`, {
-          method: 'POST',
-          headers: { 'Authorization': `Token ${apiKey}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text })
-        });
-        if (!res.ok) {
-          const err = await res.text();
-          return NextResponse.json({ error: `Deepgram error: ${err}` }, { status: res.status });
+        try {
+          const buffer = await generateDeepgramTTS(text, { apiKey, voice, model, language, speed });
+          return new NextResponse(buffer, { headers: { 'Content-Type': resolveAudioMime(providerId, buffer) } });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          const status = typeof error === 'object' && error !== null && 'status' in error
+            && typeof error.status === 'number'
+            ? error.status
+            : 502;
+          return NextResponse.json({
+            error: mapTTSProviderError({ providerId: 'deepgram', status, responseBody: message, model: model || voice }),
+          }, { status });
         }
-        const buf = await res.arrayBuffer();
-        return new NextResponse(buf, { headers: { 'Content-Type': resolveAudioMime(providerId, buf) } });
       }
 
       case 'qwen': {

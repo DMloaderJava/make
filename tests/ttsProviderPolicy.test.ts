@@ -111,6 +111,39 @@ test('mustUseProxy покрывает и CORS-провайдеров, и «кл�
   assert.equal(mustUseProxy('cartesia'), false);
 });
 
+test('Gemini model unavailable returns a readable 404 and suggested model list', async () => {
+  const globals = globalThis as unknown as Record<string, unknown>;
+  const hadWindow = 'window' in globals;
+  const previousWindow = globals.window;
+  const originalFetch = globalThis.fetch;
+  const requests: string[] = [];
+  globals.window = {};
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    requests.push(url);
+    const model = url.match(/\/models\/([^:]+):generateContent/)?.[1] || 'unknown';
+    return new Response(JSON.stringify({ error: { message: `models/${model} is not found` } }), { status: 404 });
+  }) as typeof fetch;
+
+  try {
+    await assert.rejects(
+      () => generateTTS({ providerId: 'gemini', text: 'test', apiKey: 'k', model: 'gemini-legacy-unavailable' }),
+      (error: Error) => {
+        assert.match(error.message, /Gemini 404/);
+        assert.match(error.message, /Модель gemini-3\.1-flash-tts-preview не найдена/);
+        assert.match(error.message, /gemini-3\.8-flash-tts/);
+        return true;
+      }
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (hadWindow) globals.window = previousWindow;
+    else delete globals.window;
+  }
+
+  assert.equal(requests.length, 4, 'requested model plus all catalog fallbacks were tried');
+});
+
 test('supportsSpeed=false честно означает «speed не уходит в API»', async () => {
   // Поведенческая проверка: провайдеры, помеченные в реестре как не поддерживающие
   // темп, не должны отправлять speed — иначе UI-пометка «не поддерживается» лгала бы.
@@ -128,7 +161,7 @@ test('supportsSpeed=false честно означает «speed не уходи�
     return {
       ok: true,
       status: 200,
-      json: async () => ({}),
+      json: async () => ({ candidates: [{ content: { parts: [{ inlineData: { data: 'AQIDBA==' } }] } }] }),
       arrayBuffer: async () => new ArrayBuffer(0),
       text: async () => '',
     } as unknown as Response;

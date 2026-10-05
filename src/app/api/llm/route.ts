@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { mapLLMProviderError } from '@/lib/providers/llm/router';
+import { getLLMProvider } from '@/lib/providers/llm/catalog';
 
 /**
  * LEGACY PROXY - kept for backward compatibility and for providers that block CORS
@@ -22,16 +24,19 @@ export const maxDuration = 60;
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { providerId, messages, apiKey, model, temperature, maxTokens, baseUrl } = body;
+    const { providerId, messages, apiKey, model, temperature, maxTokens, baseUrl, accountId } = body;
 
     if (!providerId || !apiKey) {
       return NextResponse.json({ error: 'Missing providerId or apiKey' }, { status: 400 });
     }
+    if (!getLLMProvider(providerId)) {
+      return NextResponse.json({ error: `Unknown LLM provider ${providerId}` }, { status: 400 });
+    }
 
-    if (providerId === 'cloudflare') {
-      if (!baseUrl || baseUrl.includes('xxx') || !baseUrl.includes('/accounts/')) {
-        return NextResponse.json({ error: 'Cloudflare requires baseUrl with account ID: https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1. Set it in settings → Custom endpoint.' }, { status: 400 });
-      }
+    if (providerId === 'cloudflare' && !String(accountId || '').trim()) {
+      return NextResponse.json({
+        error: mapLLMProviderError({ providerId, status: 400, responseBody: 'missing account_id' }),
+      }, { status: 400 });
     }
 
     if (providerId === 'anthropic') {
@@ -49,20 +54,22 @@ export async function POST(req: NextRequest) {
       'cerebras': { url: baseUrl || 'https://api.cerebras.ai/v1' },
       'sambanova': { url: baseUrl || 'https://api.sambanova.ai/v1' },
       'openai': { url: baseUrl || 'https://api.openai.com/v1' },
-      'cloudflare': { url: baseUrl || 'https://api.cloudflare.com/client/v4/accounts/xxx/ai/v1' },
+      'cloudflare': { url: (baseUrl || 'https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1').replace('{account_id}', encodeURIComponent(String(accountId || ''))) },
       'cohere': { url: baseUrl || 'https://api.cohere.ai/compatibility/v1' },
-      'huggingface': { url: baseUrl || 'https://api-inference.huggingface.co/v1' },
+      'huggingface': { url: baseUrl || 'https://router.huggingface.co/v1' },
       'deepseek': { url: baseUrl || 'https://api.deepseek.com/v1' },
       'together': { url: baseUrl || 'https://api.together.xyz/v1' },
       'fireworks': { url: baseUrl || 'https://api.fireworks.ai/inference/v1' },
       'deepinfra': { url: baseUrl || 'https://api.deepinfra.com/v1/openai' },
-      'novita': { url: baseUrl || 'https://api.novita.ai/v3/openai' },
-      'siliconflow': { url: baseUrl || 'https://api.siliconflow.cn/v1' },
+      'novita': { url: baseUrl || 'https://api.novita.ai/openai' },
+      'siliconflow': { url: baseUrl || 'https://api.siliconflow.com/v1' },
       'zhipu': { url: baseUrl || 'https://open.bigmodel.cn/api/paas/v4' },
-      'moonshot': { url: baseUrl || 'https://api.moonshot.cn/v1' },
+      'moonshot': { url: baseUrl || 'https://api.moonshot.ai/v1' },
       '01ai': { url: baseUrl || 'https://api.01.ai/v1' },
       'perplexity': { url: baseUrl || 'https://api.perplexity.ai' },
       'custom': { url: baseUrl },
+      'ai21': { url: baseUrl || 'https://api.ai21.com/studio/v1' },
+      'gemini': { url: 'https://generativelanguage.googleapis.com/v1beta', isGoogle: true },
       'google-ai': { url: 'https://generativelanguage.googleapis.com/v1beta', isGoogle: true },
     };
 
@@ -72,7 +79,7 @@ export async function POST(req: NextRequest) {
     }
 
     if (config.isGoogle) {
-      const modelName = model || 'gemini-2.5-flash';
+      const modelName = model || 'gemini-3-flash-preview';
       const systemInstruction = messages.find((m: any) => m.role === 'system')?.content || '';
       const contents = messages.filter((m: any) => m.role !== 'system').map((m: any) => ({
         role: m.role === 'assistant' ? 'model' : 'user',
@@ -90,9 +97,9 @@ export async function POST(req: NextRequest) {
             })
       }));
 
-      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`, {
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelName)}:generateContent`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
         body: JSON.stringify({
           systemInstruction: systemInstruction ? { parts: [{ text: systemInstruction }] } : undefined,
           contents,
@@ -105,7 +112,7 @@ export async function POST(req: NextRequest) {
 
       if (!res.ok) {
         const err = await res.text();
-        return NextResponse.json({ error: `Google AI error: ${err}` }, { status: res.status });
+        return NextResponse.json({ error: mapLLMProviderError({ providerId, status: res.status, responseBody: err, model: modelName }) }, { status: res.status });
       }
 
       const data = await res.json();
@@ -136,7 +143,7 @@ export async function POST(req: NextRequest) {
 
       if (!res.ok) {
         const err = await res.text();
-        return NextResponse.json({ error: `${providerId} error: ${err}` }, { status: res.status });
+        return NextResponse.json({ error: mapLLMProviderError({ providerId, status: res.status, responseBody: err, model }) }, { status: res.status });
       }
 
       const data = await res.json();
@@ -152,7 +159,7 @@ export async function GET() {
   return NextResponse.json({ 
     status: 'LLM proxy ready (LEGACY)', 
     note: 'In v1.1, direct browser requests are preferred for CORS-friendly providers. This proxy is kept for backward compat and CORS-blocked providers.',
-    directProviders: ['openrouter', 'nvidia-nim', 'google-ai', 'groq', 'mistral'],
+    directProviders: ['openrouter', 'nvidia-nim', 'gemini', 'groq', 'mistral'],
     proxyRequired: ['elevenlabs (TTS)']
   });
 }

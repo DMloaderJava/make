@@ -11,11 +11,13 @@ import { VoicesModal } from '@/components/studio/modals/VoicesModal';
 import { ExportModal } from '@/components/studio/modals/ExportModal';
 import { Input } from '@/components/ui/input';
 import { getAllKeys, getSettings } from '@/lib/storage/local';
-import { getLLMProvider } from '@/lib/providers/llm';
+import { getLLMProvider, resolveLLMVisionModel } from '@/lib/providers/llm';
 import { buildTimeline, estimateDuration, generateSRT, calculateTotalDuration } from '@/lib/pipeline/buildTimeline';
 import { generateIntro, generateOutro, generateFallbackIntro, generateFallbackOutro } from '@/lib/pipeline/generateIntro';
 import { formatSEOPackage, generateSEO, generateFallbackSEO } from '@/lib/pipeline/generateSEO';
 import { generateAllAudio } from '@/lib/pipeline/generateAudio';
+import { resolveTTSProviderId } from '@/lib/pipeline/projectSettings';
+import { getTTSProvider } from '@/lib/providers/tts/catalog';
 import { concatenateAudioBlobs } from '@/lib/pipeline/assembleVideo';
 import { renderVideo, checkCapabilities, BackendCapabilities } from '@/lib/pipeline/videoEncoder';
 import type { AudioPlacement } from '@/lib/pipeline/audioMix';
@@ -79,6 +81,7 @@ export default function EditorPage() {
   const [audioProgress, setAudioProgress] = useState('');
   // Обрезанные реплики/сдвиги аудио при экспорте — то, что нельзя показывать только в консоли.
   const [audioWarnings, setAudioWarnings] = useState<string[]>([]);
+  const [audioError, setAudioError] = useState<string | null>(null);
   const [audioDone, setAudioDone] = useState(0);
   // Число панелей в текущем прогоне: при точечной переозвучке это НЕ project.panels.length,
   // иначе полоса показывала 2% вместо 20%.
@@ -124,7 +127,17 @@ export default function EditorPage() {
           return;
         }
 
-        const { project: loadedProject, imageDataUrls: urls } = result;
+        const { project: storedProject, imageDataUrls: urls } = result;
+        const settings = getSettings();
+        const storedLLMProvider = getLLMProvider(storedProject.settings.llmProvider || settings.defaultLLMProvider)
+          || getLLMProvider('openrouter')!;
+        const safeVisionModel = resolveLLMVisionModel(
+          storedLLMProvider,
+          storedProject.settings.visionModel || settings.defaultVisionModel,
+        ) || '';
+        const loadedProject = safeVisionModel === storedProject.settings.visionModel
+          ? storedProject
+          : { ...storedProject, settings: { ...storedProject.settings, visionModel: safeVisionModel } };
         const durations = new Map<number, number>();
         const blobs = new Map<number, Blob>();
         const full = new Map<number, { blob: Blob; duration: number }>();
@@ -215,6 +228,17 @@ export default function EditorPage() {
     project?.srt,
     project?.audioDurations,
     project?.seoPackage,
+    project?.settings?.visionModel,
+    project?.settings?.llmProvider,
+    project?.settings?.ttsProvider,
+    project?.settings?.ttsModel,
+    project?.settings?.ttsLanguage,
+    project?.settings?.ttsSpeed,
+    project?.settings?.renderMode,
+    project?.settings?.stripViewport,
+    project?.settings?.stripGap,
+    project?.settings?.backgroundMusic,
+    project?.settings?.musicVolume,
   ]);
 
   // Playback timer.
@@ -304,36 +328,37 @@ export default function EditorPage() {
 
   const resolveLLMConfig = () => {
     const settings = getSettings();
-    const llmId = project?.settings.llmProvider || settings.defaultLLMProvider || 'openrouter';
-    const provider = getLLMProvider(llmId);
+    const requestedId = project?.settings.llmProvider || settings.defaultLLMProvider || 'openrouter';
+    const provider = getLLMProvider(requestedId)
+      || getLLMProvider(settings.defaultLLMProvider)
+      || getLLMProvider('openrouter')!;
+    const llmId = provider.id;
     const customRaw = typeof window !== 'undefined' ? (localStorage.getItem('mvs-info:custom-llm-config') || localStorage.getItem('custom-llm-config')) : null;
     let baseUrl: string | undefined;
-    let model = project?.settings.visionModel || provider?.defaultModel || '';
-    if (customRaw) {
+    const requestedModel = project?.settings.visionModel || settings.defaultVisionModel;
+    let model = resolveLLMVisionModel(provider, requestedModel) || provider.defaultModel;
+    if (customRaw && llmId === 'custom') {
       try {
         const cfg = JSON.parse(customRaw);
-        if (llmId === 'custom' || llmId === 'cloudflare') {
-          baseUrl = cfg.baseUrl || baseUrl;
-          model = cfg.model || model;
-        }
-        if (llmId === 'custom' && cfg.baseUrl) baseUrl = cfg.baseUrl;
+        baseUrl = cfg.baseUrl || baseUrl;
+        model = cfg.model || model;
       } catch {}
     }
-    return { provider, llmId, baseUrl, model, settings };
+    return { provider, llmId, baseUrl, model, accountId: settings.cloudflareAccountId, settings };
   };
 
   const handleGenerateIntro = async () => {
     if (!project) return;
     const keys = getAllKeys();
-    const { provider, llmId, baseUrl, model } = resolveLLMConfig();
-    const apiKey = keys[llmId] || keys[provider?.id || ''];
+    const { provider, llmId, baseUrl, model, accountId } = resolveLLMConfig();
+    const apiKey = keys[llmId] || keys[provider?.id || ''] || (llmId === 'gemini' ? keys['google-ai'] : '');
     if (!provider || !apiKey) {
       updateProject({ intro: generateFallbackIntro() });
       return;
     }
     setIsGeneratingIntro(true);
     try {
-      const text = await generateIntro(project.sceneDescription || project.panels.map(p => p.dialogue).join(' '), project.characters.map(c => c.name), provider, { apiKey, model, baseUrl, temperature: 0.8 });
+      const text = await generateIntro(project.sceneDescription || project.panels.map(p => p.dialogue).join(' '), project.characters.map(c => c.name), provider, { apiKey, model, baseUrl, accountId, temperature: 0.8 });
       updateProject({ intro: text });
     } catch {
       updateProject({ intro: generateFallbackIntro() });
@@ -345,15 +370,15 @@ export default function EditorPage() {
   const handleGenerateOutro = async () => {
     if (!project) return;
     const keys = getAllKeys();
-    const { provider, llmId, baseUrl, model, settings } = resolveLLMConfig();
-    const apiKey = keys[llmId] || keys[provider?.id || ''];
+    const { provider, llmId, baseUrl, model, accountId, settings } = resolveLLMConfig();
+    const apiKey = keys[llmId] || keys[provider?.id || ''] || (llmId === 'gemini' ? keys['google-ai'] : '');
     if (!provider || !apiKey) {
       updateProject({ outro: generateFallbackOutro(settings.siteName) });
       return;
     }
     setIsGeneratingIntro(true);
     try {
-      const text = await generateOutro(settings.siteName, settings.ctaType, provider, { apiKey, model, baseUrl });
+      const text = await generateOutro(settings.siteName, settings.ctaType, provider, { apiKey, model, baseUrl, accountId });
       updateProject({ outro: text });
     } catch {
       updateProject({ outro: generateFallbackOutro(settings.siteName) });
@@ -379,9 +404,21 @@ export default function EditorPage() {
   };
 
   /** Общий путь: генерация (всех панелей или только выбранных) + обновление таймлайна. */
-  const runAudioGeneration = async (onlyPanelIds?: number[], options?: { forceRegenerate?: boolean }) => {
+  const runAudioGeneration = async (
+    onlyPanelIds?: number[],
+    options?: { forceRegenerate?: boolean; providerId?: string }
+  ) => {
     if (!project) return;
-    const ttsId = project.settings.ttsProvider || getSettings().defaultTTSProvider;
+    setAudioError(null);
+    const ttsId = resolveTTSProviderId(
+      project.settings.ttsProvider,
+      getSettings().defaultTTSProvider,
+      options?.providerId
+    );
+    if (!ttsId) {
+      setAudioError('Не выбран TTS-провайдер. Откройте «Голоса» и выберите его.');
+      return;
+    }
     const panels = onlyPanelIds
       ? project.panels.filter(p => onlyPanelIds.includes(p.id))
       : project.panels;
@@ -443,10 +480,16 @@ export default function EditorPage() {
       for (const panel of project.panels) audioTexts[panel.id] = panel.dialogue;
       updateProject({ timeline: tl, srt, audioDurations: obj, audioTexts });
 
+      if (result.errors.length > 0) {
+        const [firstError, ...otherErrors] = result.errors;
+        setAudioError(otherErrors.length > 0
+          ? `${firstError}\nЕщё ошибок: ${otherErrors.length}.`
+          : firstError);
+      }
       setAudioProgress('Готово! Сохранено в OPFS.');
       setTimeout(() => setAudioProgress(''), 3000);
-    } catch (e: any) {
-      alert(`Ошибка озвучки: ${e.message}`);
+    } catch (e: unknown) {
+      setAudioError(e instanceof Error ? e.message : String(e));
     } finally {
       setIsGeneratingAudio(false);
     }
@@ -454,12 +497,28 @@ export default function EditorPage() {
 
   const handleGenerateAudio = async () => {
     if (!project) return;
-    const ttsId = project.settings.ttsProvider || getSettings().defaultTTSProvider;
+    const ttsId = resolveTTSProviderId(project.settings.ttsProvider, getSettings().defaultTTSProvider);
+    if (!ttsId) {
+      setAudioError('Не выбран TTS-провайдер. Откройте «Голоса» и выберите его.');
+      return;
+    }
     const cost = estimateTotalCost(project.panels, project.intro, project.outro, ttsId);
-    const confirmed = confirm(`Озвучить ${project.panels.length} панелей?\nСимволов: ${cost.characters}\nСтоимость: ${cost.estimatedCost}\n\nOPFS кэш — повтор бесплатно. Изменённый текст/голос озвучивается заново.`);
+    const providerName = getTTSProvider(ttsId)?.name || ttsId;
+    const confirmed = confirm(
+      `Озвучить ${project.panels.length} панелей?\nПровайдер: ${providerName} (${ttsId})\nСимволов: ${cost.characters}\nСтоимость: ${cost.estimatedCost}\n\nOPFS кэш — повтор бесплатно. Изменённый текст/голос озвучивается заново.`
+    );
     if (!confirmed) return;
+
     setCostEstimate({ characters: cost.characters, cost: cost.estimatedCost });
-    await runAudioGeneration();
+    try {
+      await saveProject(project);
+      setSaveStatus('saved');
+    } catch (error) {
+      setSaveStatus('unsaved');
+      setAudioError(`Не удалось сохранить настройки проекта перед озвучкой: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    await runAudioGeneration(undefined, { providerId: ttsId });
   };
 
   /**
@@ -468,9 +527,9 @@ export default function EditorPage() {
    */
   const handleGenerateSEO = async () => {
     if (!project) return;
-    const { provider, llmId, baseUrl, model } = resolveLLMConfig();
+    const { provider, llmId, baseUrl, model, accountId } = resolveLLMConfig();
     const keys = getAllKeys();
-    const apiKey = keys[llmId] || (provider ? keys[provider.id] : '');
+    const apiKey = keys[llmId] || (provider ? keys[provider.id] : '') || (llmId === 'gemini' ? keys['google-ai'] : '');
     const scene = project.sceneDescription || project.panels.map(p => p.dialogue).join(' ');
 
     setGeneratingSEO(true);
@@ -483,6 +542,7 @@ export default function EditorPage() {
         apiKey,
         model: model || provider.defaultModel,
         baseUrl,
+        accountId,
         temperature: 0.7,
       });
       updateProject({ seoPackage: seo });
@@ -698,6 +758,24 @@ export default function EditorPage() {
         <div className="h-0.5 w-full bg-[#16161A]" role="progressbar" aria-label="Озвучка">
           {/* раньше считалось от audioBlobs.size (обновлялся один раз в конце) — полоса стояла на 0% */}
           <div className="h-full bg-[#E8B44C] transition-all duration-300" style={{ width: `${(audioDone / Math.max(1, audioTotal || project.panels.length)) * 100}%` }} />
+        </div>
+      )}
+
+      {audioError && (
+        <div className="border-b border-[#3A1414] bg-[#1E1010] px-4 py-2" role="alert" aria-live="assertive">
+          <div className="max-w-[960px] mx-auto flex items-start gap-3">
+            <span className="text-[13px] leading-5 text-[#E86C4C]" aria-hidden="true">⚠</span>
+            <div className="flex-1 space-y-0.5">
+              <p className="text-[12px] font-medium text-[#E86C4C]">Озвучка не удалась</p>
+              <p className="text-[11px] leading-4 text-[#C97A66] break-words whitespace-pre-wrap">{audioError}</p>
+            </div>
+            <button
+              onClick={() => setAudioError(null)}
+              className="h-6 px-2 rounded-[6px] border border-[#3A1414] text-[11px] text-[#C97A66] hover:bg-[#262010] transition-colors"
+            >
+              Понятно
+            </button>
+          </div>
         </div>
       )}
 
