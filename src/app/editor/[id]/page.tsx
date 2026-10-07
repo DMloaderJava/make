@@ -620,6 +620,12 @@ export default function EditorPage() {
    */
   const handleApplyScenario = async (lines: ScenarioLine[], translatedTexts: string[] | null, notice?: string) => {
     if (!project) return;
+    // Без изображений индекс изображения некуда класть: clamp в
+    // scenarioToPanels не сработает, а Preview упадёт на images[-1].
+    if (images.length === 0) {
+      setNotice('Сначала загрузите хотя бы одно изображение — без картинки сценарий применить нельзя (нечему сопоставлять реплики).');
+      return;
+    }
     const appliedLines = lines.map((line, i) =>
       translatedTexts?.[i] ? { ...line, text: translatedTexts[i] } : line
     );
@@ -776,7 +782,7 @@ export default function EditorPage() {
           renderMode: renderSettings.renderMode,
           stripViewport: renderSettings.stripViewport,
           stripGap: renderSettings.stripGap,
-          panels: project.panels.map(p => ({ id: p.id, imageIndex: p.imageIndex })),
+          panels: project.panels.map(p => ({ id: p.id, imageIndex: p.imageIndex, fullFrame: p.fullFrame })),
           onAudioTrimmed: (messages) => setAudioWarnings(messages),
           preferredBackend: preferredBackend === 'auto' ? undefined : preferredBackend
         });

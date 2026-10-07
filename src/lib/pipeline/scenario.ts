@@ -230,6 +230,9 @@ export function scenarioToPanels(lines: ScenarioLine[], imageCount: number): {
       type: 'speech',
       order: i,
       imageIndex,
+      // Сценарий: одно изображение = один кадр. Preview/экспорт рисуют
+      // contain (letterbox) без зума/панорамы — иначе портрет кропится.
+      fullFrame: true,
     });
   });
 

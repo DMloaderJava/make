@@ -14,6 +14,12 @@ export interface PanelData {
   type: 'speech' | 'thought' | 'narration' | 'sfx';
   order: number;
   imageIndex: number;
+  /**
+   * Панель покрывает всё изображение (режим сценария: один кадр = одно
+   * изображение): Preview и экспорт рисуют contain (letterbox) без зума
+   * и панорамы, bbox-обводку не рисуют.
+   */
+  fullFrame?: boolean;
 }
 
 export interface Character {

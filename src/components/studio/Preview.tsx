@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { PanelData } from '@/lib/pipeline/extractPanels';
+import { sameImageSpan } from '@/lib/pipeline/buildTimeline';
 import { SyncTimeline } from '@/lib/storage/db';
 import { STRIP_DEFAULTS, createStripSceneFromMedia, pageIndexAtScroll, resolveStripViewport } from '@/lib/pipeline/mangaStrip';
 
@@ -125,13 +126,36 @@ export function Preview({
       return;
     }
 
+    // «Весь кадр» (режим сценария): изображение целиком в кадре (contain +
+    // letterbox), без зума/панорамы и bbox-обводки — одна картинка = один кадр.
+    if (currentPanel.fullFrame) {
+      const img = loaded.get(images[currentPanel.imageIndex]);
+      ctx.fillStyle = '#0B0B0C';
+      ctx.fillRect(0, 0, w, h);
+      if (img) {
+        const { dw, dh, ox, oy } = fitContain(img, w, h);
+        ctx.drawImage(img, ox, oy, dw, dh);
+      }
+      ctx.fillStyle = 'rgba(11,11,12,0.25)';
+      ctx.fillRect(0, 0, w, h);
+      drawDialogue(ctx, w, h, currentPanel.dialogue, currentPanel.character);
+      if (duration > 0 && isFinite(duration)) {
+        const pw = (currentTime / duration) * w;
+        ctx.fillStyle = '#E8B44C';
+        ctx.fillRect(0, h - 2, Math.max(0, Math.min(w, pw)), 2);
+      }
+      return;
+    }
+
     const img = loaded.get(images[currentPanel.imageIndex]);
     ctx.fillStyle = '#0B0B0C';
     ctx.fillRect(0, 0, w, h);
 
     if (img) {
-      const seg = timeline.find(t => t.panelId === currentPanel.id);
-      const progress = seg ? Math.min(1, Math.max(0, (currentTime - seg.audioStart) / (seg.audioEnd - seg.audioStart || 1))) : 0;
+      // Прогресс камеры — по группе соседних панелей одного изображения:
+      // зум не «скачет» на каждой панели той же страницы.
+      const span = sameImageSpan(timeline, currentPanel.id);
+      const progress = span ? Math.min(1, Math.max(0, (currentTime - span.start) / (span.end - span.start || 1))) : 0;
       const scale = 1 + progress * 0.08;
 
       const imgAspect = img.width / img.height;
@@ -229,6 +253,21 @@ export function Preview({
       </div>
     </div>
   );
+}
+
+/** Fit-contain: изображение целиком в кадре, центрировано (letterbox). */
+function fitContain(img: HTMLImageElement, w: number, h: number): { dw: number; dh: number; ox: number; oy: number } {
+  const imgAspect = img.width / img.height;
+  const canvasAspect = w / h;
+  let dw: number, dh: number;
+  if (imgAspect > canvasAspect) {
+    dw = w;
+    dh = w / imgAspect;
+  } else {
+    dh = h;
+    dw = h * imgAspect;
+  }
+  return { dw, dh, ox: (w - dw) / 2, oy: (h - dh) / 2 };
 }
 
 /** Плашка с репликой — общая для обоих режимов. */

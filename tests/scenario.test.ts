@@ -8,8 +8,9 @@ import {
   SCENARIO_GAP_SECONDS,
   genderLabel,
 } from '../src/lib/pipeline/scenario';
-import { buildTimeline, DEFAULT_PANEL_GAP } from '../src/lib/pipeline/buildTimeline';
+import { buildTimeline, sameImageSpan, DEFAULT_PANEL_GAP } from '../src/lib/pipeline/buildTimeline';
 import type { PanelData } from '../src/lib/pipeline/extractPanels';
+import type { SyncTimeline } from '../src/lib/storage/db';
 
 /** Пример из ТЗ формата: два персонажа, три изображения. */
 const USER_FORMAT = `Изображение 1
@@ -154,6 +155,11 @@ test('scenarioToPanels: одна реплика — одна панель на �
     assert.equal(p.type, 'speech');
   }
   assert.deepEqual(panels.map(p => p.imageIndex), [0, 1, 2]);
+  // Режим сценария: вся панель = всё изображение → Preview/экспорт рисуют
+  // contain (letterbox) без зума, bbox-обводку не рисуют.
+  for (const p of panels) {
+    assert.equal(p.fullFrame, true, 'панели сценария помечаются fullFrame');
+  }
 });
 
 test('scenarioToPanels: несуществующего изображения нет — клампим в последнее и предупреждаем', () => {
@@ -191,4 +197,69 @@ test('buildTimeline: дефолтная пауза 0,3 с сохранена д�
 test('genderLabel: Жен. / Муж.', () => {
   assert.equal(genderLabel('female'), 'Жен.');
   assert.equal(genderLabel('male'), 'Муж.');
+});
+
+function seg(
+  panelId: number,
+  imageIndex: number,
+  audioStart: number,
+  audioEnd: number
+): SyncTimeline {
+  return {
+    panelId,
+    imageIndex,
+    audioStart,
+    audioEnd,
+    panelBbox: { x: 0, y: 0, width: 100, height: 100 },
+    voiceId: '',
+    text: '',
+    character: '',
+  };
+}
+
+test('sameImageSpan: две соседние панели одного изображения → разряд всей группы', () => {
+  // imageIndex 0: панели 0 (0–1) и 1 (1.6–3.6); imageIndex 1: панель 2 (4.2–5).
+  const timeline = [
+    seg(0, 0, 0, 1),
+    seg(1, 0, 1.6, 3.6),
+    seg(2, 1, 4.2, 5),
+  ];
+  // Для панели 0 и 1 — один и тот же разряд: от старта первой до конца последней.
+  const spanA = sameImageSpan(timeline, 0);
+  const spanB = sameImageSpan(timeline, 1);
+  assert.ok(spanA && spanB);
+  assert.equal(spanA.start, 0);
+  assert.equal(spanA.end, 3.6);
+  assert.equal(spanA.startIndex, 0);
+  assert.equal(spanB.start, 0);
+  assert.equal(spanB.end, 3.6);
+  assert.equal(spanB.startIndex, 0);
+});
+
+test('sameImageSpan: одиночная панель → разряд совпадает с её сегментом', () => {
+  const timeline = [seg(0, 0, 0, 1), seg(1, 1, 1.6, 3.6)];
+  const span = sameImageSpan(timeline, 1);
+  assert.ok(span);
+  assert.equal(span.start, 1.6);
+  assert.equal(span.end, 3.6);
+  assert.equal(span.startIndex, 1);
+});
+
+test('sameImageSpan: повторное изображение НЕ в группе (разрыв) → свой разряд', () => {
+  // imageIndex 0 → 1 → 0: первая и третья панели на одном изображении, но
+  // разделены другим — каждая даёт собственный разряд (не объединяются).
+  const timeline = [seg(0, 0, 0, 1), seg(1, 1, 1.6, 3.6), seg(2, 0, 4.2, 5)];
+  const spanFirst = sameImageSpan(timeline, 0);
+  const spanThird = sameImageSpan(timeline, 2);
+  assert.ok(spanFirst && spanThird);
+  assert.equal(spanFirst.start, 0);
+  assert.equal(spanFirst.end, 1);
+  assert.equal(spanThird.start, 4.2);
+  assert.equal(spanThird.end, 5);
+  assert.equal(spanThird.startIndex, 2);
+});
+
+test('sameImageSpan: неизвестного panelId → null', () => {
+  const timeline = [seg(0, 0, 0, 1)];
+  assert.equal(sameImageSpan(timeline, 42), null);
 });

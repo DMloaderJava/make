@@ -47,6 +47,26 @@ export function buildTimeline(
   return timeline;
 }
 
+/**
+ * Временной разряд группы СОСЕДНИХ сегментов на одном изображении.
+ * Камера (Ken Burns) идёт по progress этой группы, а не отдельного сегмента —
+ * иначе на каждой панели той же страницы зум «скачет» от 1.08 к 1.0.
+ * @returns null, если сегмента с таким panelId в таймлайне нет.
+ */
+export function sameImageSpan(
+  timeline: SyncTimeline[],
+  panelId: number
+): { start: number; end: number; startIndex: number } | null {
+  const idx = timeline.findIndex(t => t.panelId === panelId);
+  if (idx === -1) return null;
+  const imageIndex = timeline[idx].imageIndex;
+  let startIdx = idx;
+  while (startIdx > 0 && timeline[startIdx - 1].imageIndex === imageIndex) startIdx--;
+  let endIdx = idx;
+  while (endIdx < timeline.length - 1 && timeline[endIdx + 1].imageIndex === imageIndex) endIdx++;
+  return { start: timeline[startIdx].audioStart, end: timeline[endIdx].audioEnd, startIndex: startIdx };
+}
+
 export function estimateDuration(text: string): number {
   const charCount = text.length;
   const base = Math.max(1.5, charCount / 14); // 14 chars per sec
