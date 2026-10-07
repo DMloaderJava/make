@@ -65,20 +65,30 @@ const GENDERS: Record<string, ScenarioGender> = {
 };
 
 /**
- * Разделитель «Имя — текст», первый найденный в строке:
+ * Разделитель «Имя — текст», кандидаты ищутся по всей строке:
  * - «:» — с любыми пробелами (включая «Имя: текст» и «Имя : текст»);
- * - длинное/короткое тире — с любыми пробелами;
- * - обычный дефис — ТОЛЬКО с пробелами с обеих сторон, чтобы не резать
- *   имена вроде «Персонаж-1» и слова «как-то».
+ * - длинное/короткое тире — ТОЛЬКО с пробелами с обеих сторон
+ *   (иначе режутся имена с тире: «Персонаж—тест»);
+ * - обычный дефис — ТОЛЬКО с пробелами с обеих сторон («Персонаж-1» цел).
+ * Если имён несколько кандидатов — берём тот, за которым левая часть
+ * заканчивается «)»: «Персонаж:1 (Муж.): текст» режется после скобки пола,
+ * а не по первому двоеточию.
  */
-const SEPARATOR_REGEX = /(?:\s*:\s*|\s*[—–]\s*|\s+-\s+)/;
+const SEPARATOR_REGEX = /(?:\s*:\s*|\s+[—–]\s+|\s+-\s+)/;
 
 function splitLine(line: string): { left: string; right: string } | null {
-  const sepMatch = line.match(SEPARATOR_REGEX);
-  if (!sepMatch || sepMatch.index === undefined) return null;
-  const left = line.slice(0, sepMatch.index).trim();
-  const right = line.slice(sepMatch.index + sepMatch[0].length).trim();
-  return { left, right };
+  const candidates: Array<{ index: number; length: number }> = [];
+  const re = new RegExp(SEPARATOR_REGEX.source, 'g');
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(line)) !== null) {
+    candidates.push({ index: match.index, length: match[0].length });
+  }
+  if (candidates.length === 0) return null;
+  const preferred = candidates.find(c => line.slice(0, c.index).trim().endsWith(')')) || candidates[0];
+  return {
+    left: line.slice(0, preferred.index).trim(),
+    right: line.slice(preferred.index + preferred.length).trim(),
+  };
 }
 
 function parseGender(raw: string | undefined): { gender: ScenarioGender | null; label?: string } {

@@ -74,6 +74,26 @@ test('parseScenario: дефис с пробелами и отсутствие п
   assert.equal(lines[2].text, 'текст - с дефисом внутри', 'разделитель — первое двоеточие, дефис в тексте сохранён');
 });
 
+test('parseScenario: двоеточие в имени не ломает разбор, если есть скобка пола', () => {
+  const { lines, errors } = parseScenario('Изображение 1\nПерсонаж:1 (Муж.): текст');
+  assert.deepEqual(errors, []);
+  assert.equal(lines[0].character, 'Персонаж:1', 'разделитель — после «(Муж.)», а не первое двоеточие');
+  assert.equal(lines[0].gender, 'male');
+  assert.equal(lines[0].text, 'текст');
+});
+
+test('parseScenario: тире без пробелов — не разделитель (имена с тире целы)', () => {
+  const { lines, errors } = parseScenario('Изображение 1\nПерсонаж—тест (Муж.): текст');
+  assert.deepEqual(errors, []);
+  assert.equal(lines[0].character, 'Персонаж—тест', '«—» без пробелов не режет имя');
+  assert.equal(lines[0].text, 'текст');
+});
+
+test('parseScenario: тире-разделитель требует пробелы с обеих сторон', () => {
+  const { errors } = parseScenario('Изображение 1\nИмя (Жен.)—текст');
+  assert.ok(errors.some(e => e.includes('не реплика')), '«(Жен.)—текст» без пробелов — ошибка с подсказкой');
+});
+
 test('parseScenario: реплика до первого изображения — ошибка', () => {
   const { errors } = parseScenario('Персонаж (Жен.): текст\n\nИзображение 1\nПерсонаж (Жен.): другой');
   assert.ok(errors.some(e => e.includes('Строка 1')), 'ошибка на строке 1');

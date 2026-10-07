@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import {
   genderLabel,
@@ -11,6 +11,8 @@ import {
   type ScenarioLine,
 } from '@/lib/pipeline/scenario';
 import { targetLanguageName } from '@/lib/pipeline/translateScenario';
+import { LLM_PROVIDERS } from '@/lib/providers/llm';
+import type { Project } from '@/lib/storage/db';
 
 interface ScenarioModalProps {
   open: boolean;
@@ -19,9 +21,16 @@ interface ScenarioModalProps {
   imagesCount: number;
   /** Код языка озвучки проекта (ru/en/...) — на него переводятся реплики. */
   ttsLanguage: string;
+  /** Сценарий текущего проекта в текстовом формате — модалка открывается с ним. */
+  currentScenario: string;
+  /** Провайдер, которым переводятся реплики (для списка моделей). */
+  llmProviderId: string;
+  /** Выбранная модель перевода (пусто — дефолт провайдера). */
+  chatModel?: string;
+  onSettingsChange?: (patch: Partial<Project['settings']>) => void;
   /** Применить разобранный сценарий; translatedTexts — уже переведённые реплики (null — без перевода); notice — текст для баннера. */
   onApply: (lines: ScenarioLine[], translatedTexts: string[] | null, notice?: string) => Promise<void> | void;
-  /** Перевести реплики на язык озвучки. Бросает ошибку, если LLM недоступен. */
+  /** Перевести реплики на язык озвучки. Бросает ошибку, если провайдер/ключ недоступны. */
   onTranslate: (texts: string[]) => Promise<string[]>;
 }
 
@@ -40,7 +49,7 @@ interface ScenarioModalProps {
  * язык озвучки; 3) после реплики — пауза 0,6 с и переход к следующему
  * изображению; 4) пол в скобках: (Жен.) или (Муж.); 5) без лишнего текста.
  */
-export function ScenarioModal({ open, onClose, imagesCount, ttsLanguage, onApply, onTranslate }: ScenarioModalProps) {
+export function ScenarioModal({ open, onClose, imagesCount, ttsLanguage, currentScenario, llmProviderId, chatModel, onSettingsChange, onApply, onTranslate }: ScenarioModalProps) {
   const [text, setText] = useState('');
   const [applying, setApplying] = useState(false);
   const [translating, setTranslating] = useState(false);
@@ -48,6 +57,15 @@ export function ScenarioModal({ open, onClose, imagesCount, ttsLanguage, onApply
   const parsed = useMemo(() => (text.trim() ? parseScenario(text) : null), [text]);
   const canApply = !!parsed && parsed.lines.length > 0 && parsed.errors.length === 0;
   const languageName = targetLanguageName(ttsLanguage);
+  const llmProvider = LLM_PROVIDERS.find(p => p.id === llmProviderId);
+  const modelOptions = llmProvider?.models || [];
+
+  // Модалка открывается с текстом текущего проекта (обратная связь
+  // «проект → сценарий»): сериализация из панелей, а не пустое поле.
+  useEffect(() => {
+    if (open) setText(currentScenario);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   if (!open) return null;
 
@@ -83,7 +101,7 @@ export function ScenarioModal({ open, onClose, imagesCount, ttsLanguage, onApply
           <div>
             <h2 className="text-[15px] font-medium">Сценарий</h2>
             <p className="text-[11px] text-[#8A8A93] mt-0.5">
-              Сначала изображение, затем реплика · пауза {String(SCENARIO_GAP_SECONDS).replace('.', ',')} с между репликами
+              Сначала изображение, затем реплика · пауза между репликами — ползунок в таймлайне
             </p>
           </div>
           <button onClick={onClose} className="w-8 h-8 rounded-[6px] bg-[#1E1E23] hover:bg-[#26262C] flex items-center justify-center text-[#8A8A93]">×</button>
@@ -116,9 +134,31 @@ export function ScenarioModal({ open, onClose, imagesCount, ttsLanguage, onApply
             className="w-full min-h-[180px] max-h-[300px] rounded-[10px] bg-[#0B0B0C] border border-[#26262C] px-3 py-2.5 font-mono text-[12px] leading-5 text-[#F5F5F7] placeholder:text-[#8A8A93]/50 resize-y"
           />
 
+          {modelOptions.length > 0 && (
+            <div className="flex items-center gap-3">
+              <label className="text-[11px] text-[#8A8A93] whitespace-nowrap" htmlFor="scenario-chat-model">
+                Модель перевода
+              </label>
+              <select
+                id="scenario-chat-model"
+                value={chatModel || ''}
+                onChange={(e) => onSettingsChange?.({ chatModel: e.target.value || undefined })}
+                className="flex h-8 w-full max-w-[320px] rounded-[6px] border border-[#26262C] bg-[#0B0B0C] px-2 text-xs"
+              >
+                <option value="">{llmProvider?.name || 'Провайдер'} · по умолчанию</option>
+                {modelOptions.map(m => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+            </div>
+          )}
+
           <div className="flex flex-wrap items-center gap-2">
             <Button variant="outline" size="sm" onClick={() => setText(SCENARIO_EXAMPLE)} className="h-8 text-xs bg-[#0B0B0C] border-[#26262C] hover:bg-[#1E1E23]">
               Пример
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => setText(currentScenario)} disabled={!currentScenario} title="Собрать текст заново из панелей проекта" className="h-8 text-xs bg-[#0B0B0C] border-[#26262C] hover:bg-[#1E1E23] disabled:opacity-40">
+              ← Из проекта
             </Button>
             {text && (
               <Button variant="outline" size="sm" onClick={() => setText('')} className="h-8 text-xs bg-[#0B0B0C] border-[#26262C] hover:bg-[#1E1E23]">

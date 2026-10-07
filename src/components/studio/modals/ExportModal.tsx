@@ -92,7 +92,7 @@ export function ExportModal({ open, onClose, onExport, hasAudio, hasSRT, hasSEO,
                 className="w-full p-3 rounded-[10px] border border-dashed border-[#26262C] bg-[#0B0B0C] text-left transition-colors hover:border-[#E8B44C]/50 hover:bg-[#1E1E23] disabled:opacity-50"
               >
                 <span className="text-[13px] font-medium">✨ {generatingSEO ? 'Генерирую SEO...' : (hasSEO ? 'Перегенерировать SEO' : 'Сгенерировать SEO')}</span>
-                <p className="text-[11px] text-[#8A8A93] mt-1">LLM соберёт title/описание/теги/тайм-коды; без ключа — шаблон</p>
+                <p className="text-[11px] text-[#8A8A93] mt-1">Модель соберёт title/описание/теги/тайм-коды; без ключа — шаблон</p>
               </button>
             )}
 

@@ -111,10 +111,10 @@ export async function translateScenarioLines(
 
   const parsed = parseJsonArray(result);
   if (!parsed) {
-    throw new Error('Перевод: LLM не вернула JSON-массив. Повторите попытку.');
+    throw new Error('Перевод: модель не вернула JSON-массив. Повторите попытку.');
   }
   if (parsed.length !== texts.length) {
-    throw new Error(`Перевод: LLM вернула ${parsed.length} строк вместо ${texts.length}. Повторите попытку.`);
+    throw new Error(`Перевод: модель вернула ${parsed.length} строк вместо ${texts.length}. Повторите попытку.`);
   }
   return parsed.map((translated, i) => translated.trim() || texts[i]);
 }

@@ -14,7 +14,7 @@ import { Input } from '@/components/ui/input';
 import { getAllKeys, getSettings } from '@/lib/storage/local';
 import { getLLMProvider, resolveLLMVisionModel } from '@/lib/providers/llm';
 import { buildTimeline, DEFAULT_PANEL_GAP, estimateDuration, generateSRT, calculateTotalDuration } from '@/lib/pipeline/buildTimeline';
-import { scenarioToPanels, SCENARIO_GAP_SECONDS, type ScenarioLine } from '@/lib/pipeline/scenario';
+import { scenarioToPanels, serializeScenario, SCENARIO_GAP_SECONDS, type ScenarioLine } from '@/lib/pipeline/scenario';
 import { translateScenarioLines, isTranslatableLanguage } from '@/lib/pipeline/translateScenario';
 import { generateIntro, generateOutro, generateFallbackIntro, generateFallbackOutro } from '@/lib/pipeline/generateIntro';
 import { formatSEOPackage, generateSEO, generateFallbackSEO } from '@/lib/pipeline/generateSEO';
@@ -252,6 +252,7 @@ export default function EditorPage() {
     project?.settings?.stripViewport,
     project?.settings?.stripGap,
     project?.settings?.panelGap,
+    project?.settings?.chatModel,
     project?.settings?.backgroundMusic,
     project?.settings?.musicVolume,
   ]);
@@ -588,7 +589,8 @@ export default function EditorPage() {
 
   /**
    * Сценарий, правило 2: реплики переводятся на язык озвучки проекта.
-   * Бросает ошибку, если LLM недоступна — модалка предложит применить без перевода.
+   * Бросает ошибку, если провайдер/ключ недоступны — модалка применит
+   * сценарий без перевода и покажет причину баннером.
    */
   const handleTranslateScenario = async (texts: string[]): Promise<string[]> => {
     if (!project) throw new Error('Проект не загружен');
@@ -596,15 +598,15 @@ export default function EditorPage() {
     const keys = getAllKeys();
     const apiKey = keys[llmId] || (provider ? keys[provider.id] : '') || (llmId === 'gemini' ? keys['google-ai'] : '');
     if (!provider || !apiKey) {
-      throw new Error('LLM-провайдер не настроен: добавьте ключ в «Настройки → Провайдеры»');
+      throw new Error(`Провайдер «${provider?.name || llmId}» не настроен: добавьте его ключ в «Настройки → Провайдеры»`);
     }
     const language = project.settings.ttsLanguage || 'ru';
     if (!isTranslatableLanguage(language)) {
       throw new Error(`Перевод недоступен для языка «${language}» — выберите конкретный язык озвучки в «Голоса».`);
     }
-    // Для перевода используем обычную chat-модель провайдера,
-    // а не vision-модель, которую resolveLLMConfig подбирает под анализ изображений.
-    const chatModel = provider.defaultModel || model;
+    // Приоритет: модель, выбранная в модалке «Сценарий» (chatModel),
+    // затем дефолт провайдера, и лишь потом vision-модель из resolveLLMConfig.
+    const chatModel = project.settings.chatModel || provider.defaultModel || model;
     return translateScenarioLines(texts, language, provider, { apiKey, model: chatModel, baseUrl, accountId });
   };
 
@@ -796,6 +798,32 @@ export default function EditorPage() {
     return project.timeline.length > 0 ? project.timeline : buildTimeline(project.panels, audioDurations, project.voiceAssignments, project.introDuration, panelGap);
   }, [project, audioDurations, panelGap]);
 
+  /** Сценарий текущего проекта текстом: модалка открывается с этим содержимым. */
+  const currentScenarioText = useMemo(() => {
+    if (!project || project.panels.length === 0) return '';
+    const genders: Record<string, 'female' | 'male'> = {};
+    for (const c of project.characters) {
+      if (c.gender) genders[c.name] = c.gender;
+    }
+    return serializeScenario(project.panels, genders);
+  }, [project?.panels, project?.characters]);
+
+  /**
+   * Смена паузы между репликами (ползунок в таймлайне): пересобираем
+   * сохранённый таймлайн сразу, чтобы превью и длительность отреагировали
+   * до переозвучки.
+   */
+  const handleGapChange = (gap: number) => {
+    if (!project) return;
+    const durationMap = new Map<number, number>();
+    for (const p of project.panels) {
+      durationMap.set(p.id, audioDurations.get(p.id) ?? estimateDuration(p.dialogue));
+    }
+    const timeline = buildTimeline(project.panels, durationMap, project.voiceAssignments, project.introDuration, gap);
+    const srt = generateSRT(timeline, project.intro, project.outro, project.introDuration, project.outroDuration);
+    updateProject({ settings: { ...project.settings, panelGap: gap }, timeline, srt });
+  };
+
   const handleSeek = useCallback((t: number) => {
     if (!isFinite(t)) return;
     setCurrentTime(t);
@@ -979,6 +1007,8 @@ export default function EditorPage() {
             selectedId={selectedId}
             introDuration={project.introDuration}
             outroDuration={project.outroDuration}
+            panelGap={panelGap}
+            onGapChange={handleGapChange}
           />
 
           <ContextPanel
@@ -1034,6 +1064,10 @@ export default function EditorPage() {
         onClose={() => setShowScenario(false)}
         imagesCount={images.length}
         ttsLanguage={project.settings.ttsLanguage || 'ru'}
+        currentScenario={currentScenarioText}
+        llmProviderId={project.settings.llmProvider || getSettings().defaultLLMProvider || 'openrouter'}
+        chatModel={project.settings.chatModel}
+        onSettingsChange={(patch) => updateProject({ settings: { ...project.settings, ...patch } })}
         onApply={handleApplyScenario}
         onTranslate={handleTranslateScenario}
       />

@@ -350,7 +350,7 @@ export function ProviderList() {
           </select>
         </div>
         <div className="space-y-2">
-          <label className="text-[12px] text-[#8A8A93]">LLM по умолчанию</label>
+          <label className="text-[12px] text-[#8A8A93]">Модель по умолчанию</label>
           <select
             value={selectedLLMProvider.id}
             onChange={(e) => {

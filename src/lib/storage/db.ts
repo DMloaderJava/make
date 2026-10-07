@@ -75,6 +75,12 @@ export interface Project {
     visionModel: string;
     /** Модель TTS для проекта (например eleven_multilingual_v2). */
     ttsModel?: string;
+    /**
+     * Отдельная модель для текста (перевод сценария и т.п.). Пусто — дефолт
+     * провайдера. Отдельно от visionModel: перевод не требует vision, а
+     * дефолт провайдера может быть vision-моделью.
+     */
+    chatModel?: string;
     /** Язык озвучки проекта: 'ru' | 'en' | ... */
     ttsLanguage?: string;
     /** Скорость речи (1.0 — обычная). */
