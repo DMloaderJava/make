@@ -64,14 +64,21 @@ const GENDERS: Record<string, ScenarioGender> = {
   'male': 'male',
 };
 
-/** Разделители «Имя — текст»: двоеточие и тире (обычный дефис — нет, он бывает в именах). */
-const SEPARATORS = new Set([':', '—', '–']);
+/**
+ * Разделитель «Имя — текст», первый найденный в строке:
+ * - «:» — с любыми пробелами (включая «Имя: текст» и «Имя : текст»);
+ * - длинное/короткое тире — с любыми пробелами;
+ * - обычный дефис — ТОЛЬКО с пробелами с обеих сторон, чтобы не резать
+ *   имена вроде «Персонаж-1» и слова «как-то».
+ */
+const SEPARATOR_REGEX = /(?:\s*:\s*|\s*[—–]\s*|\s+-\s+)/;
 
-function findSeparator(line: string): number {
-  for (let i = 0; i < line.length; i++) {
-    if (SEPARATORS.has(line[i])) return i;
-  }
-  return -1;
+function splitLine(line: string): { left: string; right: string } | null {
+  const sepMatch = line.match(SEPARATOR_REGEX);
+  if (!sepMatch || sepMatch.index === undefined) return null;
+  const left = line.slice(0, sepMatch.index).trim();
+  const right = line.slice(sepMatch.index + sepMatch[0].length).trim();
+  return { left, right };
 }
 
 function parseGender(raw: string | undefined): { gender: ScenarioGender | null; label?: string } {
@@ -112,14 +119,12 @@ export function parseScenario(text: string): ScenarioParseResult {
       return;
     }
 
-    const sep = findSeparator(line);
-    if (sep === -1) {
-      errors.push(`Строка ${lineNo}: не реплика (нет разделителя «:»). В сценарии допускаются только «${SCENARIO_IMAGE_LABEL} N» и реплики «Имя (Пол): текст»`);
+    const split = splitLine(line);
+    if (!split) {
+      errors.push(`Строка ${lineNo}: не реплика (нет разделителя «:», « — » или « - »). В сценарии допускаются только «${SCENARIO_IMAGE_LABEL} N» и реплики «Имя (Пол): текст»`);
       return;
     }
-
-    const left = line.slice(0, sep).trim();
-    const right = line.slice(sep + 1).trim();
+    const { left, right } = split;
     if (!left) {
       errors.push(`Строка ${lineNo}: не указано имя персонажа`);
       return;

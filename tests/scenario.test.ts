@@ -52,6 +52,28 @@ test('parseScenario: устойчив к регистру, пробелам и �
   assert.equal(lines[1].text, 'текст с тире');
 });
 
+test('parseScenario: дефис с пробелами и отсутствие пробелов в имени (вариации ТЗ)', () => {
+  const text = [
+    'Изображение 1',
+    'Персонаж 1(Жен.): текст без пробелов перед скобкой',
+    'Изображение 2',
+    'Персонаж 2 (Муж.) - текст с дефисом-разделителем',
+    'Изображение 3',
+    'Персонаж-1 (Муж.): текст - с дефисом внутри',
+  ].join('\n');
+  const { lines, errors, warnings } = parseScenario(text);
+  assert.deepEqual(errors, []);
+  assert.deepEqual(warnings, []);
+  assert.equal(lines.length, 3);
+  assert.equal(lines[0].character, 'Персонаж 1', '«Персонаж 1(Жен.):» без пробелов разбирается');
+  assert.equal(lines[0].text, 'текст без пробелов перед скобкой');
+  assert.equal(lines[1].character, 'Персонаж 2');
+  assert.equal(lines[1].gender, 'male', '«(Муж.) - текст» — дефис с пробелами как разделитель');
+  assert.equal(lines[1].text, 'текст с дефисом-разделителем');
+  assert.equal(lines[2].character, 'Персонаж-1', 'дефис в имени без пробелов — не разделитель');
+  assert.equal(lines[2].text, 'текст - с дефисом внутри', 'разделитель — первое двоеточие, дефис в тексте сохранён');
+});
+
 test('parseScenario: реплика до первого изображения — ошибка', () => {
   const { errors } = parseScenario('Персонаж (Жен.): текст\n\nИзображение 1\nПерсонаж (Жен.): другой');
   assert.ok(errors.some(e => e.includes('Строка 1')), 'ошибка на строке 1');
