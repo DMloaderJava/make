@@ -20,6 +20,8 @@
  */
 
 import { PanelData } from './extractPanels';
+import { rebuildSrt } from './buildTimeline';
+import type { Character, Project, SyncTimeline } from '../storage/db';
 
 export type ScenarioGender = 'female' | 'male';
 
@@ -237,6 +239,80 @@ export function scenarioToPanels(lines: ScenarioLine[], imageCount: number): {
   });
 
   return { panels, warnings };
+}
+
+/**
+ * Обновление полей проекта при применении сценария (чистая функция).
+ * Сценарий управляет панелями, персонажами и таймлайном — и НЕ трогает
+ * интро/аутро: они возвращаются без изменений (правило 5 до v1.3.16
+ * очищало их; с v1.3.16 сценарий и подводка — разные сущности).
+ */
+export interface ScenarioProjectPatch {
+  panels: PanelData[];
+  characters: Character[];
+  timeline: SyncTimeline[];
+  srt: string;
+  intro: string;
+  outro: string;
+  introDuration: number;
+  outroDuration: number;
+  warnings: string[];
+}
+
+export function applyScenarioToProject(
+  project: Pick<Project, 'panels' | 'characters' | 'intro' | 'outro' | 'introDuration' | 'outroDuration'>,
+  lines: ScenarioLine[],
+  opts: {
+    imagesCount: number;
+    panelGap: number;
+    voiceAssignments: Record<string, string>;
+    /** panelId → длительность. После применения старое аудио удалено — пустой Map. */
+    audioDurations?: Map<number, number>;
+  }
+): ScenarioProjectPatch {
+  const { panels, warnings } = scenarioToPanels(lines, opts.imagesCount);
+
+  // Персонажи: существующие сохраняем, пол обновляем/добавляем.
+  const charMap = new Map(project.characters.map(c => [c.name, { ...c }]));
+  for (const line of lines) {
+    const existing = charMap.get(line.character);
+    if (existing) {
+      if (line.gender) existing.gender = line.gender;
+    } else {
+      charMap.set(line.character, {
+        name: line.character,
+        appearance: '',
+        voiceId: '',
+        emotion: 'neutral',
+        gender: line.gender ?? undefined,
+      });
+    }
+  }
+  const characters = Array.from(charMap.values());
+
+  // Таймлайн + SRT из ТЕКУЩИХ интро/аутро проекта (rebuildSrt — единая точка).
+  const { timeline, srt } = rebuildSrt({
+    panels,
+    audioDurations: opts.audioDurations ?? new Map(),
+    voiceAssignments: opts.voiceAssignments,
+    intro: project.intro,
+    outro: project.outro,
+    introDuration: project.introDuration,
+    outroDuration: project.outroDuration,
+    panelGap: opts.panelGap,
+  });
+
+  return {
+    panels,
+    characters,
+    timeline,
+    srt,
+    intro: project.intro,
+    outro: project.outro,
+    introDuration: project.introDuration,
+    outroDuration: project.outroDuration,
+    warnings,
+  };
 }
 
 /** Пример формата для кнопки «Пример». */

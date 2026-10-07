@@ -4,6 +4,7 @@ import {
   parseScenario,
   serializeScenario,
   scenarioToPanels,
+  applyScenarioToProject,
   SCENARIO_EXAMPLE,
   SCENARIO_GAP_SECONDS,
   genderLabel,
@@ -262,4 +263,62 @@ test('sameImageSpan: повторное изображение НЕ в груп�
 test('sameImageSpan: неизвестного panelId → null', () => {
   const timeline = [seg(0, 0, 0, 1)];
   assert.equal(sameImageSpan(timeline, 42), null);
+});
+
+// ---- v1.3.16: сценарий не трогает интро/аутро ----
+
+const PROJECT_WITH_INTRO_OUTRO = {
+  panels: [] as PanelData[],
+  characters: [
+    { name: 'Аня', appearance: 'волосы', voiceId: 'v1', emotion: 'neutral', gender: 'female' as const },
+  ],
+  intro: 'Подводка к ролику',
+  outro: 'Финальная фраза',
+  introDuration: 6,
+  outroDuration: 4,
+};
+
+test('applyScenarioToProject: интро/аутро СОХРАНЯЮТСЯ (не очищаются)', () => {
+  const { lines } = parseScenario(USER_FORMAT);
+  const patch = applyScenarioToProject(PROJECT_WITH_INTRO_OUTRO, lines, {
+    imagesCount: 5,
+    panelGap: SCENARIO_GAP_SECONDS,
+    voiceAssignments: {},
+  });
+  assert.equal(patch.intro, 'Подводка к ролику', 'интро не очищается');
+  assert.equal(patch.outro, 'Финальная фраза', 'аутро не очищается');
+  assert.equal(patch.introDuration, 6);
+  assert.equal(patch.outroDuration, 4);
+  assert.equal(patch.panels.length, 3);
+  assert.ok(patch.panels.every(p => p.fullFrame === true));
+});
+
+test('applyScenarioToProject: таймлайн и SRT строятся из интро проекта', () => {
+  const { lines } = parseScenario(USER_FORMAT);
+  const patch = applyScenarioToProject(PROJECT_WITH_INTRO_OUTRO, lines, {
+    imagesCount: 5,
+    panelGap: SCENARIO_GAP_SECONDS,
+    voiceAssignments: {},
+  });
+  // Первая панель стартует после интро (6 с), а не с нуля.
+  assert.equal(patch.timeline[0].audioStart, 6);
+  // В SRT есть сегмент интро 0 → 6 и текст аутро.
+  assert.match(patch.srt, /00:00:00,000 --> 00:00:06,000/);
+  assert.match(patch.srt, /Подводка к ролику/);
+  assert.match(patch.srt, /Финальная фраза/);
+});
+
+test('applyScenarioToProject: персонажи — существующие сохраняются, новые добавляются с полом', () => {
+  const { lines } = parseScenario(USER_FORMAT);
+  const patch = applyScenarioToProject(PROJECT_WITH_INTRO_OUTRO, lines, {
+    imagesCount: 5,
+    panelGap: SCENARIO_GAP_SECONDS,
+    voiceAssignments: { Аня: 'voice-1' },
+  });
+  const byName = new Map(patch.characters.map(c => [c.name, c]));
+  assert.equal(byName.get('Аня')?.gender, 'female', 'существующий персонаж сохранён с полом');
+  assert.equal(byName.get('Персонаж 1')?.gender, 'female', 'новый персонаж из (Жен.)');
+  assert.equal(byName.get('Персонаж 2')?.gender, 'male', 'новый персонаж из (Муж.)');
+  // voiceId существующего персонажа не теряется.
+  assert.equal(byName.get('Аня')?.voiceId, 'v1');
 });

@@ -10,11 +10,12 @@ import { RenderModePanel, RENDER_DEFAULTS, type RenderSettings } from '@/compone
 import { VoicesModal } from '@/components/studio/modals/VoicesModal';
 import { ExportModal } from '@/components/studio/modals/ExportModal';
 import { ScenarioModal } from '@/components/studio/modals/ScenarioModal';
+import { IntroOutroModal } from '@/components/studio/modals/IntroOutroModal';
 import { Input } from '@/components/ui/input';
 import { getAllKeys, getSettings } from '@/lib/storage/local';
 import { getLLMProvider, resolveLLMVisionModel } from '@/lib/providers/llm';
 import { buildTimeline, DEFAULT_PANEL_GAP, estimateDuration, calculateTotalDuration, rebuildSrt } from '@/lib/pipeline/buildTimeline';
-import { scenarioToPanels, serializeScenario, SCENARIO_GAP_SECONDS, type ScenarioLine } from '@/lib/pipeline/scenario';
+import { applyScenarioToProject, serializeScenario, SCENARIO_GAP_SECONDS, type ScenarioLine } from '@/lib/pipeline/scenario';
 import { translateScenarioLines, isTranslatableLanguage } from '@/lib/pipeline/translateScenario';
 import { generateIntro, generateOutro, generateFallbackIntro, generateFallbackOutro } from '@/lib/pipeline/generateIntro';
 import { formatSEOPackage, generateSEO, generateFallbackSEO } from '@/lib/pipeline/generateSEO';
@@ -103,6 +104,8 @@ export default function EditorPage() {
   const [showVoices, setShowVoices] = useState(false);
   const [showExport, setShowExport] = useState(false);
   const [showScenario, setShowScenario] = useState(false);
+  const [showIntroOutro, setShowIntroOutro] = useState(false);
+  const [voicingIntroOutro, setVoicingIntroOutro] = useState(false);
   const [backendCaps, setBackendCaps] = useState<BackendCapabilities | null>(null);
   const [preferredBackend, setPreferredBackend] = useState<'auto' | 'webcodecs' | 'canvas'>('auto');
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'unsaved'>('saved');
@@ -395,21 +398,30 @@ export default function EditorPage() {
     return { provider, llmId, baseUrl, model, accountId: settings.cloudflareAccountId, settings };
   };
 
+  /**
+   * Имя канала для fallback-текстов. Пока: siteName из настроек;
+   * с v1.3.16 сюда встанет project.settings.channelName (задача 4 ТЗ).
+   */
+  const resolveChannel = () => {
+    const app = getSettings();
+    return app.siteName?.trim() || undefined;
+  };
+
   const handleGenerateIntro = async () => {
     if (!project) return;
     const keys = getAllKeys();
     const { provider, llmId, baseUrl, model, accountId } = resolveLLMConfig();
     const apiKey = keys[llmId] || keys[provider?.id || ''] || (llmId === 'gemini' ? keys['google-ai'] : '');
     if (!provider || !apiKey) {
-      updateProject({ intro: generateFallbackIntro() });
+      applyIntroOutroChange({ intro: generateFallbackIntro(project.panels, resolveChannel()) });
       return;
     }
     setIsGeneratingIntro(true);
     try {
       const text = await generateIntro(project.sceneDescription || project.panels.map(p => p.dialogue).join(' '), project.characters.map(c => c.name), provider, { apiKey, model, baseUrl, accountId, temperature: 0.8 });
-      updateProject({ intro: text });
+      applyIntroOutroChange({ intro: text });
     } catch {
-      updateProject({ intro: generateFallbackIntro() });
+      applyIntroOutroChange({ intro: generateFallbackIntro(project.panels, resolveChannel()) });
     } finally {
       setIsGeneratingIntro(false);
     }
@@ -421,18 +433,106 @@ export default function EditorPage() {
     const { provider, llmId, baseUrl, model, accountId, settings } = resolveLLMConfig();
     const apiKey = keys[llmId] || keys[provider?.id || ''] || (llmId === 'gemini' ? keys['google-ai'] : '');
     if (!provider || !apiKey) {
-      updateProject({ outro: generateFallbackOutro(settings.siteName) });
+      applyIntroOutroChange({ outro: generateFallbackOutro(project.panels, resolveChannel()) });
       return;
     }
     setIsGeneratingIntro(true);
     try {
-      const text = await generateOutro(settings.siteName, settings.ctaType, provider, { apiKey, model, baseUrl, accountId });
-      updateProject({ outro: text });
+      const text = await generateOutro(resolveChannel() || settings.siteName, settings.ctaType, provider, { apiKey, model, baseUrl, accountId });
+      applyIntroOutroChange({ outro: text });
     } catch {
-      updateProject({ outro: generateFallbackOutro(settings.siteName) });
+      applyIntroOutroChange({ outro: generateFallbackOutro(project.panels, resolveChannel()) });
     } finally {
       setIsGeneratingIntro(false);
     }
+  };
+
+  /**
+   * Модалка «Интро/Аутро» → «Сгенерировать AI»: оба текста по панелям.
+   * Без ключа — без alert: пустые поля заполняются шаблоном (с именем
+   * канала), заполненные — notice о причине.
+   */
+  const handleIntroOutroAI = async () => {
+    if (!project) return;
+    const keys = getAllKeys();
+    const { provider, llmId, baseUrl, model, accountId, settings } = resolveLLMConfig();
+    const apiKey = keys[llmId] || keys[provider?.id || ''] || (llmId === 'gemini' ? keys['google-ai'] : '');
+    const channel = resolveChannel();
+    if (!provider || !apiKey) {
+      const patch: { intro?: string; outro?: string } = {};
+      if (!project.intro.trim()) { patch.intro = generateFallbackIntro(project.panels, channel); }
+      if (!project.outro.trim()) { patch.outro = generateFallbackOutro(project.panels, channel); }
+      if (patch.intro || patch.outro) {
+        applyIntroOutroChange(patch);
+        setNotice('Ключ AI не добавлен — пустым интро/аутро поставлен шаблон. Для генерации по панелям добавьте ключ в «Настройках».');
+      } else {
+        setNotice('Ключ AI не добавлен — сгенерировать текст интро/аутро нельзя. Добавьте ключ в «Настройках» или введите текст вручную.');
+      }
+      return;
+    }
+    setIsGeneratingIntro(true);
+    try {
+      const [introText, outroText] = await Promise.all([
+        generateIntro(project.sceneDescription || project.panels.map(p => p.dialogue).join(' '), project.characters.map(c => c.name), provider, { apiKey, model, baseUrl, accountId, temperature: 0.8 }),
+        generateOutro(channel || settings.siteName, settings.ctaType, provider, { apiKey, model, baseUrl, accountId }),
+      ]);
+      applyIntroOutroChange({ intro: introText, outro: outroText });
+    } catch {
+      applyIntroOutroChange({
+        intro: project.intro.trim() ? project.intro : generateFallbackIntro(project.panels, channel),
+        outro: project.outro.trim() ? project.outro : generateFallbackOutro(project.panels, channel),
+      });
+      setNotice('Не удалось сгенерировать текст интро/аутро — пустым полям поставлен шаблон.');
+    } finally {
+      setIsGeneratingIntro(false);
+    }
+  };
+
+  /** Модалка «Интро/Аутро» → «Озвучить»: TTS только для intro/outro. */
+  const handleVoiceIntroOutro = async () => {
+    if (!project) return;
+    if (!project.intro.trim() && !project.outro.trim()) {
+      setNotice('Озвучивать нечего: тексты интро и аутро пустые.');
+      return;
+    }
+    const ttsId = resolveTTSProviderId(project.settings.ttsProvider, getSettings().defaultTTSProvider);
+    if (!ttsId) {
+      setNotice('Не выбран TTS-провайдер. Откройте «Голоса» и выберите его.');
+      return;
+    }
+    setVoicingIntroOutro(true);
+    setAudioProgress('Озвучка интро/аутро…');
+    try {
+      const result = await generateAllAudio({
+        projectId: project.id,
+        panels: [],
+        voiceAssignments: project.voiceAssignments,
+        intro: project.intro,
+        outro: project.outro,
+        ttsProviderId: ttsId,
+        model: project.settings.ttsModel || undefined,
+        language: project.settings.ttsLanguage || 'ru',
+        speed: project.settings.ttsSpeed,
+        previousTexts: {},
+      });
+      if (result.introAudio) setIntroAudio(result.introAudio);
+      if (result.outroAudio) setOutroAudio(result.outroAudio);
+      if (result.errors.length > 0) {
+        setAudioError(result.errors[0] + (result.errors.length > 1 ? `\nЕщё ошибок: ${result.errors.length - 1}.` : ''));
+      } else {
+        setAudioProgress('Интро/аутро озвучены, сохранено в OPFS.');
+        setTimeout(() => setAudioProgress(''), 3000);
+      }
+    } catch (e: unknown) {
+      setAudioError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setVoicingIntroOutro(false);
+    }
+  };
+
+  /** Модалка «Интро/Аутро» → «Очистить»: тексты в ноль, длительности — дефолт. */
+  const handleClearIntroOutro = () => {
+    applyIntroOutroChange({ intro: '', outro: '', introDuration: 8, outroDuration: 5 });
   };
 
   /**
@@ -659,8 +759,9 @@ export default function EditorPage() {
    * — каждая реплика становится панелью на своём изображении («Изображение N»);
    * — пол (Жен.)/(Муж.) сохраняется на персонаже и используется для автоподбора голоса;
    * — пауза между репликами = 0,6 с (правило 3): после чтения — переход к следующему изображению;
-   * — без лишнего текста (правило 5): интро/аутро очищаются.
-   * Старое аудио удаляется — иначе в экспорт попала бы чужая озвучка старых реплик.
+   * — без лишнего текста (правило 5): сценарий управляет только панелями,
+   *   интро/аутро проекта СОХРАНЯЮТСЯ (v1.3.16) — это отдельные сущности.
+   * Старое аудио панелей удаляется — иначе в экспорт попала бы чужая озвучка.
    */
   const handleApplyScenario = async (lines: ScenarioLine[], translatedTexts: string[] | null, notice?: string) => {
     if (!project) return;
@@ -673,27 +774,15 @@ export default function EditorPage() {
     const appliedLines = lines.map((line, i) =>
       translatedTexts?.[i] ? { ...line, text: translatedTexts[i] } : line
     );
-    const { panels: newPanels, warnings } = scenarioToPanels(appliedLines, images.length);
 
-    // Персонажи: существующие сохраняем, пол обновляем/добавляем
-    const charMap = new Map(project.characters.map(c => [c.name, { ...c }]));
-    for (const line of appliedLines) {
-      const existing = charMap.get(line.character);
-      if (existing) {
-        if (line.gender) existing.gender = line.gender;
-      } else {
-        charMap.set(line.character, {
-          name: line.character,
-          appearance: '',
-          voiceId: '',
-          emotion: 'neutral',
-          gender: line.gender ?? undefined,
-        });
-      }
-    }
-    const characters = Array.from(charMap.values());
-
-    // Голоса: у персонажа с известным полом и без назначенного голоса подбираем по полу
+    // Голоса: у персонажа с известным полом и без назначенного голоса подбираем по полу.
+    // Персонажи берём из чистого слияния (applyScenarioToProject) — там же
+    // считается остальное; вызов дешёвый, второй проход ниже — с финальными голосами.
+    const prePatch = applyScenarioToProject(project, appliedLines, {
+      imagesCount: images.length,
+      panelGap: SCENARIO_GAP_SECONDS,
+      voiceAssignments: project.voiceAssignments,
+    });
     const voiceAssignments = { ...project.voiceAssignments };
     try {
       const ttsId = resolveTTSProviderId(project.settings.ttsProvider, getSettings().defaultTTSProvider);
@@ -701,7 +790,7 @@ export default function EditorPage() {
       const keys = getAllKeys();
       if (provider && keys[ttsId]) {
         const voices = await provider.getVoices(keys[ttsId]);
-        for (const char of characters) {
+        for (const char of prePatch.characters) {
           if (!char.gender || voiceAssignments[char.name]) continue;
           const match = voices.find(v => v.gender === char.gender) || voices.find(v => v.gender === 'neutral');
           if (match) voiceAssignments[char.name] = match.id;
@@ -721,41 +810,32 @@ export default function EditorPage() {
     setAudioFull(new Map());
     setAudioDurations(new Map());
 
-    const settings = { ...project.settings, panelGap: SCENARIO_GAP_SECONDS };
-    // Сценарий на этом этапе ещё очищает интро/аутро (правило 5) — SRT
-    // собирается из тех же значений, что будут записаны в проект.
-    const { timeline, srt } = rebuildSrt({
-      panels: newPanels,
-      audioDurations: new Map(), // старое аудио удалено — только оценки
-      voiceAssignments,
-      intro: '',
-      outro: '',
-      introDuration: 0,
-      outroDuration: 0,
+    // Итоговое обновление: панели + таймлайн/SRT из ТЕКУЩИХ интро/аутро
+    // проекта (они не очищаются).
+    const patch = applyScenarioToProject(project, appliedLines, {
+      imagesCount: images.length,
       panelGap: SCENARIO_GAP_SECONDS,
+      voiceAssignments,
     });
+    const settings = { ...project.settings, panelGap: SCENARIO_GAP_SECONDS };
 
     updateProject({
-      panels: newPanels,
-      characters,
+      panels: patch.panels,
+      characters: patch.characters,
       voiceAssignments,
       settings,
-      intro: '',
-      outro: '',
-      introDuration: 0,
-      outroDuration: 0,
-      timeline,
-      srt,
+      timeline: patch.timeline,
+      srt: patch.srt,
       audioDurations: {},
       audioTexts: {},
     });
-    if (newPanels.length > 0) {
-      setSelectedId(newPanels[0].id);
+    if (patch.panels.length > 0) {
+      setSelectedId(patch.panels[0].id);
       setCurrentPanelIdx(0);
     }
     setShowScenario(false);
     // Без alert: в встроенном превью диалоги могут быть запрещены браузером.
-    const messages = [notice, ...warnings].filter(Boolean).join('\n');
+    const messages = [notice, ...patch.warnings].filter(Boolean).join('\n');
     if (messages) setNotice(messages);
   };
 
@@ -986,6 +1066,9 @@ export default function EditorPage() {
           <button onClick={() => setShowScenario(true)} className="h-8 px-3 rounded-[6px] bg-[#16161A] border border-[#26262C] text-xs hover:bg-[#1E1E23] transition-colors">
             Сценарий
           </button>
+          <button onClick={() => setShowIntroOutro(true)} className="h-8 px-3 rounded-[6px] bg-[#16161A] border border-[#26262C] text-xs hover:bg-[#1E1E23] transition-colors">
+            Интро/Аутро
+          </button>
           <button onClick={() => setShowVoices(true)} className="h-8 px-3 rounded-[6px] bg-[#16161A] border border-[#26262C] text-xs hover:bg-[#1E1E23] transition-colors">
             Голоса
           </button>
@@ -1155,6 +1238,21 @@ export default function EditorPage() {
         onSettingsChange={(patch) => updateProject({ settings: { ...project.settings, ...patch } })}
         onApply={handleApplyScenario}
         onTranslate={handleTranslateScenario}
+      />
+
+      <IntroOutroModal
+        open={showIntroOutro}
+        onClose={() => setShowIntroOutro(false)}
+        intro={project.intro}
+        outro={project.outro}
+        introDuration={project.introDuration}
+        outroDuration={project.outroDuration}
+        onApply={(patch) => { applyIntroOutroChange(patch); setShowIntroOutro(false); }}
+        onGenerateAI={() => void handleIntroOutroAI()}
+        onVoice={() => void handleVoiceIntroOutro()}
+        onClear={handleClearIntroOutro}
+        generating={isGeneratingIntro}
+        voicing={voicingIntroOutro}
       />
 
       <VoicesModal
