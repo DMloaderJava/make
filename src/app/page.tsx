@@ -71,15 +71,9 @@ export default function HomePage() {
       return;
     }
     if (!apiKey) {
-      // Без ключа vision-анализ невозможен, но проект создавать можно:
-      // панели добавятся позже — например, через «Сценарий» (он без LLM работает).
-      const proceed = confirm(
-        `Ключ для ${provider.name} не добавлен — AI-разбор панелей не запустится.\n\nСоздать проект без разбора и открыть редактор (сценарий можно добавить вручную через «Сценарий»)?`
-      );
-      if (!proceed) {
-        router.push('/settings');
-        return;
-      }
+      // Без ключа vision-анализ невозможен, а dialog во встроенном превью может
+      // быть запрещён браузером — поэтому спрашиваем ничего: проект создаётся
+      // без разбора, панели добавляются через «Сценарий» (он работает без LLM).
       setIsProcessing(true);
       setProgress({ current: 0, total: files.length, stage: 'Создание проекта...' });
       try {
@@ -177,7 +171,7 @@ export default function HomePage() {
     try {
       setIsProcessing(true);
       setProgress({ current: 0, total: 3, stage: 'Подготовка демо...' });
-      const urls = ['/demo-images/scene-1.png', '/demo-images/scene-2.png', '/demo-images/scene-3.png'];
+      const urls = ['/demo-images/scene-1.jpg', '/demo-images/scene-2.jpg', '/demo-images/scene-3.jpg'];
       const blobs: Blob[] = [];
       for (let i = 0; i < urls.length; i++) {
         const res = await fetch(urls[i]);

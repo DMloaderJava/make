@@ -19,8 +19,8 @@ interface ScenarioModalProps {
   imagesCount: number;
   /** Код языка озвучки проекта (ru/en/...) — на него переводятся реплики. */
   ttsLanguage: string;
-  /** Применить разобранный сценарий; translatedTexts — уже переведённые реплики (null — без перевода). */
-  onApply: (lines: ScenarioLine[], translatedTexts: string[] | null) => Promise<void> | void;
+  /** Применить разобранный сценарий; translatedTexts — уже переведённые реплики (null — без перевода); notice — текст для баннера. */
+  onApply: (lines: ScenarioLine[], translatedTexts: string[] | null, notice?: string) => Promise<void> | void;
   /** Перевести реплики на язык озвучки. Бросает ошибку, если LLM недоступен. */
   onTranslate: (texts: string[]) => Promise<string[]>;
 }
@@ -56,21 +56,20 @@ export function ScenarioModal({ open, onClose, imagesCount, ttsLanguage, onApply
     setApplying(true);
     try {
       // Правило 2: реплики переводятся на язык озвучки. Если LLM недоступна —
-      // спрашиваем, применять ли без перевода, вместо тихого пропуска.
+      // не блокируем dialog'ом (в встроенном превью он может быть запрещён),
+      // а применяем без перевода и показываем причину баннером в редакторе.
       let translated: string[] | null = null;
+      let notice: string | undefined;
       setTranslating(true);
       try {
         translated = await onTranslate(parsed.lines.map(l => l.text));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        const proceed = confirm(
-          `Перевод на ${languageName} не удался:\n${message}\n\nПрименить сценарий без перевода?`
-        );
-        if (!proceed) return;
+        notice = `Перевод на ${languageName} не выполнен: ${message}\nСценарий применён без перевода — реплики можно отредактировать в панели ниже таймлайна.`;
       } finally {
         setTranslating(false);
       }
-      await onApply(parsed.lines, translated);
+      await onApply(parsed.lines, translated, notice);
     } finally {
       setApplying(false);
     }

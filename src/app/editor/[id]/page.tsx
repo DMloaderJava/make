@@ -87,6 +87,8 @@ export default function EditorPage() {
   const [audioProgress, setAudioProgress] = useState('');
   // Обрезанные реплики/сдвиги аудио при экспорте — то, что нельзя показывать только в консоли.
   const [audioWarnings, setAudioWarnings] = useState<string[]>([]);
+  // Служебное уведомление (сценарий: почему не переведено, куда клампилось изображение).
+  const [notice, setNotice] = useState<string | null>(null);
   const [audioError, setAudioError] = useState<string | null>(null);
   const [audioDone, setAudioDone] = useState(0);
   // Число панелей в текущем прогоне: при точечной переозвучке это НЕ project.panels.length,
@@ -614,7 +616,7 @@ export default function EditorPage() {
    * — без лишнего текста (правило 5): интро/аутро очищаются.
    * Старое аудио удаляется — иначе в экспорт попала бы чужая озвучка старых реплик.
    */
-  const handleApplyScenario = async (lines: ScenarioLine[], translatedTexts: string[] | null) => {
+  const handleApplyScenario = async (lines: ScenarioLine[], translatedTexts: string[] | null, notice?: string) => {
     if (!project) return;
     const appliedLines = lines.map((line, i) =>
       translatedTexts?.[i] ? { ...line, text: translatedTexts[i] } : line
@@ -691,9 +693,9 @@ export default function EditorPage() {
       setCurrentPanelIdx(0);
     }
     setShowScenario(false);
-    if (warnings.length > 0) {
-      alert(warnings.join('\n'));
-    }
+    // Без alert: в встроенном превью диалоги могут быть запрещены браузером.
+    const messages = [notice, ...warnings].filter(Boolean).join('\n');
+    if (messages) setNotice(messages);
   };
 
   const handleExport = async (type: 'mp4' | 'mp3' | 'srt' | 'seo' | 'all') => {
@@ -922,6 +924,21 @@ export default function EditorPage() {
             </div>
             <button
               onClick={() => setAudioWarnings([])}
+              className="h-6 px-2 rounded-[6px] border border-[#3A2E14] text-[11px] text-[#C9B27A] hover:bg-[#262010] transition-colors"
+            >
+              Понятно
+            </button>
+          </div>
+        </div>
+      )}
+
+      {notice && (
+        <div className="border-b border-[#3A2E14] bg-[#1E1A10] px-4 py-2" role="status" aria-live="polite">
+          <div className="max-w-[960px] mx-auto flex items-start gap-3">
+            <span className="text-[13px] leading-5 text-[#E8B44C]" aria-hidden="true">ℹ</span>
+            <p className="flex-1 text-[11px] leading-4 text-[#C9B27A] break-words whitespace-pre-wrap">{notice}</p>
+            <button
+              onClick={() => setNotice(null)}
               className="h-6 px-2 rounded-[6px] border border-[#3A2E14] text-[11px] text-[#C9B27A] hover:bg-[#262010] transition-colors"
             >
               Понятно
