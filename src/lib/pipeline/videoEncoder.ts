@@ -7,6 +7,7 @@
 
 import { SyncTimeline } from '../storage/db';
 import { getKenBurnsParams, sameImageSpan } from './buildTimeline';
+import { drawContain } from './draw';
 import { appendPlacements, measureBlobDurations, stackBlobsBackToBack, type AudioPlacement } from './audioMix';
 import { createStripSceneFromMedia, type StripScene } from './mangaStrip';
 
@@ -394,7 +395,7 @@ export class WebCodecsBackend implements RenderBackend {
     const img = options.images[currentPanel.imageIndex] ? loadedImages.get(options.images[currentPanel.imageIndex]) : null;
     if (img) {
       if (isFullFrame) {
-        this.drawContain(ctx, img, w, h);
+        drawContain(ctx, img, w, h);
       } else {
         // Прогресс камеры — по группе соседних панелей одного изображения,
         // направление — с начала группы: зум не «скачет» между панелями.
@@ -525,21 +526,6 @@ export class WebCodecsBackend implements RenderBackend {
     }
     ctx.drawImage(img, ox, oy, dw, dh);
     ctx.globalAlpha = 1;
-  }
-
-  /** Fit-contain: изображение целиком в кадре (letterbox) — для fullFrame-панелей. */
-  private drawContain(ctx: CanvasRenderingContext2D, img: HTMLImageElement, w: number, h: number) {
-    const imgAspect = img.width / img.height;
-    const canvasAspect = w / h;
-    let dw: number, dh: number;
-    if (imgAspect > canvasAspect) {
-      dw = w;
-      dh = w / imgAspect;
-    } else {
-      dh = h;
-      dw = h * imgAspect;
-    }
-    ctx.drawImage(img, (w - dw) / 2, (h - dh) / 2, dw, dh);
   }
 
   private drawCoverWithKenBurns(ctx: CanvasRenderingContext2D, img: HTMLImageElement, w: number, h: number, alpha: number, scale: number, xOff: number, yOff: number) {

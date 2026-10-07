@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { PanelData } from '@/lib/pipeline/extractPanels';
 import { sameImageSpan } from '@/lib/pipeline/buildTimeline';
+import { drawContain } from '@/lib/pipeline/draw';
 import { SyncTimeline } from '@/lib/storage/db';
 import { STRIP_DEFAULTS, createStripSceneFromMedia, pageIndexAtScroll, resolveStripViewport } from '@/lib/pipeline/mangaStrip';
 
@@ -132,10 +133,7 @@ export function Preview({
       const img = loaded.get(images[currentPanel.imageIndex]);
       ctx.fillStyle = '#0B0B0C';
       ctx.fillRect(0, 0, w, h);
-      if (img) {
-        const { dw, dh, ox, oy } = fitContain(img, w, h);
-        ctx.drawImage(img, ox, oy, dw, dh);
-      }
+      if (img) drawContain(ctx, img, w, h);
       ctx.fillStyle = 'rgba(11,11,12,0.25)';
       ctx.fillRect(0, 0, w, h);
       drawDialogue(ctx, w, h, currentPanel.dialogue, currentPanel.character);
@@ -253,21 +251,6 @@ export function Preview({
       </div>
     </div>
   );
-}
-
-/** Fit-contain: изображение целиком в кадре, центрировано (letterbox). */
-function fitContain(img: HTMLImageElement, w: number, h: number): { dw: number; dh: number; ox: number; oy: number } {
-  const imgAspect = img.width / img.height;
-  const canvasAspect = w / h;
-  let dw: number, dh: number;
-  if (imgAspect > canvasAspect) {
-    dw = w;
-    dh = w / imgAspect;
-  } else {
-    dh = h;
-    dw = h * imgAspect;
-  }
-  return { dw, dh, ox: (w - dw) / 2, oy: (h - dh) / 2 };
 }
 
 /** Плашка с репликой — общая для обоих режимов. */

@@ -7,6 +7,7 @@
 
 import { SyncTimeline } from '../storage/db';
 import { getKenBurnsParams, sameImageSpan } from './buildTimeline';
+import { drawContain } from './draw';
 import { createPlacementScheduler, userFacingOverlaps, type AudioPlacement, type PlacementScheduler } from './audioMix';
 import { frameTime, waitForStart } from './renderClock';
 import { createStripSceneFromMedia, type StripScene } from './mangaStrip';
@@ -326,7 +327,7 @@ function renderPanel(
 
   if (img) {
     if (isFullFrame) {
-      drawImageContain(ctx, img, w, h);
+      drawContain(ctx, img, w, h);
     } else {
       // Прогресс камеры — по группе соседних панелей одного изображения,
       // направление — с начала группы: зум не «скачет» между панелями страницы.
@@ -476,21 +477,6 @@ function renderSubtitle(ctx: CanvasRenderingContext2D, w: number, h: number, srt
   ctx.fillStyle = '#fff';
   ctx.textAlign = 'center';
   ctx.fillText(current.text, w / 2, h - 55);
-}
-
-/** Fit-contain: изображение целиком в кадре (letterbox) — для fullFrame-панелей. */
-function drawImageContain(ctx: CanvasRenderingContext2D, img: HTMLImageElement, w: number, h: number) {
-  const imgAspect = img.width / img.height;
-  const canvasAspect = w / h;
-  let drawWidth: number, drawHeight: number;
-  if (imgAspect > canvasAspect) {
-    drawWidth = w;
-    drawHeight = w / imgAspect;
-  } else {
-    drawHeight = h;
-    drawWidth = h * imgAspect;
-  }
-  ctx.drawImage(img, (w - drawWidth) / 2, (h - drawHeight) / 2, drawWidth, drawHeight);
 }
 
 function drawImageCover(ctx: CanvasRenderingContext2D, img: HTMLImageElement, w: number, h: number, alpha: number) {

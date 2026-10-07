@@ -205,7 +205,9 @@ export default function EditorPage() {
         if (!isScenarioEntry) {
           const keys = getAllKeys();
           const hasLLMKey = !!keys[storedLLMProvider.id] || (storedLLMProvider.id === 'gemini' && !!keys['google-ai']);
-          if (!hasLLMKey) {
+          // Только для «голого» проекта: если панели уже есть (ключ удалили
+          // после разбора), баннером не спамим.
+          if (!hasLLMKey && loadedProject.panels.length === 0) {
             setNotice(`Ключ AI не добавлен — анализ изображений не запустится. Добавьте ключ в «Настройках» или используйте кнопку «Сценарий» — она работает без ключа.`);
           }
         }
