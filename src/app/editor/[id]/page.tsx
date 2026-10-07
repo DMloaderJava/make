@@ -17,7 +17,7 @@ import { getLLMProvider, resolveLLMVisionModel } from '@/lib/providers/llm';
 import { buildTimeline, DEFAULT_PANEL_GAP, estimateDuration, calculateTotalDuration, rebuildSrt } from '@/lib/pipeline/buildTimeline';
 import { applyScenarioToProject, serializeScenario, SCENARIO_GAP_SECONDS, type ScenarioLine } from '@/lib/pipeline/scenario';
 import { translateScenarioLines, isTranslatableLanguage } from '@/lib/pipeline/translateScenario';
-import { generateIntro, generateOutro, generateFallbackIntro, generateFallbackOutro } from '@/lib/pipeline/generateIntro';
+import { generateIntro, generateOutro, generateFallbackIntro, generateFallbackOutro, resolveChannelName } from '@/lib/pipeline/generateIntro';
 import { formatSEOPackage, generateSEO, generateFallbackSEO } from '@/lib/pipeline/generateSEO';
 import { generateAllAudio } from '@/lib/pipeline/generateAudio';
 import { resolveTTSProviderId } from '@/lib/pipeline/projectSettings';
@@ -398,13 +398,11 @@ export default function EditorPage() {
     return { provider, llmId, baseUrl, model, accountId: settings.cloudflareAccountId, settings };
   };
 
-  /**
-   * Имя канала для fallback-текстов. Пока: siteName из настроек;
-   * с v1.3.16 сюда встанет project.settings.channelName (задача 4 ТЗ).
-   */
+  /** Имя канала для fallback-текстов: project.settings.channelName →
+   *  настройки приложения → siteName → 'Manga Voice Studio'. */
   const resolveChannel = () => {
-    const app = getSettings();
-    return app.siteName?.trim() || undefined;
+    if (!project) return undefined;
+    return resolveChannelName(project, getSettings());
   };
 
   const handleGenerateIntro = async () => {

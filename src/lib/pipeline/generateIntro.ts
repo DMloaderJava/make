@@ -53,6 +53,21 @@ export async function generateOutro(
 /** Имя канала по умолчанию (когда в настройках ничего не задано). */
 export const DEFAULT_CHANNEL_NAME = 'Manga Voice Studio';
 
+/**
+ * Резолвинг имени канала для fallback-текстов (интро/аутро):
+ * project.settings.channelName → настройки приложения (channelName)
+ * → siteName → дефолт 'Manga Voice Studio'. Чистая функция — тестируется.
+ */
+export function resolveChannelName(
+  project?: { settings?: { channelName?: string } } | null,
+  app?: { channelName?: string; siteName?: string } | null
+): string {
+  return project?.settings?.channelName?.trim()
+    || app?.channelName?.trim()
+    || app?.siteName?.trim()
+    || DEFAULT_CHANNEL_NAME;
+}
+
 function pluralPanels(n: number): string {
   const m10 = n % 10;
   const m100 = n % 100;

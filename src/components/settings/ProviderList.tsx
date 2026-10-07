@@ -147,6 +147,8 @@ export function ProviderList() {
   const [testing, setTesting] = useState<Record<string, 'idle' | 'loading' | 'ok' | 'error'>>({});
   const [testErrors, setTestErrors] = useState<Record<string, string>>({});
   const [localSiteName, setLocalSiteName] = useState('');
+  const [localChannelName, setLocalChannelName] = useState('');
+  const [localChannelTagline, setLocalChannelTagline] = useState('');
   const [localIntro, setLocalIntro] = useState<number | string>('');
   const [localOutro, setLocalOutro] = useState<number | string>('');
 
@@ -172,6 +174,8 @@ export function ProviderList() {
     setSettings(s);
     setCloudflareAccountId(s.cloudflareAccountId);
     setLocalSiteName(s.siteName);
+    setLocalChannelName(s.channelName || '');
+    setLocalChannelTagline(s.channelTagline || '');
     setLocalIntro(s.introDuration);
     setLocalOutro(s.outroDuration);
     const custom = localStorage.getItem('mvs-info:custom-llm-config') || localStorage.getItem('custom-llm-config');
@@ -305,6 +309,29 @@ export function ProviderList() {
             onBlur={() => { if (localSiteName !== settings.siteName) handleSettingsSave({ siteName: localSiteName }); }}
             onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
             placeholder="Manga Voice Studio"
+            className="w-full h-8 rounded-[6px] bg-[#0B0B0C] border border-[#26262C] px-3 text-[13px] text-[#F5F5F7]"
+          />
+        </div>
+        <div className="space-y-2">
+          <label className="text-[12px] text-[#8A8A93]">Название канала</label>
+          <input
+            value={localChannelName}
+            onChange={(e) => setLocalChannelName(e.target.value)}
+            onBlur={() => { if (localChannelName !== (settings.channelName || '')) handleSettingsSave({ channelName: localChannelName }); }}
+            onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+            placeholder={settings.siteName || 'Manga Voice Studio'}
+            className="w-full h-8 rounded-[6px] bg-[#0B0B0C] border border-[#26262C] px-3 text-[13px] text-[#F5F5F7]"
+          />
+          <p className="text-[11px] text-[#8A8A93] leading-4">Для fallback-интро/аутро. Пусто — используется «Название канала/сайта».</p>
+        </div>
+        <div className="space-y-2">
+          <label className="text-[12px] text-[#8A8A93]">Подпись канала</label>
+          <input
+            value={localChannelTagline}
+            onChange={(e) => setLocalChannelTagline(e.target.value)}
+            onBlur={() => { if (localChannelTagline !== (settings.channelTagline || '')) handleSettingsSave({ channelTagline: localChannelTagline }); }}
+            onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+            placeholder="Озвученные серии манги"
             className="w-full h-8 rounded-[6px] bg-[#0B0B0C] border border-[#26262C] px-3 text-[13px] text-[#F5F5F7]"
           />
         </div>

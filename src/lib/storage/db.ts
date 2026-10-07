@@ -1,6 +1,7 @@
 import { openDB, IDBPDatabase } from 'idb';
 import { isOPFSSupported, saveProjectImage, loadProjectImageAsDataURL, deleteProjectImages } from './opfs';
 import { INFO_IDB_NAME } from './info';
+import { getSettings } from './local';
 
 const DB_NAME = INFO_IDB_NAME;
 const DB_VERSION = 3;
@@ -102,6 +103,10 @@ export interface Project {
      * следующему изображению. По умолчанию 0,3; формат сценария задаёт 0,6.
      */
     panelGap?: number;
+    /** Название канала (для fallback-интро/аутро и SEO). Пусто — настройки приложения → siteName. */
+    channelName?: string;
+    /** Подпись канала (опционально, для текстов). */
+    channelTagline?: string;
     backgroundMusic?: string;
     musicVolume: number;
   };
@@ -205,6 +210,7 @@ export async function deleteProject(id: string): Promise<void> {
 export async function createProject(name: string, images: string[] | Blob[]): Promise<Project> {
   const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const useOPFS = await isOPFSSupported();
+  const appSettings = getSettings();
   
   let imageFiles: string[] = [];
   let storedImages: string[] = [];
@@ -264,6 +270,9 @@ export async function createProject(name: string, images: string[] | Blob[]): Pr
       llmProvider: 'openrouter',
       visionModel: 'google/gemma-4-31b-it:free',
       musicVolume: 0.15,
+      // Канал: дефолты новых проектов — из настроек приложения.
+      ...(appSettings.channelName?.trim() ? { channelName: appSettings.channelName.trim() } : {}),
+      ...(appSettings.channelTagline?.trim() ? { channelTagline: appSettings.channelTagline.trim() } : {}),
     },
     createdAt: Date.now(),
     updatedAt: Date.now(),

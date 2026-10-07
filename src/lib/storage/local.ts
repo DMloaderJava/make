@@ -44,6 +44,10 @@ export interface AppSettings {
   defaultVisionModel: string;
   cloudflareAccountId: string;
   siteName: string;
+  /** Название канала (fallback-интро/аутро). Пусто — используется siteName. */
+  channelName: string;
+  /** Подпись канала (опционально). */
+  channelTagline: string;
   ctaType: 'profile' | 'description';
   backgroundMusicVolume: number;
   introDuration: number;
@@ -57,6 +61,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   defaultVisionModel: 'google/gemma-4-31b-it:free',
   cloudflareAccountId: '',
   siteName: 'Manga Voice Studio',
+  channelName: '',
+  channelTagline: '',
   ctaType: 'profile',
   backgroundMusicVolume: 0.15,
   introDuration: 8,

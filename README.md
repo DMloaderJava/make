@@ -1,4 +1,4 @@
-# Manga Voice Studio — Self-hosted озвучка манги с AI (v1.3.15)
+# Manga Voice Studio — Self-hosted озвучка манги с AI (v1.3.16)
 
 Self-hosted веб-инструмент для автоматической генерации озвученных видео из изображений (манга/комикс) с BYOK, 25+ LLM и 15+ TTS провайдерами, OPFS кэшем, WebCodecs MP4 и SEO-пакетом.
 
@@ -769,8 +769,15 @@ SRT собирается в единой точке — `rebuildSrt` (`lib/pipel
 
 В превью интро проигрывается перед первой панелью, аутро — после последней;
 в SRT они — отдельные сегменты (`generateSRT` сдвигает панели на
-`introDuration`). Имя канала для fallback-текстов берётся из настроек
-(`siteName`, далее — настраиваемое `channelName`).
+`introDuration`).
+
+**Канал** — настройки (карточка настроек на `/settings`): «Название канала»
+(`AppSettings.channelName`, пустое — как «Название канала/сайта» `siteName`)
+и «Подпись канала» (`channelTagline`). Имя канала резолвится
+`resolveChannelName` (`lib/pipeline/generateIntro.ts`):
+`project.settings.channelName` → настройки приложения → `siteName` →
+дефолт «Manga Voice Studio»; используется в fallback-интро/аутро.
+Новые проекты копируют канал из настроек в `project.settings` при создании.
 
 ## 🛣️ Roadmap
 
@@ -781,6 +788,9 @@ SRT собирается в единой точке — `rebuildSrt` (`lib/pipel
 - [ ] v1.4: Zustand editor + undo/redo + .mvproj
 - [x] v1.3.3: режим ленты (manga strip / webtoon scroll)
 - [x] v1.3.15: сценарий — текстовый формат озвучки в редакторе (Изображение N + Персонаж (Жен./Муж.): реплика)
+- [x] v1.3.16: лента синхронна с таймлайном (scroll ⇄ seek); SRT из единого
+  rebuildSrt с интро/аутро и пометкой «черновик»; интро/аутро — модалка и
+  отдельная сущность (сценарий их не чистит); название канала в настройках
 - [ ] v1.5: Фоновая музыка + batch queue persist
 - [ ] v1.6: Docker self-hosted
 
