@@ -197,9 +197,20 @@ export default function EditorPage() {
           setSelectedId('intro');
         }
         setLoadResult({ id, attempt });
-        // «Тест сценария» / загрузка без ключа приходят с ?scenario=1 —
-        // сразу открываем модалку сценария.
-        if (new URLSearchParams(window.location.search).get('scenario') === '1') {
+        // Без ключа провайдера vision-анализ не запустится — показываем это
+        // баннером (alert/confirm во встроенном превью блокируются). Для
+        // явного «Тест сценария» (?scenario=1) баннер не нужен: пользователь
+        // уже выбрал сценарный путь, и модалка откроется сама.
+        const isScenarioEntry = new URLSearchParams(window.location.search).get('scenario') === '1';
+        if (!isScenarioEntry) {
+          const keys = getAllKeys();
+          const hasLLMKey = !!keys[storedLLMProvider.id] || (storedLLMProvider.id === 'gemini' && !!keys['google-ai']);
+          if (!hasLLMKey) {
+            setNotice(`Ключ AI не добавлен — анализ изображений не запустится. Добавьте ключ в «Настройках» или используйте кнопку «Сценарий» — она работает без ключа.`);
+          }
+        }
+        // «Тест сценария» приходит с ?scenario=1 — сразу открываем модалку.
+        if (isScenarioEntry) {
           setShowScenario(true);
         }
       } catch (error) {

@@ -71,14 +71,15 @@ export default function HomePage() {
       return;
     }
     if (!apiKey) {
-      // Без ключа vision-анализ невозможен, а dialog во встроенном превью может
-      // быть запрещён браузером — поэтому спрашиваем ничего: проект создаётся
-      // без разбора, панели добавляются через «Сценарий» (он работает без LLM).
+      // Без ключа vision-анализ невозможен. Диалог во встроенном превью может
+      // быть запрещён, поэтому проект создаётся без разбора — БЕЗ ?scenario=1:
+      // редактор сам покажет баннер «ключ не добавлен», и пользователь видит
+      // и обычное дерево проекта, и кнопку «Сценарий» (работает без LLM).
       setIsProcessing(true);
       setProgress({ current: 0, total: files.length, stage: 'Создание проекта...' });
       try {
         const project = await createProject(`Проект ${new Date().toLocaleDateString('ru-RU')}`, files as any);
-        router.push(`/editor/${project.id}?scenario=1`);
+        router.push(`/editor/${project.id}`);
       } catch (e: any) {
         alert(`Ошибка: ${e.message}`);
       } finally {

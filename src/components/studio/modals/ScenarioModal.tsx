@@ -90,6 +90,7 @@ export function ScenarioModal({ open, onClose, imagesCount, existingPanels, ttsL
   const handleApply = async () => {
     if (!canApply || !parsed) return;
     if (needsReplaceConfirm) return; // защита: кнопка и так disabled
+    if (imagesCount === 0) return; // защита: кнопка disabled, пояснение над ней
     setApplying(true);
     try {
       // Правило 2: реплики переводятся на язык озвучки. Если LLM недоступна —
@@ -187,6 +188,12 @@ export function ScenarioModal({ open, onClose, imagesCount, existingPanels, ttsL
             </label>
           )}
 
+          {imagesCount === 0 && (
+            <p className="text-[11px] leading-4 text-[#E86C4C]">
+              В проекте нет изображений — сценарий применять не к чему. Загрузите хотя бы одно изображение.
+            </p>
+          )}
+
           <div className="flex flex-wrap items-center gap-2">
             <Button variant="outline" size="sm" onClick={() => setText(SCENARIO_EXAMPLE)} className="h-8 text-xs bg-[#0B0B0C] border-[#26262C] hover:bg-[#1E1E23]">
               Пример
@@ -202,7 +209,8 @@ export function ScenarioModal({ open, onClose, imagesCount, existingPanels, ttsL
             <Button
               size="sm"
               onClick={() => void handleApply()}
-              disabled={!canApply || applying || translating || needsReplaceConfirm}
+              disabled={!canApply || applying || translating || needsReplaceConfirm || imagesCount === 0}
+              title={imagesCount === 0 ? 'В проекте нет изображений — сначала загрузите хотя бы одно' : undefined}
               className="ml-auto h-8 text-xs bg-[#E8B44C] text-[#0B0B0C] hover:bg-[#B88A2E] disabled:opacity-50"
             >
               {translating ? 'Перевод реплик…' : applying ? 'Применение…' : `Применить к проекту${parsed?.lines.length ? ` · ${parsed.lines.length} реплик` : ''}`}
