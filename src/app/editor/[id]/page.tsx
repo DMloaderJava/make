@@ -195,6 +195,11 @@ export default function EditorPage() {
           setSelectedId('intro');
         }
         setLoadResult({ id, attempt });
+        // «Тест сценария» / загрузка без ключа приходят с ?scenario=1 —
+        // сразу открываем модалку сценария.
+        if (new URLSearchParams(window.location.search).get('scenario') === '1') {
+          setShowScenario(true);
+        }
       } catch (error) {
         if (!cancelled) {
           const message = error instanceof Error ? error.message : String(error);

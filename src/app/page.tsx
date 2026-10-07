@@ -70,7 +70,29 @@ export default function HomePage() {
       router.push('/settings');
       return;
     }
-    if (!apiKey) { alert(`Добавь ключ для ${provider.name} в Провайдерах`); router.push('/settings'); return; }
+    if (!apiKey) {
+      // Без ключа vision-анализ невозможен, но проект создавать можно:
+      // панели добавятся позже — например, через «Сценарий» (он без LLM работает).
+      const proceed = confirm(
+        `Ключ для ${provider.name} не добавлен — AI-разбор панелей не запустится.\n\nСоздать проект без разбора и открыть редактор (сценарий можно добавить вручную через «Сценарий»)?`
+      );
+      if (!proceed) {
+        router.push('/settings');
+        return;
+      }
+      setIsProcessing(true);
+      setProgress({ current: 0, total: files.length, stage: 'Создание проекта...' });
+      try {
+        const project = await createProject(`Проект ${new Date().toLocaleDateString('ru-RU')}`, files as any);
+        router.push(`/editor/${project.id}?scenario=1`);
+      } catch (e: any) {
+        alert(`Ошибка: ${e.message}`);
+      } finally {
+        setIsProcessing(false);
+        setProgress(null);
+      }
+      return;
+    }
 
     setIsProcessing(true);
     setProgress({ current: 0, total: dataUrls.length, stage: 'Анализ...' });
@@ -146,6 +168,33 @@ export default function HomePage() {
     }
   };
 
+  /**
+   * Демо сценария: локальные изображения из /demo-images (без внешних ссылок),
+   * проект без панелей — сценарий добавляется в редакторе. Модалка сценария
+   * открывается автоматически по ?scenario=1.
+   */
+  const handleScenarioDemo = async () => {
+    try {
+      setIsProcessing(true);
+      setProgress({ current: 0, total: 3, stage: 'Подготовка демо...' });
+      const urls = ['/demo-images/scene-1.png', '/demo-images/scene-2.png', '/demo-images/scene-3.png'];
+      const blobs: Blob[] = [];
+      for (let i = 0; i < urls.length; i++) {
+        const res = await fetch(urls[i]);
+        if (!res.ok) throw new Error(`Не удалось загрузить демо-изображение ${i + 1} (${urls[i]})`);
+        blobs.push(await res.blob());
+        setProgress({ current: i + 1, total: 3, stage: 'Подготовка демо...' });
+      }
+      const project = await createProject(`Сценарий · демо ${new Date().toLocaleDateString('ru-RU')}`, blobs as any);
+      router.push(`/editor/${project.id}?scenario=1`);
+    } catch (e: any) {
+      alert(`Демо ошибка: ${e.message}`);
+    } finally {
+      setIsProcessing(false);
+      setProgress(null);
+    }
+  };
+
   const handleDelete = async (e: React.MouseEvent, id: string) => {
     e.preventDefault();
     e.stopPropagation();
@@ -185,7 +234,8 @@ export default function HomePage() {
                 <div className="rounded-[16px] border border-dashed border-[#26262C] bg-[#16161A] p-2">
                   <ImageUploader onUpload={handleUpload} multiple maxFiles={20} />
                 </div>
-                <div className="flex justify-center gap-2">
+                <div className="flex flex-wrap justify-center gap-x-4 gap-y-1">
+                  <button onClick={handleScenarioDemo} className="text-xs text-[#E8B44C] hover:text-[#F5F5F7] transition-colors">Тест сценария (демо-изображения) →</button>
                   <button onClick={handleDemo} className="text-xs text-[#8A8A93] hover:text-[#F5F5F7] transition-colors">Попробовать демо без ключей →</button>
                 </div>
               </div>
