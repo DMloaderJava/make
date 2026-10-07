@@ -6,7 +6,8 @@
  */
 
 import { SyncTimeline } from '../storage/db';
-import { getKenBurnsParams } from './buildTimeline';
+import { getKenBurnsParams, sameImageSpan } from './buildTimeline';
+import { drawContain } from './draw';
 import { appendPlacements, measureBlobDurations, stackBlobsBackToBack, type AudioPlacement } from './audioMix';
 import { createStripSceneFromMedia, type StripScene } from './mangaStrip';
 
@@ -31,7 +32,7 @@ export interface RenderOptions {
   /** Отступ между страницами ленты, px. */
   stripGap?: number;
   /** Панели проекта: нужны ленте, если в таймлайне нет imageIndex. */
-  panels?: Array<{ id: number; imageIndex: number }>;
+  panels?: Array<{ id: number; imageIndex: number; fullFrame?: boolean }>;
   /** Предупреждения об обрезанных репликах (текстом, для UI). */
   onAudioTrimmed?: (messages: string[]) => void;
   onProgress?: (progress: number) => void;
@@ -387,15 +388,28 @@ export class WebCodecsBackend implements RenderBackend {
     const currentPanel = options.timeline.find(t => time >= t.audioStart && time < t.audioEnd) || options.timeline[options.timeline.length - 1];
     if (!currentPanel) return;
 
+    // «Весь кадр» (сценарий): contain + letterbox, камера выключена,
+    // bbox-обводку и бейдж персонажа не рисуем.
+    const isFullFrame = options.panels?.find(p => p.id === currentPanel.panelId)?.fullFrame === true;
+
     const img = options.images[currentPanel.imageIndex] ? loadedImages.get(options.images[currentPanel.imageIndex]) : null;
     if (img) {
-      const idx = options.timeline.indexOf(currentPanel);
-      const progress = Math.min(1, Math.max(0, (time - currentPanel.audioStart) / (currentPanel.audioEnd - currentPanel.audioStart || 1)));
-      const kb = getKenBurnsParams(idx);
-      const scale = kb.startScale + (kb.endScale - kb.startScale) * progress;
-      const xOff = (kb.startX + (kb.endX - kb.startX) * progress) * w;
-      const yOff = (kb.startY + (kb.endY - kb.startY) * progress) * h;
-      this.drawCoverWithKenBurns(ctx, img, w, h, 1, scale, xOff, yOff);
+      if (isFullFrame) {
+        drawContain(ctx, img, w, h);
+      } else {
+        // Прогресс камеры — по группе соседних панелей одного изображения,
+        // направление — с начала группы: зум не «скачет» между панелями.
+        const span = sameImageSpan(options.timeline, currentPanel.panelId);
+        const idx = span ? span.startIndex : options.timeline.indexOf(currentPanel);
+        const progress = span
+          ? Math.min(1, Math.max(0, (time - span.start) / (span.end - span.start || 1)))
+          : 0;
+        const kb = getKenBurnsParams(idx);
+        const scale = kb.startScale + (kb.endScale - kb.startScale) * progress;
+        const xOff = (kb.startX + (kb.endX - kb.startX) * progress) * w;
+        const yOff = (kb.startY + (kb.endY - kb.startY) * progress) * h;
+        this.drawCoverWithKenBurns(ctx, img, w, h, 1, scale, xOff, yOff);
+      }
     }
 
     ctx.fillStyle = 'rgba(0,0,0,0.35)';

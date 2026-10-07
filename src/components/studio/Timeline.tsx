@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from 'react';
 import { SyncTimeline } from '@/lib/storage/db';
 
 interface TimelineProps {
@@ -13,9 +14,22 @@ interface TimelineProps {
   selectedId: number | 'intro' | 'outro' | null;
   introDuration?: number;
   outroDuration?: number;
+  /** Пауза между репликами (сек): сценарий ставит 0,6, дефолт 0,3 — и её можно менять. */
+  panelGap?: number;
+  onGapChange?: (gap: number) => void;
 }
 
-export function Timeline({ timeline, currentTime, duration, onSeek, onSelectPanel, onSelectIntro, onSelectOutro, selectedId, introDuration = 8, outroDuration = 5 }: TimelineProps) {
+export function Timeline({ timeline, currentTime, duration, onSeek, onSelectPanel, onSelectIntro, onSelectOutro, selectedId, introDuration = 8, outroDuration = 5, panelGap = 0.3, onGapChange }: TimelineProps) {
+  // Локальное значение ползунка: onChange двигает только его, запись в проект
+  // — по завершении жеста (иначе на каждый тик драга updateProject +
+  // buildTimeline + generateSRT + сброс дебаунса автосейва).
+  const [localGap, setLocalGap] = useState(panelGap);
+  useEffect(() => { setLocalGap(panelGap); }, [panelGap]);
+
+  const commitGap = () => {
+    if (onGapChange && Math.abs(localGap - panelGap) > 0.001) onGapChange(localGap);
+  };
+
   const formatTime = (s: number) => {
     if (!isFinite(s) || s <= 0) return '00:00';
     const m = Math.floor(s / 60);
@@ -36,9 +50,31 @@ export function Timeline({ timeline, currentTime, duration, onSeek, onSelectPane
 
   return (
     <div className="w-full space-y-2">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-3">
         <h3 className="text-[13px] font-medium text-[#F5F5F7]">Таймлайн</h3>
-        <span className="font-mono text-[11px] text-[#8A8A93]">{formatTime(currentTime)} / {formatTime(duration)}</span>
+        <div className="flex items-center gap-3">
+          {onGapChange && (
+            <label className="flex items-center gap-2" title="Пауза после реплики до перехода к следующему изображению">
+              <span className="font-mono text-[10px] text-[#8A8A93] whitespace-nowrap">
+                пауза {localGap.toFixed(2).replace(/\.?0+$/, '').replace('.', ',')} с
+              </span>
+              <input
+                type="range"
+                min={0}
+                max={1.5}
+                step={0.05}
+                value={localGap}
+                onChange={(e) => setLocalGap(Number(e.target.value))}
+                onMouseUp={commitGap}
+                onTouchEnd={commitGap}
+                onKeyUp={commitGap}
+                onBlur={commitGap}
+                className="w-24 accent-[#E8B44C]"
+              />
+            </label>
+          )}
+          <span className="font-mono text-[11px] text-[#8A8A93]">{formatTime(currentTime)} / {formatTime(duration)}</span>
+        </div>
       </div>
 
       <div className="relative h-[64px] bg-[#16161A] rounded-[10px] border border-[#26262C] overflow-hidden cursor-pointer" onClick={handleClick}>

@@ -9,11 +9,15 @@ import { ContextPanel } from '@/components/studio/ContextPanel';
 import { RenderModePanel, RENDER_DEFAULTS, type RenderSettings } from '@/components/studio/RenderModePanel';
 import { VoicesModal } from '@/components/studio/modals/VoicesModal';
 import { ExportModal } from '@/components/studio/modals/ExportModal';
+import { ScenarioModal } from '@/components/studio/modals/ScenarioModal';
+import { IntroOutroModal } from '@/components/studio/modals/IntroOutroModal';
 import { Input } from '@/components/ui/input';
 import { getAllKeys, getSettings } from '@/lib/storage/local';
 import { getLLMProvider, resolveLLMVisionModel } from '@/lib/providers/llm';
-import { buildTimeline, estimateDuration, generateSRT, calculateTotalDuration } from '@/lib/pipeline/buildTimeline';
-import { generateIntro, generateOutro, generateFallbackIntro, generateFallbackOutro } from '@/lib/pipeline/generateIntro';
+import { buildTimeline, DEFAULT_PANEL_GAP, estimateDuration, calculateTotalDuration, rebuildSrt } from '@/lib/pipeline/buildTimeline';
+import { applyScenarioToProject, serializeScenario, SCENARIO_GAP_SECONDS, type ScenarioLine } from '@/lib/pipeline/scenario';
+import { translateScenarioLines, isTranslatableLanguage } from '@/lib/pipeline/translateScenario';
+import { generateIntro, generateOutro, generateFallbackIntro, generateFallbackOutro, resolveChannelName } from '@/lib/pipeline/generateIntro';
 import { formatSEOPackage, generateSEO, generateFallbackSEO } from '@/lib/pipeline/generateSEO';
 import { generateAllAudio } from '@/lib/pipeline/generateAudio';
 import { resolveTTSProviderId } from '@/lib/pipeline/projectSettings';
@@ -21,7 +25,7 @@ import { getTTSProvider } from '@/lib/providers/tts/catalog';
 import { concatenateAudioBlobs } from '@/lib/pipeline/assembleVideo';
 import { renderVideo, checkCapabilities, BackendCapabilities } from '@/lib/pipeline/videoEncoder';
 import type { AudioPlacement } from '@/lib/pipeline/audioMix';
-import { loadProjectAudio, loadProjectIntroAudio, loadProjectOutroAudio, isOPFSSupported } from '@/lib/storage/opfs';
+import { loadProjectAudio, loadProjectIntroAudio, loadProjectOutroAudio, deleteProjectAudio, isOPFSSupported } from '@/lib/storage/opfs';
 import { estimateTotalCost } from '@/lib/validators';
 import { downloadBlob, formatTime } from '@/lib/utils';
 import { ArrowLeft, Loader2 } from 'lucide-react';
@@ -64,6 +68,9 @@ export default function EditorPage() {
     stripViewport: project?.settings.stripViewport ?? RENDER_DEFAULTS.stripViewport,
     stripGap: project?.settings.stripGap ?? RENDER_DEFAULTS.stripGap,
   };
+  // Пауза между репликами (сек): формат сценария задаёт 0,6 (правило 3),
+  // иначе — дефолт 0,3.
+  const panelGap = project?.settings.panelGap ?? DEFAULT_PANEL_GAP;
 
   const [currentTime, setCurrentTime] = useState(0);
   const currentTimeRef = useRef(0);
@@ -81,6 +88,8 @@ export default function EditorPage() {
   const [audioProgress, setAudioProgress] = useState('');
   // Обрезанные реплики/сдвиги аудио при экспорте — то, что нельзя показывать только в консоли.
   const [audioWarnings, setAudioWarnings] = useState<string[]>([]);
+  // Служебное уведомление (сценарий: почему не переведено, куда клампилось изображение).
+  const [notice, setNotice] = useState<string | null>(null);
   const [audioError, setAudioError] = useState<string | null>(null);
   const [audioDone, setAudioDone] = useState(0);
   // Число панелей в текущем прогоне: при точечной переозвучке это НЕ project.panels.length,
@@ -94,15 +103,34 @@ export default function EditorPage() {
   const [selectedId, setSelectedId] = useState<number | 'intro' | 'outro' | null>(null);
   const [showVoices, setShowVoices] = useState(false);
   const [showExport, setShowExport] = useState(false);
+  const [showScenario, setShowScenario] = useState(false);
+  const [showIntroOutro, setShowIntroOutro] = useState(false);
+  const [voicingIntroOutro, setVoicingIntroOutro] = useState(false);
   const [backendCaps, setBackendCaps] = useState<BackendCapabilities | null>(null);
   const [preferredBackend, setPreferredBackend] = useState<'auto' | 'webcodecs' | 'canvas'>('auto');
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'unsaved'>('saved');
 
+  // ЕДИНЫЙ источник времени превью: таймлайн, по которому считаются и
+  // длительность (clock), и сегменты Timeline, и траектория скролла ленты.
+  // Раньше duration строился ОТДЕЛЬНО (fresh buildTimeline), а tl брал
+  // сохранённый project.timeline — при рассинхроне часы и лента разъезжались.
+  const tl = useMemo(() => {
+    if (!project) return [];
+    return project.timeline.length > 0 ? project.timeline : buildTimeline(project.panels, audioDurations, project.voiceAssignments, project.introDuration, panelGap);
+  }, [project, audioDurations, panelGap]);
+
   const duration = useMemo(() => {
     if (!project) return 0;
-    const timeline = buildTimeline(project.panels, audioDurations, project.voiceAssignments, project.introDuration);
-    return calculateTotalDuration(timeline, project.introDuration, project.outroDuration);
-  }, [project, audioDurations]);
+    return calculateTotalDuration(tl, project.introDuration, project.outroDuration);
+  }, [project, tl]);
+
+  // SRT «черновик»: есть панели, но у хотя бы одной ещё нет реальной озвучки
+  // (нет OPFS-блоба) — тайминги собраны из оценки. После «Озвучить всё»
+  // флаг сбрасывается, SRT финализируется реальными длительностями.
+  const srtDraft = useMemo(() => {
+    if (!project || project.panels.length === 0) return false;
+    return project.panels.some(p => !audioBlobs.has(p.id));
+  }, [project, audioBlobs]);
 
   useEffect(() => {
     let cancelled = false;
@@ -188,6 +216,24 @@ export default function EditorPage() {
           setSelectedId('intro');
         }
         setLoadResult({ id, attempt });
+        // Без ключа провайдера vision-анализ не запустится — показываем это
+        // баннером (alert/confirm во встроенном превью блокируются). Для
+        // явного «Тест сценария» (?scenario=1) баннер не нужен: пользователь
+        // уже выбрал сценарный путь, и модалка откроется сама.
+        const isScenarioEntry = new URLSearchParams(window.location.search).get('scenario') === '1';
+        if (!isScenarioEntry) {
+          const keys = getAllKeys();
+          const hasLLMKey = !!keys[storedLLMProvider.id] || (storedLLMProvider.id === 'gemini' && !!keys['google-ai']);
+          // Только для «голого» проекта: если панели уже есть (ключ удалили
+          // после разбора), баннером не спамим.
+          if (!hasLLMKey && loadedProject.panels.length === 0) {
+            setNotice(`Ключ AI не добавлен — анализ изображений не запустится. Добавьте ключ в «Настройках» или используйте кнопку «Сценарий» — она работает без ключа.`);
+          }
+        }
+        // «Тест сценария» приходит с ?scenario=1 — сразу открываем модалку.
+        if (isScenarioEntry) {
+          setShowScenario(true);
+        }
       } catch (error) {
         if (!cancelled) {
           const message = error instanceof Error ? error.message : String(error);
@@ -237,25 +283,30 @@ export default function EditorPage() {
     project?.settings?.renderMode,
     project?.settings?.stripViewport,
     project?.settings?.stripGap,
+    project?.settings?.panelGap,
+    project?.settings?.chatModel,
     project?.settings?.backgroundMusic,
     project?.settings?.musicVolume,
   ]);
 
   // Playback timer.
-  // Раньше startTime брался из замыкания при старте эффекта, поэтому перемотка
-  // во время проигрывания тут же откатывалась назад. Теперь смещение читается
-  // из ref, а тик идёт через requestAnimationFrame.
+  // Дельта-тик: каждый кадр прибавляем время с прошлого кадра, а смещение
+  // читаем из ref на КАЖДОМ тике. Раньше startOffset захватывался один раз при
+  // старте эффекта — и перемотка во время проигрывания (таймлайн, колесо ленты,
+  // стрелки) откатывалась на следующем кадре: лента и часы «резали» seek.
   useEffect(() => {
     if (!isPlaying) return;
     if (!duration || duration <= 0 || !isFinite(duration)) {
       setIsPlaying(false);
       return;
     }
-    const startWall = performance.now();
-    const startOffset = currentTimeRef.current;
+    let lastWall = performance.now();
     let raf = 0;
     const tick = () => {
-      const next = startOffset + (performance.now() - startWall) / 1000;
+      const now = performance.now();
+      const dt = (now - lastWall) / 1000;
+      lastWall = now;
+      const next = currentTimeRef.current + dt;
       if (next >= duration) {
         currentTimeRef.current = duration;
         setCurrentTime(duration);
@@ -347,21 +398,28 @@ export default function EditorPage() {
     return { provider, llmId, baseUrl, model, accountId: settings.cloudflareAccountId, settings };
   };
 
+  /** Имя канала для fallback-текстов: project.settings.channelName →
+   *  настройки приложения → siteName → 'Manga Voice Studio'. */
+  const resolveChannel = () => {
+    if (!project) return undefined;
+    return resolveChannelName(project, getSettings());
+  };
+
   const handleGenerateIntro = async () => {
     if (!project) return;
     const keys = getAllKeys();
     const { provider, llmId, baseUrl, model, accountId } = resolveLLMConfig();
     const apiKey = keys[llmId] || keys[provider?.id || ''] || (llmId === 'gemini' ? keys['google-ai'] : '');
     if (!provider || !apiKey) {
-      updateProject({ intro: generateFallbackIntro() });
+      applyIntroOutroChange({ intro: generateFallbackIntro(project.panels, resolveChannel()) });
       return;
     }
     setIsGeneratingIntro(true);
     try {
       const text = await generateIntro(project.sceneDescription || project.panels.map(p => p.dialogue).join(' '), project.characters.map(c => c.name), provider, { apiKey, model, baseUrl, accountId, temperature: 0.8 });
-      updateProject({ intro: text });
+      applyIntroOutroChange({ intro: text });
     } catch {
-      updateProject({ intro: generateFallbackIntro() });
+      applyIntroOutroChange({ intro: generateFallbackIntro(project.panels, resolveChannel()) });
     } finally {
       setIsGeneratingIntro(false);
     }
@@ -373,18 +431,106 @@ export default function EditorPage() {
     const { provider, llmId, baseUrl, model, accountId, settings } = resolveLLMConfig();
     const apiKey = keys[llmId] || keys[provider?.id || ''] || (llmId === 'gemini' ? keys['google-ai'] : '');
     if (!provider || !apiKey) {
-      updateProject({ outro: generateFallbackOutro(settings.siteName) });
+      applyIntroOutroChange({ outro: generateFallbackOutro(project.panels, resolveChannel()) });
       return;
     }
     setIsGeneratingIntro(true);
     try {
-      const text = await generateOutro(settings.siteName, settings.ctaType, provider, { apiKey, model, baseUrl, accountId });
-      updateProject({ outro: text });
+      const text = await generateOutro(resolveChannel() || settings.siteName, settings.ctaType, provider, { apiKey, model, baseUrl, accountId });
+      applyIntroOutroChange({ outro: text });
     } catch {
-      updateProject({ outro: generateFallbackOutro(settings.siteName) });
+      applyIntroOutroChange({ outro: generateFallbackOutro(project.panels, resolveChannel()) });
     } finally {
       setIsGeneratingIntro(false);
     }
+  };
+
+  /**
+   * Модалка «Интро/Аутро» → «Сгенерировать AI»: оба текста по панелям.
+   * Без ключа — без alert: пустые поля заполняются шаблоном (с именем
+   * канала), заполненные — notice о причине.
+   */
+  const handleIntroOutroAI = async () => {
+    if (!project) return;
+    const keys = getAllKeys();
+    const { provider, llmId, baseUrl, model, accountId, settings } = resolveLLMConfig();
+    const apiKey = keys[llmId] || keys[provider?.id || ''] || (llmId === 'gemini' ? keys['google-ai'] : '');
+    const channel = resolveChannel();
+    if (!provider || !apiKey) {
+      const patch: { intro?: string; outro?: string } = {};
+      if (!project.intro.trim()) { patch.intro = generateFallbackIntro(project.panels, channel); }
+      if (!project.outro.trim()) { patch.outro = generateFallbackOutro(project.panels, channel); }
+      if (patch.intro || patch.outro) {
+        applyIntroOutroChange(patch);
+        setNotice('Ключ AI не добавлен — пустым интро/аутро поставлен шаблон. Для генерации по панелям добавьте ключ в «Настройках».');
+      } else {
+        setNotice('Ключ AI не добавлен — сгенерировать текст интро/аутро нельзя. Добавьте ключ в «Настройках» или введите текст вручную.');
+      }
+      return;
+    }
+    setIsGeneratingIntro(true);
+    try {
+      const [introText, outroText] = await Promise.all([
+        generateIntro(project.sceneDescription || project.panels.map(p => p.dialogue).join(' '), project.characters.map(c => c.name), provider, { apiKey, model, baseUrl, accountId, temperature: 0.8 }),
+        generateOutro(channel || settings.siteName, settings.ctaType, provider, { apiKey, model, baseUrl, accountId }),
+      ]);
+      applyIntroOutroChange({ intro: introText, outro: outroText });
+    } catch {
+      applyIntroOutroChange({
+        intro: project.intro.trim() ? project.intro : generateFallbackIntro(project.panels, channel),
+        outro: project.outro.trim() ? project.outro : generateFallbackOutro(project.panels, channel),
+      });
+      setNotice('Не удалось сгенерировать текст интро/аутро — пустым полям поставлен шаблон.');
+    } finally {
+      setIsGeneratingIntro(false);
+    }
+  };
+
+  /** Модалка «Интро/Аутро» → «Озвучить»: TTS только для intro/outro. */
+  const handleVoiceIntroOutro = async () => {
+    if (!project) return;
+    if (!project.intro.trim() && !project.outro.trim()) {
+      setNotice('Озвучивать нечего: тексты интро и аутро пустые.');
+      return;
+    }
+    const ttsId = resolveTTSProviderId(project.settings.ttsProvider, getSettings().defaultTTSProvider);
+    if (!ttsId) {
+      setNotice('Не выбран TTS-провайдер. Откройте «Голоса» и выберите его.');
+      return;
+    }
+    setVoicingIntroOutro(true);
+    setAudioProgress('Озвучка интро/аутро…');
+    try {
+      const result = await generateAllAudio({
+        projectId: project.id,
+        panels: [],
+        voiceAssignments: project.voiceAssignments,
+        intro: project.intro,
+        outro: project.outro,
+        ttsProviderId: ttsId,
+        model: project.settings.ttsModel || undefined,
+        language: project.settings.ttsLanguage || 'ru',
+        speed: project.settings.ttsSpeed,
+        previousTexts: {},
+      });
+      if (result.introAudio) setIntroAudio(result.introAudio);
+      if (result.outroAudio) setOutroAudio(result.outroAudio);
+      if (result.errors.length > 0) {
+        setAudioError(result.errors[0] + (result.errors.length > 1 ? `\nЕщё ошибок: ${result.errors.length - 1}.` : ''));
+      } else {
+        setAudioProgress('Интро/аутро озвучены, сохранено в OPFS.');
+        setTimeout(() => setAudioProgress(''), 3000);
+      }
+    } catch (e: unknown) {
+      setAudioError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setVoicingIntroOutro(false);
+    }
+  };
+
+  /** Модалка «Интро/Аутро» → «Очистить»: тексты в ноль, длительности — дефолт. */
+  const handleClearIntroOutro = () => {
+    applyIntroOutroChange({ intro: '', outro: '', introDuration: 8, outroDuration: 5 });
   };
 
   /**
@@ -470,10 +616,22 @@ export default function EditorPage() {
       if (result.introAudio) setIntroAudio(result.introAudio);
       if (result.outroAudio) setOutroAudio(result.outroAudio);
 
-      const tl = buildTimeline(project.panels, newDur, project.voiceAssignments, project.introDuration);
-      const srt = generateSRT(tl, project.intro, project.outro, project.introDuration, project.outroDuration);
       const obj: Record<number, number> = {};
       newDur.forEach((v, k) => obj[k] = v);
+      // Финальный SRT: реальные длительности озвучки + интро/аутро проекта.
+      const rebuilt = rebuildSrt({
+        panels: project.panels,
+        audioDurations: newDur,
+        voiceAssignments: project.voiceAssignments,
+        intro: project.intro,
+        outro: project.outro,
+        introDuration: project.introDuration,
+        outroDuration: project.outroDuration,
+        panelGap,
+        realDurations: obj,
+      });
+      const tl = rebuilt.timeline;
+      const srt = rebuilt.srt;
       // Обновляем снимок текстов для всех озвученных панелей (включая старые,
       // которые остались в кэше) — это база для следующей мягкой миграции.
       const audioTexts: Record<number, string> = { ...(project.audioTexts || {}) };
@@ -571,6 +729,114 @@ export default function EditorPage() {
     await runAudioGeneration([panelId], { forceRegenerate: true });
   };
 
+  /**
+   * Сценарий, правило 2: реплики переводятся на язык озвучки проекта.
+   * Бросает ошибку, если провайдер/ключ недоступны — модалка применит
+   * сценарий без перевода и покажет причину баннером.
+   */
+  const handleTranslateScenario = async (texts: string[]): Promise<string[]> => {
+    if (!project) throw new Error('Проект не загружен');
+    const { provider, llmId, baseUrl, model, accountId } = resolveLLMConfig();
+    const keys = getAllKeys();
+    const apiKey = keys[llmId] || (provider ? keys[provider.id] : '') || (llmId === 'gemini' ? keys['google-ai'] : '');
+    if (!provider || !apiKey) {
+      throw new Error(`Провайдер «${provider?.name || llmId}» не настроен: добавьте его ключ в «Настройки → Провайдеры»`);
+    }
+    const language = project.settings.ttsLanguage || 'ru';
+    if (!isTranslatableLanguage(language)) {
+      throw new Error(`Перевод недоступен для языка «${language}» — выберите конкретный язык озвучки в «Голоса».`);
+    }
+    // Приоритет: модель, выбранная в модалке «Сценарий» (chatModel),
+    // затем дефолт провайдера, и лишь потом vision-модель из resolveLLMConfig.
+    const chatModel = project.settings.chatModel || provider.defaultModel || model;
+    return translateScenarioLines(texts, language, provider, { apiKey, model: chatModel, baseUrl, accountId });
+  };
+
+  /**
+   * Применение сценария к проекту:
+   * — каждая реплика становится панелью на своём изображении («Изображение N»);
+   * — пол (Жен.)/(Муж.) сохраняется на персонаже и используется для автоподбора голоса;
+   * — пауза между репликами = 0,6 с (правило 3): после чтения — переход к следующему изображению;
+   * — без лишнего текста (правило 5): сценарий управляет только панелями,
+   *   интро/аутро проекта СОХРАНЯЮТСЯ (v1.3.16) — это отдельные сущности.
+   * Старое аудио панелей удаляется — иначе в экспорт попала бы чужая озвучка.
+   */
+  const handleApplyScenario = async (lines: ScenarioLine[], translatedTexts: string[] | null, notice?: string) => {
+    if (!project) return;
+    // Без изображений индекс изображения некуда класть: clamp в
+    // scenarioToPanels не сработает, а Preview упадёт на images[-1].
+    if (images.length === 0) {
+      setNotice('Сначала загрузите хотя бы одно изображение — без картинки сценарий применить нельзя (нечему сопоставлять реплики).');
+      return;
+    }
+    const appliedLines = lines.map((line, i) =>
+      translatedTexts?.[i] ? { ...line, text: translatedTexts[i] } : line
+    );
+
+    // Голоса: у персонажа с известным полом и без назначенного голоса подбираем по полу.
+    // Персонажи берём из чистого слияния (applyScenarioToProject) — там же
+    // считается остальное; вызов дешёвый, второй проход ниже — с финальными голосами.
+    const prePatch = applyScenarioToProject(project, appliedLines, {
+      imagesCount: images.length,
+      panelGap: SCENARIO_GAP_SECONDS,
+      voiceAssignments: project.voiceAssignments,
+    });
+    const voiceAssignments = { ...project.voiceAssignments };
+    try {
+      const ttsId = resolveTTSProviderId(project.settings.ttsProvider, getSettings().defaultTTSProvider);
+      const provider = ttsId ? getTTSProvider(ttsId) : undefined;
+      const keys = getAllKeys();
+      if (provider && keys[ttsId]) {
+        const voices = await provider.getVoices(keys[ttsId]);
+        for (const char of prePatch.characters) {
+          if (!char.gender || voiceAssignments[char.name]) continue;
+          const match = voices.find(v => v.gender === char.gender) || voices.find(v => v.gender === 'neutral');
+          if (match) voiceAssignments[char.name] = match.id;
+        }
+      }
+    } catch (error) {
+      console.warn('Не удалось подобрать голоса по полу', error);
+    }
+
+    // Старое аудио больше не соответствует тексту — удаляем (OPFS + память)
+    for (const panel of project.panels) {
+      try {
+        await deleteProjectAudio(project.id, panel.id);
+      } catch {}
+    }
+    setAudioBlobs(new Map());
+    setAudioFull(new Map());
+    setAudioDurations(new Map());
+
+    // Итоговое обновление: панели + таймлайн/SRT из ТЕКУЩИХ интро/аутро
+    // проекта (они не очищаются).
+    const patch = applyScenarioToProject(project, appliedLines, {
+      imagesCount: images.length,
+      panelGap: SCENARIO_GAP_SECONDS,
+      voiceAssignments,
+    });
+    const settings = { ...project.settings, panelGap: SCENARIO_GAP_SECONDS };
+
+    updateProject({
+      panels: patch.panels,
+      characters: patch.characters,
+      voiceAssignments,
+      settings,
+      timeline: patch.timeline,
+      srt: patch.srt,
+      audioDurations: {},
+      audioTexts: {},
+    });
+    if (patch.panels.length > 0) {
+      setSelectedId(patch.panels[0].id);
+      setCurrentPanelIdx(0);
+    }
+    setShowScenario(false);
+    // Без alert: в встроенном превью диалоги могут быть запрещены браузером.
+    const messages = [notice, ...patch.warnings].filter(Boolean).join('\n');
+    if (messages) setNotice(messages);
+  };
+
   const handleExport = async (type: 'mp4' | 'mp3' | 'srt' | 'seo' | 'all') => {
     if (!project) return;
     setIsExporting(true);
@@ -603,7 +869,7 @@ export default function EditorPage() {
           alert('Нет изображений для видео');
           return;
         }
-        const tl = project.timeline.length > 0 ? project.timeline : buildTimeline(project.panels, audioDurations, project.voiceAssignments, project.introDuration);
+        const tl = project.timeline.length > 0 ? project.timeline : buildTimeline(project.panels, audioDurations, project.voiceAssignments, project.introDuration, panelGap);
 
         // Точные позиции аудио на таймлайне: интро с 0, панели со своих audioStart,
         // аутро — после последней панели. Это чинит рассинхрон (раньше дорожка
@@ -647,7 +913,7 @@ export default function EditorPage() {
           renderMode: renderSettings.renderMode,
           stripViewport: renderSettings.stripViewport,
           stripGap: renderSettings.stripGap,
-          panels: project.panels.map(p => ({ id: p.id, imageIndex: p.imageIndex })),
+          panels: project.panels.map(p => ({ id: p.id, imageIndex: p.imageIndex, fullFrame: p.fullFrame })),
           onAudioTrimmed: (messages) => setAudioWarnings(messages),
           preferredBackend: preferredBackend === 'auto' ? undefined : preferredBackend
         });
@@ -664,10 +930,60 @@ export default function EditorPage() {
   };
 
   // Memoize timeline to avoid recalculating on every render (perf fix for 30+ panels)
-  const tl = useMemo(() => {
-    if (!project) return [];
-    return project.timeline.length > 0 ? project.timeline : buildTimeline(project.panels, audioDurations, project.voiceAssignments, project.introDuration);
-  }, [project, audioDurations]);
+  /** Сценарий текущего проекта текстом: модалка открывается с этим содержимым. */
+  const currentScenarioText = useMemo(() => {
+    if (!project || project.panels.length === 0) return '';
+    const genders: Record<string, 'female' | 'male'> = {};
+    for (const c of project.characters) {
+      if (c.gender) genders[c.name] = c.gender;
+    }
+    return serializeScenario(project.panels, genders);
+  }, [project?.panels, project?.characters]);
+
+  /**
+   * Единая пересборка таймлайна + SRT (rebuildSrt): реальными длительностями
+   * там, где озвучка готова, оценкой — нет; интро/аутро с их длительностями.
+   * Вызывается из всех мест, где время/тексты меняются (пауза, интро/аутро,
+   * сценарий, озвучка) — SRT больше не «застревает» в старом состоянии.
+   */
+  const rebuildProjectSrt = (
+    patch: Partial<Pick<Project, 'intro' | 'outro' | 'introDuration' | 'outroDuration'>> & { panelGap?: number }
+  ) => {
+    if (!project) return null;
+    const merged = { ...project, ...patch };
+    const panelGap = patch.panelGap ?? project.settings.panelGap ?? DEFAULT_PANEL_GAP;
+    return rebuildSrt({
+      panels: merged.panels,
+      audioDurations,
+      voiceAssignments: merged.voiceAssignments,
+      intro: merged.intro,
+      outro: merged.outro,
+      introDuration: merged.introDuration,
+      outroDuration: merged.outroDuration,
+      panelGap,
+      realDurations: merged.audioDurations,
+    });
+  };
+
+  /**
+   * Смена паузы между репликами (ползунок в таймлайне): пересобираем
+   * сохранённый таймлайн сразу, чтобы превью и длительность отреагировали
+   * до переозвучки.
+   */
+  const handleGapChange = (gap: number) => {
+    if (!project) return;
+    const rebuilt = rebuildProjectSrt({ panelGap: gap });
+    if (!rebuilt) return;
+    updateProject({ settings: { ...project.settings, panelGap: gap }, timeline: rebuilt.timeline, srt: rebuilt.srt });
+  };
+
+  /** Смена интро/аутро (текст или длительность) → SRT пересобирается сразу. */
+  const applyIntroOutroChange = (patch: { intro?: string; outro?: string; introDuration?: number; outroDuration?: number }) => {
+    if (!project) return;
+    const rebuilt = rebuildProjectSrt(patch);
+    if (!rebuilt) return;
+    updateProject({ ...patch, timeline: rebuilt.timeline, srt: rebuilt.srt });
+  };
 
   const handleSeek = useCallback((t: number) => {
     if (!isFinite(t)) return;
@@ -745,6 +1061,12 @@ export default function EditorPage() {
         </div>
 
         <div className="flex items-center gap-2">
+          <button onClick={() => setShowScenario(true)} className="h-8 px-3 rounded-[6px] bg-[#16161A] border border-[#26262C] text-xs hover:bg-[#1E1E23] transition-colors">
+            Сценарий
+          </button>
+          <button onClick={() => setShowIntroOutro(true)} className="h-8 px-3 rounded-[6px] bg-[#16161A] border border-[#26262C] text-xs hover:bg-[#1E1E23] transition-colors">
+            Интро/Аутро
+          </button>
           <button onClick={() => setShowVoices(true)} className="h-8 px-3 rounded-[6px] bg-[#16161A] border border-[#26262C] text-xs hover:bg-[#1E1E23] transition-colors">
             Голоса
           </button>
@@ -802,6 +1124,21 @@ export default function EditorPage() {
         </div>
       )}
 
+      {notice && (
+        <div className="border-b border-[#3A2E14] bg-[#1E1A10] px-4 py-2" role="status" aria-live="polite">
+          <div className="max-w-[960px] mx-auto flex items-start gap-3">
+            <span className="text-[13px] leading-5 text-[#E8B44C]" aria-hidden="true">ℹ</span>
+            <p className="flex-1 text-[11px] leading-4 text-[#C9B27A] break-words whitespace-pre-wrap">{notice}</p>
+            <button
+              onClick={() => setNotice(null)}
+              className="h-6 px-2 rounded-[6px] border border-[#3A2E14] text-[11px] text-[#C9B27A] hover:bg-[#262010] transition-colors"
+            >
+              Понятно
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="flex-1 overflow-y-auto">
         <div className="max-w-[960px] mx-auto p-4 md:p-6 space-y-5">
           <Preview
@@ -816,6 +1153,7 @@ export default function EditorPage() {
             renderMode={renderSettings.renderMode}
             stripViewport={renderSettings.stripViewport}
             stripGap={renderSettings.stripGap}
+            onSeek={handleSeek}
           />
 
           <RenderModePanel
@@ -834,6 +1172,8 @@ export default function EditorPage() {
             selectedId={selectedId}
             introDuration={project.introDuration}
             outroDuration={project.outroDuration}
+            panelGap={panelGap}
+            onGapChange={handleGapChange}
           />
 
           <ContextPanel
@@ -842,8 +1182,8 @@ export default function EditorPage() {
               const newPanels = project.panels.map(p => p.id === id ? { ...p, ...updates } : p);
               updateProject({ panels: newPanels });
             }}
-            onUpdateIntro={(text, dur) => updateProject({ intro: text, introDuration: dur })}
-            onUpdateOutro={(text, dur) => updateProject({ outro: text, outroDuration: dur })}
+            onUpdateIntro={(text, dur) => applyIntroOutroChange({ intro: text, introDuration: dur })}
+            onUpdateOutro={(text, dur) => applyIntroOutroChange({ outro: text, outroDuration: dur })}
             voiceAssignments={project.voiceAssignments}
             onVoiceChange={(char, voiceId) => updateProject({ voiceAssignments: { ...project.voiceAssignments, [char]: voiceId } })}
             onGenerateIntro={handleGenerateIntro}
@@ -884,6 +1224,35 @@ export default function EditorPage() {
         </div>
       </div>
 
+      <ScenarioModal
+        open={showScenario}
+        onClose={() => setShowScenario(false)}
+        imagesCount={images.length}
+        existingPanels={project.panels.length}
+        ttsLanguage={project.settings.ttsLanguage || 'ru'}
+        currentScenario={currentScenarioText}
+        llmProviderId={project.settings.llmProvider || getSettings().defaultLLMProvider || 'openrouter'}
+        chatModel={project.settings.chatModel}
+        onSettingsChange={(patch) => updateProject({ settings: { ...project.settings, ...patch } })}
+        onApply={handleApplyScenario}
+        onTranslate={handleTranslateScenario}
+      />
+
+      <IntroOutroModal
+        open={showIntroOutro}
+        onClose={() => setShowIntroOutro(false)}
+        intro={project.intro}
+        outro={project.outro}
+        introDuration={project.introDuration}
+        outroDuration={project.outroDuration}
+        onApply={(patch) => { applyIntroOutroChange(patch); setShowIntroOutro(false); }}
+        onGenerateAI={() => void handleIntroOutroAI()}
+        onVoice={() => void handleVoiceIntroOutro()}
+        onClear={handleClearIntroOutro}
+        generating={isGeneratingIntro}
+        voicing={voicingIntroOutro}
+      />
+
       <VoicesModal
         open={showVoices}
         onClose={() => setShowVoices(false)}
@@ -915,6 +1284,7 @@ export default function EditorPage() {
         onExport={handleExport}
         hasAudio={audioBlobs.size > 0 || !!introAudio}
         hasSRT={!!project.srt}
+        srtDraft={srtDraft}
         hasSEO={!!project.seoPackage}
         duration={duration}
         backendCaps={backendCaps}

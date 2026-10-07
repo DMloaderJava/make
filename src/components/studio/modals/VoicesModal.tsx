@@ -213,7 +213,9 @@ export function VoicesModal({ open, onClose, characters, assignments, onChange, 
         name: n.name,
         appearance: n.appearance,
         voiceId: assignments[n.name] || n.aliases.map((a: string) => assignments[a]).find(Boolean) || '',
-        emotion: 'neutral'
+        emotion: 'neutral',
+        // Пол из сценария переживает слияние алиасов
+        gender: characters.find(c => c.name === n.name || n.aliases.includes(c.name))?.gender
       }));
       onCharactersChange?.(newChars as any);
       const newAssignments: Record<string, string> = {};
@@ -425,7 +427,17 @@ export function VoicesModal({ open, onClose, characters, assignments, onChange, 
                         {char.name[0]?.toUpperCase()}
                       </div>
                       <div className="flex-1 min-w-0">
-                        <p className="text-[13px] font-medium truncate">{char.name}</p>
+                        <div className="flex items-center gap-1.5">
+                          <p className="text-[13px] font-medium truncate">{char.name}</p>
+                          {char.gender && (
+                            <span
+                              title={char.gender === 'female' ? 'Женский персонаж (из сценария)' : 'Мужской персонаж (из сценария)'}
+                              className="shrink-0 rounded-[4px] border border-[#26262C] bg-[#1E1E23] px-1 text-[9px] leading-4 text-[#8A8A93]"
+                            >
+                              {char.gender === 'female' ? 'Жен.' : 'Муж.'}
+                            </span>
+                          )}
+                        </div>
                         <p className="text-[11px] text-[#8A8A93] truncate">{char.appearance || 'Персонаж'}</p>
                       </div>
                     </div>

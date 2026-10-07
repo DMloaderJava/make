@@ -12,6 +12,8 @@ export interface PanelData {
   type: 'speech' | 'thought' | 'narration' | 'sfx';
   order: number;
   imageIndex: number;
+  /** Панель на всё изображение (сценарий): contain без камеры, см. db.ts. */
+  fullFrame?: boolean;
 }
 
 export interface VisionResult {

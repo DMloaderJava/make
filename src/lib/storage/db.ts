@@ -1,6 +1,7 @@
 import { openDB, IDBPDatabase } from 'idb';
 import { isOPFSSupported, saveProjectImage, loadProjectImageAsDataURL, deleteProjectImages } from './opfs';
 import { INFO_IDB_NAME } from './info';
+import { getSettings } from './local';
 
 const DB_NAME = INFO_IDB_NAME;
 const DB_VERSION = 3;
@@ -14,6 +15,12 @@ export interface PanelData {
   type: 'speech' | 'thought' | 'narration' | 'sfx';
   order: number;
   imageIndex: number;
+  /**
+   * Панель покрывает всё изображение (режим сценария: один кадр = одно
+   * изображение): Preview и экспорт рисуют contain (letterbox) без зума
+   * и панорамы, bbox-обводку не рисуют.
+   */
+  fullFrame?: boolean;
 }
 
 export interface Character {
@@ -21,6 +28,8 @@ export interface Character {
   appearance: string;
   voiceId: string;
   emotion: string;
+  /** Пол персонажа из сценария: (Жен.) → 'female', (Муж.) → 'male'. */
+  gender?: 'female' | 'male';
 }
 
 export interface SyncTimeline {
@@ -73,6 +82,12 @@ export interface Project {
     visionModel: string;
     /** Модель TTS для проекта (например eleven_multilingual_v2). */
     ttsModel?: string;
+    /**
+     * Отдельная модель для текста (перевод сценария и т.п.). Пусто — дефолт
+     * провайдера. Отдельно от visionModel: перевод не требует vision, а
+     * дефолт провайдера может быть vision-моделью.
+     */
+    chatModel?: string;
     /** Язык озвучки проекта: 'ru' | 'en' | ... */
     ttsLanguage?: string;
     /** Скорость речи (1.0 — обычная). */
@@ -83,6 +98,15 @@ export interface Project {
     stripViewport?: number;
     /** Отступ между страницами ленты, px. */
     stripGap?: number;
+    /**
+     * Пауза (сек) между репликами: после завершения чтения — переход к
+     * следующему изображению. По умолчанию 0,3; формат сценария задаёт 0,6.
+     */
+    panelGap?: number;
+    /** Название канала (для fallback-интро/аутро и SEO). Пусто — настройки приложения → siteName. */
+    channelName?: string;
+    /** Подпись канала (опционально, для текстов). */
+    channelTagline?: string;
     backgroundMusic?: string;
     musicVolume: number;
   };
@@ -186,6 +210,7 @@ export async function deleteProject(id: string): Promise<void> {
 export async function createProject(name: string, images: string[] | Blob[]): Promise<Project> {
   const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const useOPFS = await isOPFSSupported();
+  const appSettings = getSettings();
   
   let imageFiles: string[] = [];
   let storedImages: string[] = [];
@@ -245,6 +270,9 @@ export async function createProject(name: string, images: string[] | Blob[]): Pr
       llmProvider: 'openrouter',
       visionModel: 'google/gemma-4-31b-it:free',
       musicVolume: 0.15,
+      // Канал: дефолты новых проектов — из настроек приложения.
+      ...(appSettings.channelName?.trim() ? { channelName: appSettings.channelName.trim() } : {}),
+      ...(appSettings.channelTagline?.trim() ? { channelTagline: appSettings.channelTagline.trim() } : {}),
     },
     createdAt: Date.now(),
     updatedAt: Date.now(),

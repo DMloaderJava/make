@@ -475,6 +475,106 @@ export interface StripSceneOptions extends StripLayoutOptions {
 }
 
 /**
+ * Единый маппинг «панель ⇄ диапазон пикселей скролла».
+ * Для каждой панели таймлайна — страница (слот), на которой она лежит, и
+ * диапазон скролла, в котором эта страница читается: длинная страница —
+ * полный диапазон [верх, низ], короткая — одна точка (центр).
+ */
+export interface PanelScrollSpan {
+  panelId: number;
+  imageIndex: number;
+  slotIndex: number;
+  startPx: number;
+  endPx: number;
+}
+
+/**
+ * Строит PanelScrollSpan для каждой панели таймлайна.
+ * Изображение панели берётся из сегмента (imageIndex), fallback — panels.
+ */
+export function buildPanelScrollSpans(
+  timeline: Array<{ panelId: number; imageIndex?: number; audioStart: number; audioEnd: number }>,
+  layout: StripLayout,
+  panels?: Array<{ id: number; imageIndex: number }>
+): PanelScrollSpan[] {
+  const out: PanelScrollSpan[] = [];
+  for (const seg of timeline) {
+    const imageIndex = typeof seg.imageIndex === 'number'
+      ? seg.imageIndex
+      : panels?.find(p => p.id === seg.panelId)?.imageIndex;
+    if (imageIndex === undefined) continue;
+    const slotIndex = layout.slots.findIndex(s => s.index === imageIndex);
+    if (slotIndex === -1) continue;
+    const slot = layout.slots[slotIndex];
+    const top = clampScroll(slot.y, layout);
+    const bottom = clampScroll(slot.y + slot.height - layout.frameHeight, layout);
+    const center = targetScrollForSlot(layout, slotIndex);
+    out.push({
+      panelId: seg.panelId,
+      imageIndex,
+      slotIndex,
+      startPx: bottom > top ? top : center,
+      endPx: bottom > top ? bottom : center,
+    });
+  }
+  return out;
+}
+
+/**
+ * Обратный маппинг: позиция скролла → audioStart панели, к которой приехал
+ * скролл. Точность — до границы панели: берётся последняя панель страницы,
+ * чья озвучка уже началась в момент targetTime (положение скролла внутри
+ * диапазона страницы линейно переводится в время диапазона озвучки).
+ * @returns null, если ленты/таймлайна нет или на странице нет панелей.
+ */
+export function timeAtScroll(
+  layout: StripLayout,
+  timeline: Array<{ panelId: number; imageIndex?: number; audioStart: number; audioEnd: number }>,
+  scrollY: number,
+  panels?: Array<{ id: number; imageIndex: number }>
+): number | null {
+  if (layout.slots.length === 0 || timeline.length === 0) return null;
+  // Страница в центре окна (как pageIndexAtScroll, но с доступом к слоту).
+  const center = scrollY + layout.frameHeight / 2;
+  let slot: StripSlot | null = null;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const s of layout.slots) {
+    const d = Math.abs(s.y + s.height / 2 - center);
+    if (d < bestDistance) {
+      slot = s;
+      bestDistance = d;
+    }
+  }
+  if (!slot) return null;
+  const imageIndex = slot.index;
+  const segs = timeline
+    .filter(t => {
+      const ii = typeof t.imageIndex === 'number'
+        ? t.imageIndex
+        : panels?.find(p => p.id === t.panelId)?.imageIndex;
+      return ii === imageIndex;
+    })
+    .sort((a, b) => a.audioStart - b.audioStart);
+  if (segs.length === 0) return null;
+
+  const pageStart = segs[0].audioStart;
+  const pageEnd = segs[segs.length - 1].audioEnd;
+  const top = clampScroll(slot.y, layout);
+  const bottom = clampScroll(slot.y + slot.height - layout.frameHeight, layout);
+  const targetTime = bottom > top
+    ? pageStart + Math.min(1, Math.max(0, (scrollY - top) / (bottom - top))) * (pageEnd - pageStart)
+    : pageStart;
+
+  // Снап на границу панели: последняя панель, чей старт не позже targetTime.
+  let result = segs[0].audioStart;
+  for (const s of segs) {
+    if (targetTime >= s.audioStart) result = s.audioStart;
+    else break;
+  }
+  return result;
+}
+
+/**
  * Готовая сцена ленты: раскладка + траектория скролла + рендер кадра по времени.
  * Один и тот же объект используется превью и обоими бэкендами экспорта, чтобы
  * картинка в редакторе совпадала с итоговым видео.

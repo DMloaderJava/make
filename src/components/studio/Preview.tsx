@@ -2,8 +2,10 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { PanelData } from '@/lib/pipeline/extractPanels';
+import { sameImageSpan } from '@/lib/pipeline/buildTimeline';
+import { drawContain } from '@/lib/pipeline/draw';
 import { SyncTimeline } from '@/lib/storage/db';
-import { STRIP_DEFAULTS, createStripSceneFromMedia, pageIndexAtScroll, resolveStripViewport } from '@/lib/pipeline/mangaStrip';
+import { STRIP_DEFAULTS, clampScroll, createStripSceneFromMedia, maxScrollY, pageIndexAtScroll, resolveStripViewport, timeAtScroll } from '@/lib/pipeline/mangaStrip';
 
 interface PreviewProps {
   images: string[];
@@ -20,6 +22,8 @@ interface PreviewProps {
   stripViewport?: number;
   /** Отступ между страницами ленты, px кадра 1080. */
   stripGap?: number;
+  /** Ручной скролл ленты: seek к панели, к которой приехал скролл. */
+  onSeek?: (time: number) => void;
 }
 
 const FRAME_W = 1280;
@@ -39,9 +43,17 @@ export function Preview({
   renderMode = 'panels',
   stripViewport,
   stripGap,
+  onSeek,
 }: PreviewProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [loaded, setLoaded] = useState<Map<string, HTMLImageElement>>(new Map());
+  // «Пользователь скроллит» — на время жеста (колесо/drag), чтобы программные
+  // перерисовки не пересчитывали позицию скролла от устаревшего currentTime.
+  const userScrollingRef = useRef(false);
+  const dragRef = useRef<{ startY: number; startScroll: number } | null>(null);
+  const wheelIdleTimer = useRef<number | undefined>(undefined);
+  // Свежее состояние для нативного wheel-слушателя (привязывается один раз).
+  const stripStateRef = useRef({ stripScene: null as ReturnType<typeof createStripSceneFromMedia>, timeline: [] as SyncTimeline[], panels: [] as PanelData[], currentTime: 0, onSeek: undefined as ((t: number) => void) | undefined });
 
   useEffect(() => {
     const load = async () => {
@@ -84,6 +96,68 @@ export function Preview({
     });
   }, [renderMode, images, loaded, timeline, panels, stripViewport, stripGap]);
 
+  // Свежие значения для нативного wheel-слушателя (эффект без deps — после
+  // каждого рендера; события приходят уже после commit).
+  useEffect(() => {
+    stripStateRef.current = { stripScene, timeline, panels, currentTime, onSeek };
+  });
+
+  /**
+   * Ручной скролл ленты (колесо): scrollY → timeAtScroll → onSeek к началу
+   * панели, к которой приехал скролл. Без «дрожания»: позиция всегда
+   * пересчитывается от актуального currentTime, а seek не запускает эффект,
+   * который бы снова скроллил (рендер — чистая функция currentTime).
+   * Нативный слушатель с passive:false — иначе страница под canvas скроллилась.
+   */
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || renderMode !== 'strip') return;
+    const onWheel = (e: WheelEvent) => {
+      const state = stripStateRef.current;
+      if (!state.stripScene || !state.onSeek) return;
+      e.preventDefault();
+      userScrollingRef.current = true;
+      const scale = FRAME_H / Math.max(1, canvas.clientHeight);
+      const current = state.stripScene.scrollAt(state.currentTime);
+      const next = clampScroll(current + e.deltaY * scale, state.stripScene.layout);
+      const target = timeAtScroll(
+        state.stripScene.layout,
+        state.timeline,
+        next,
+        state.panels.map(p => ({ id: p.id, imageIndex: p.imageIndex }))
+      );
+      if (target !== null && Math.abs(target - state.currentTime) > 0.01) state.onSeek(target);
+      window.clearTimeout(wheelIdleTimer.current);
+      wheelIdleTimer.current = window.setTimeout(() => { userScrollingRef.current = false; }, 150);
+    };
+    canvas.addEventListener('wheel', onWheel, { passive: false });
+    return () => canvas.removeEventListener('wheel', onWheel);
+  }, [renderMode]);
+
+  const handleStripPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!stripScene || !onSeek) return;
+    dragRef.current = { startY: e.clientY, startScroll: stripScene.scrollAt(currentTime) };
+    userScrollingRef.current = true;
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+  };
+  const handleStripPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const drag = dragRef.current;
+    if (!drag || !stripScene || !onSeek) return;
+    const scale = FRAME_H / Math.max(1, canvasRef.current?.clientHeight || 1);
+    const next = clampScroll(drag.startScroll + (e.clientY - drag.startY) * scale, stripScene.layout);
+    const target = timeAtScroll(
+      stripScene.layout,
+      timeline,
+      next,
+      panels.map(p => ({ id: p.id, imageIndex: p.imageIndex }))
+    );
+    if (target !== null) onSeek(target);
+  };
+  const handleStripPointerEnd = () => {
+    dragRef.current = null;
+    userScrollingRef.current = false;
+  };
+
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -99,10 +173,15 @@ export function Preview({
 
     // --- Режим ленты: вертикальный скролл вместо переключения кадров ---
     if (stripScene) {
+      // Скроллбар показывает позицию СКОЛЛА ленты (а не долю времени):
+      // раньше currentTime/duration расходился со scrollAt(t) — «полоса
+      // не в том месте».
+      const scrollY = stripScene.scrollAt(currentTime);
+      const maxScroll = maxScrollY(stripScene.layout);
       stripScene.render(ctx, currentTime, {
         // Прогресс — правый скроллбар; он рисуется только в UI и не попадает в видео.
         showProgress: true,
-        progress: duration > 0 && isFinite(duration) ? currentTime / duration : 0,
+        progress: maxScroll > 0 ? scrollY / maxScroll : (duration > 0 && isFinite(duration) ? currentTime / duration : 0),
       });
       // Плашку с репликой показываем, только если её страница сейчас на экране:
       // иначе имя/текст «висят» на посторонней странице при скролле.
@@ -125,13 +204,33 @@ export function Preview({
       return;
     }
 
+    // «Весь кадр» (режим сценария): изображение целиком в кадре (contain +
+    // letterbox), без зума/панорамы и bbox-обводки — одна картинка = один кадр.
+    if (currentPanel.fullFrame) {
+      const img = loaded.get(images[currentPanel.imageIndex]);
+      ctx.fillStyle = '#0B0B0C';
+      ctx.fillRect(0, 0, w, h);
+      if (img) drawContain(ctx, img, w, h);
+      ctx.fillStyle = 'rgba(11,11,12,0.25)';
+      ctx.fillRect(0, 0, w, h);
+      drawDialogue(ctx, w, h, currentPanel.dialogue, currentPanel.character);
+      if (duration > 0 && isFinite(duration)) {
+        const pw = (currentTime / duration) * w;
+        ctx.fillStyle = '#E8B44C';
+        ctx.fillRect(0, h - 2, Math.max(0, Math.min(w, pw)), 2);
+      }
+      return;
+    }
+
     const img = loaded.get(images[currentPanel.imageIndex]);
     ctx.fillStyle = '#0B0B0C';
     ctx.fillRect(0, 0, w, h);
 
     if (img) {
-      const seg = timeline.find(t => t.panelId === currentPanel.id);
-      const progress = seg ? Math.min(1, Math.max(0, (currentTime - seg.audioStart) / (seg.audioEnd - seg.audioStart || 1))) : 0;
+      // Прогресс камеры — по группе соседних панелей одного изображения:
+      // зум не «скачет» на каждой панели той же страницы.
+      const span = sameImageSpan(timeline, currentPanel.id);
+      const progress = span ? Math.min(1, Math.max(0, (currentTime - span.start) / (span.end - span.start || 1))) : 0;
       const scale = 1 + progress * 0.08;
 
       const imgAspect = img.width / img.height;
@@ -204,12 +303,19 @@ export function Preview({
   return (
     <div className="w-full">
       <div className="relative aspect-video bg-[#0B0B0C] rounded-[16px] overflow-hidden border border-[#26262C] group">
-        <canvas ref={canvasRef} className="w-full h-full" />
+        <canvas
+          ref={canvasRef}
+          className={`w-full h-full ${renderMode === 'strip' ? 'cursor-grab active:cursor-grabbing touch-none' : ''}`}
+          onPointerDown={renderMode === 'strip' ? handleStripPointerDown : undefined}
+          onPointerMove={renderMode === 'strip' ? handleStripPointerMove : undefined}
+          onPointerUp={renderMode === 'strip' ? handleStripPointerEnd : undefined}
+          onPointerCancel={renderMode === 'strip' ? handleStripPointerEnd : undefined}
+        />
 
-        <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-[150ms] bg-[#0B0B0C]/20">
+        <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-[150ms] bg-[#0B0B0C]/20 pointer-events-none">
           <button
             onClick={onPlayPause}
-            className="w-12 h-12 rounded-full bg-[#16161A] border border-[#26262C] flex items-center justify-center text-[#F5F5F7] hover:bg-[#1E1E23] transition-colors duration-[150ms]"
+            className="pointer-events-auto w-12 h-12 rounded-full bg-[#16161A] border border-[#26262C] flex items-center justify-center text-[#F5F5F7] hover:bg-[#1E1E23] transition-colors duration-[150ms]"
           >
             {isPlaying ? '❚❚' : '▶'}
           </button>

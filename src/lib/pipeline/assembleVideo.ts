@@ -6,7 +6,8 @@
  */
 
 import { SyncTimeline } from '../storage/db';
-import { getKenBurnsParams } from './buildTimeline';
+import { getKenBurnsParams, sameImageSpan } from './buildTimeline';
+import { drawContain } from './draw';
 import { createPlacementScheduler, userFacingOverlaps, type AudioPlacement, type PlacementScheduler } from './audioMix';
 import { frameTime, waitForStart } from './renderClock';
 import { createStripSceneFromMedia, type StripScene } from './mangaStrip';
@@ -36,7 +37,7 @@ export interface AssembleOptions {
   /** Отступ между страницами ленты, px. */
   stripGap?: number;
   /** Панели проекта: нужны ленте, если в таймлайне нет imageIndex. */
-  panels?: Array<{ id: number; imageIndex: number }>;
+  panels?: Array<{ id: number; imageIndex: number; fullFrame?: boolean }>;
 }
 
 // Honest implementation using Canvas + MediaRecorder - fixed Promise antipattern
@@ -320,57 +321,72 @@ function renderPanel(
   const imageDataUrl = options.images[currentPanel.imageIndex];
   const img = imageDataUrl ? loadedImages.get(imageDataUrl) : null;
 
+  // «Весь кадр» (сценарий): contain + letterbox, камера выключена,
+  // bbox-обводку и бейдж персонажа не рисуем.
+  const isFullFrame = options.panels?.find(p => p.id === currentPanel.panelId)?.fullFrame === true;
+
   if (img) {
-    const panelIndex = options.timeline.indexOf(currentPanel);
-    const progress = Math.min(1, Math.max(0, (currentTime - currentPanel.audioStart) / (currentPanel.audioEnd - currentPanel.audioStart || 1)));
-    const kb = getKenBurnsParams(panelIndex);
-    const scale = kb.startScale + (kb.endScale - kb.startScale) * progress;
-    const xOffset = (kb.startX + (kb.endX - kb.startX) * progress) * w;
-    const yOffset = (kb.startY + (kb.endY - kb.startY) * progress) * h;
-    
-    // FIX BUG #3: Apply Ken Burns correctly without double transform
-    // Calculate cover dimensions first, then apply scale and offset
-    drawImageCoverWithKenBurns(ctx, img, w, h, 1, scale, xOffset, yOffset);
+    if (isFullFrame) {
+      drawContain(ctx, img, w, h);
+    } else {
+      // Прогресс камеры — по группе соседних панелей одного изображения,
+      // направление — с начала группы: зум не «скачет» между панелями страницы.
+      const span = sameImageSpan(options.timeline, currentPanel.panelId);
+      const panelIndex = span ? span.startIndex : options.timeline.indexOf(currentPanel);
+      const progress = span
+        ? Math.min(1, Math.max(0, (currentTime - span.start) / (span.end - span.start || 1)))
+        : 0;
+      const kb = getKenBurnsParams(panelIndex);
+      const scale = kb.startScale + (kb.endScale - kb.startScale) * progress;
+      const xOffset = (kb.startX + (kb.endX - kb.startX) * progress) * w;
+      const yOffset = (kb.startY + (kb.endY - kb.startY) * progress) * h;
+
+      // FIX BUG #3: Apply Ken Burns correctly without double transform
+      // Calculate cover dimensions first, then apply scale and offset
+      drawImageCoverWithKenBurns(ctx, img, w, h, 1, scale, xOffset, yOffset);
+    }
   }
 
   ctx.fillStyle = 'rgba(0,0,0,0.35)';
   ctx.fillRect(0, 0, w, h);
 
-  const bbox = currentPanel.panelBbox;
-  const bx = (bbox.x / 100) * w;
-  const by = (bbox.y / 100) * h;
-  const bw = (bbox.width / 100) * w;
-  const bh = (bbox.height / 100) * h;
+  if (!isFullFrame) {
+    const bbox = currentPanel.panelBbox;
+    const bx = (bbox.x / 100) * w;
+    const by = (bbox.y / 100) * h;
+    const bw = (bbox.width / 100) * w;
+    const bh = (bbox.height / 100) * h;
 
-  ctx.strokeStyle = '#6366f1';
-  ctx.lineWidth = 4;
-  ctx.shadowColor = '#6366f1';
-  ctx.shadowBlur = 20;
-  ctx.beginPath();
-  // @ts-ignore - roundRect may not be in all browsers
-  if (ctx.roundRect) {
-    ctx.roundRect(bx, by, bw, bh, 12);
-  } else {
-    ctx.rect(bx, by, bw, bh);
-  }
-  ctx.stroke();
-  ctx.shadowBlur = 0;
+    ctx.strokeStyle = '#6366f1';
+    ctx.lineWidth = 4;
+    ctx.shadowColor = '#6366f1';
+    ctx.shadowBlur = 20;
+    ctx.beginPath();
+    // @ts-ignore - roundRect may not be in all browsers
+    if (ctx.roundRect) {
+      ctx.roundRect(bx, by, bw, bh, 12);
+    } else {
+      ctx.rect(bx, by, bw, bh);
+    }
+    ctx.stroke();
+    ctx.shadowBlur = 0;
 
-  ctx.fillStyle = 'rgba(99, 102, 241, 0.9)';
-  const badgeText = currentPanel.character;
-  ctx.font = 'bold 14px system-ui, sans-serif';
-  const textMetrics = ctx.measureText(badgeText);
-  const badgeWidth = textMetrics.width + 24;
-  ctx.beginPath();
-  if (ctx.roundRect) {
-    ctx.roundRect(bx, Math.max(0, by - 32), badgeWidth, 24, 6);
-  } else {
-    ctx.rect(bx, Math.max(0, by - 32), badgeWidth, 24);
+    ctx.fillStyle = 'rgba(99, 102, 241, 0.9)';
+    const badgeText = currentPanel.character;
+    ctx.font = 'bold 14px system-ui, sans-serif';
+    const textMetrics = ctx.measureText(badgeText);
+    const badgeWidth = textMetrics.width + 24;
+    ctx.beginPath();
+    if (ctx.roundRect) {
+      ctx.roundRect(bx, Math.max(0, by - 32), badgeWidth, 24, 6);
+    } else {
+      ctx.rect(bx, Math.max(0, by - 32), badgeWidth, 24);
+    }
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'left';
+    ctx.fillText(badgeText, bx + 12, Math.max(0, by - 32) + 16);
   }
-  ctx.fill();
-  ctx.fillStyle = '#fff';
-  ctx.textAlign = 'left';
-  ctx.fillText(badgeText, bx + 12, Math.max(0, by - 32) + 16);
 
   ctx.fillStyle = 'rgba(0,0,0,0.75)';
   ctx.beginPath();
