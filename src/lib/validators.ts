@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { getTTSProvider } from './providers/tts/catalog';
 
 // Panel validation - strict
 export const PanelSchema = z.object({
@@ -202,7 +203,22 @@ function levenshtein(a: string, b: string): number {
 
 // Cost estimation — approximate, update when provider pricing changes
 export function estimateTTSCost(text: string, provider: string): { characters: number; estimatedCost: string } {
-  const chars = text.length;
+  return estimateCostForCharacters(text.length, provider);
+}
+
+/**
+ * Подпись нулевой стоимости. «FREE (quota)» убрана сознательно: это лексика
+ * LLM-роутера, к TTS она отношения не имеет и создавала ложное ожидание
+ * «бесплатно и мгновенно». Ноль означает free tier конкретного провайдера —
+ * называем его по имени (данные из каталога провайдеров, не из головы).
+ */
+function freeTierCostLabel(providerId: string): string {
+  const provider = getTTSProvider(providerId);
+  if (provider?.freeTier) return `бесплатно · free tier (${provider.name})`;
+  return '$0.0000';
+}
+
+function estimateCostForCharacters(characters: number, provider: string): { characters: number; estimatedCost: string } {
   const costs: Record<string, number> = {
     elevenlabs: 0.18 / 1000,
     openai: 0.015 / 1000,
@@ -221,14 +237,17 @@ export function estimateTTSCost(text: string, provider: string): { characters: n
     hume: 0.02 / 1000,
   };
   const rate = costs[provider] ?? 0;
-  const cost = chars * rate;
+  const cost = characters * rate;
   return {
-    characters: chars,
-    estimatedCost: cost === 0 ? 'FREE (quota)' : `$${cost.toFixed(4)}`,
+    characters,
+    estimatedCost: cost === 0 ? freeTierCostLabel(provider) : `$${cost.toFixed(4)}`,
   };
 }
 
 export function estimateTotalCost(panels: Array<{ dialogue: string }>, intro: string, outro: string, provider: string) {
-  const allText = [...panels.map(p => p.dialogue), intro, outro].join(' ');
-  return estimateTTSCost(allText, provider);
+  // Сумма длин, а не склейка через join(' '): разделители считались символами,
+  // одна панель «Зря я решился на это.» (21 символ) показывалась как 23,
+  // а пустой проект — как «1 симв.» (длина одного пробела-разделителя).
+  const characters = panels.reduce((sum, p) => sum + p.dialogue.length, 0) + intro.length + outro.length;
+  return estimateCostForCharacters(characters, provider);
 }
