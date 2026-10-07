@@ -13,7 +13,7 @@ import { ScenarioModal } from '@/components/studio/modals/ScenarioModal';
 import { Input } from '@/components/ui/input';
 import { getAllKeys, getSettings } from '@/lib/storage/local';
 import { getLLMProvider, resolveLLMVisionModel } from '@/lib/providers/llm';
-import { buildTimeline, DEFAULT_PANEL_GAP, estimateDuration, generateSRT, calculateTotalDuration } from '@/lib/pipeline/buildTimeline';
+import { buildTimeline, DEFAULT_PANEL_GAP, estimateDuration, calculateTotalDuration, rebuildSrt } from '@/lib/pipeline/buildTimeline';
 import { scenarioToPanels, serializeScenario, SCENARIO_GAP_SECONDS, type ScenarioLine } from '@/lib/pipeline/scenario';
 import { translateScenarioLines, isTranslatableLanguage } from '@/lib/pipeline/translateScenario';
 import { generateIntro, generateOutro, generateFallbackIntro, generateFallbackOutro } from '@/lib/pipeline/generateIntro';
@@ -120,6 +120,14 @@ export default function EditorPage() {
     if (!project) return 0;
     return calculateTotalDuration(tl, project.introDuration, project.outroDuration);
   }, [project, tl]);
+
+  // SRT «черновик»: есть панели, но у хотя бы одной ещё нет реальной озвучки
+  // (нет OPFS-блоба) — тайминги собраны из оценки. После «Озвучить всё»
+  // флаг сбрасывается, SRT финализируется реальными длительностями.
+  const srtDraft = useMemo(() => {
+    if (!project || project.panels.length === 0) return false;
+    return project.panels.some(p => !audioBlobs.has(p.id));
+  }, [project, audioBlobs]);
 
   useEffect(() => {
     let cancelled = false;
@@ -510,10 +518,22 @@ export default function EditorPage() {
       if (result.introAudio) setIntroAudio(result.introAudio);
       if (result.outroAudio) setOutroAudio(result.outroAudio);
 
-      const tl = buildTimeline(project.panels, newDur, project.voiceAssignments, project.introDuration, panelGap);
-      const srt = generateSRT(tl, project.intro, project.outro, project.introDuration, project.outroDuration);
       const obj: Record<number, number> = {};
       newDur.forEach((v, k) => obj[k] = v);
+      // Финальный SRT: реальные длительности озвучки + интро/аутро проекта.
+      const rebuilt = rebuildSrt({
+        panels: project.panels,
+        audioDurations: newDur,
+        voiceAssignments: project.voiceAssignments,
+        intro: project.intro,
+        outro: project.outro,
+        introDuration: project.introDuration,
+        outroDuration: project.outroDuration,
+        panelGap,
+        realDurations: obj,
+      });
+      const tl = rebuilt.timeline;
+      const srt = rebuilt.srt;
       // Обновляем снимок текстов для всех озвученных панелей (включая старые,
       // которые остались в кэше) — это база для следующей мягкой миграции.
       const audioTexts: Record<number, string> = { ...(project.audioTexts || {}) };
@@ -702,9 +722,18 @@ export default function EditorPage() {
     setAudioDurations(new Map());
 
     const settings = { ...project.settings, panelGap: SCENARIO_GAP_SECONDS };
-    const durationMap = new Map<number, number>(newPanels.map(p => [p.id, estimateDuration(p.dialogue)]));
-    const timeline = buildTimeline(newPanels, durationMap, voiceAssignments, 0, SCENARIO_GAP_SECONDS);
-    const srt = generateSRT(timeline, '', '', 0, 0);
+    // Сценарий на этом этапе ещё очищает интро/аутро (правило 5) — SRT
+    // собирается из тех же значений, что будут записаны в проект.
+    const { timeline, srt } = rebuildSrt({
+      panels: newPanels,
+      audioDurations: new Map(), // старое аудио удалено — только оценки
+      voiceAssignments,
+      intro: '',
+      outro: '',
+      introDuration: 0,
+      outroDuration: 0,
+      panelGap: SCENARIO_GAP_SECONDS,
+    });
 
     updateProject({
       panels: newPanels,
@@ -834,19 +863,48 @@ export default function EditorPage() {
   }, [project?.panels, project?.characters]);
 
   /**
+   * Единая пересборка таймлайна + SRT (rebuildSrt): реальными длительностями
+   * там, где озвучка готова, оценкой — нет; интро/аутро с их длительностями.
+   * Вызывается из всех мест, где время/тексты меняются (пауза, интро/аутро,
+   * сценарий, озвучка) — SRT больше не «застревает» в старом состоянии.
+   */
+  const rebuildProjectSrt = (
+    patch: Partial<Pick<Project, 'intro' | 'outro' | 'introDuration' | 'outroDuration'>> & { panelGap?: number }
+  ) => {
+    if (!project) return null;
+    const merged = { ...project, ...patch };
+    const panelGap = patch.panelGap ?? project.settings.panelGap ?? DEFAULT_PANEL_GAP;
+    return rebuildSrt({
+      panels: merged.panels,
+      audioDurations,
+      voiceAssignments: merged.voiceAssignments,
+      intro: merged.intro,
+      outro: merged.outro,
+      introDuration: merged.introDuration,
+      outroDuration: merged.outroDuration,
+      panelGap,
+      realDurations: merged.audioDurations,
+    });
+  };
+
+  /**
    * Смена паузы между репликами (ползунок в таймлайне): пересобираем
    * сохранённый таймлайн сразу, чтобы превью и длительность отреагировали
    * до переозвучки.
    */
   const handleGapChange = (gap: number) => {
     if (!project) return;
-    const durationMap = new Map<number, number>();
-    for (const p of project.panels) {
-      durationMap.set(p.id, audioDurations.get(p.id) ?? estimateDuration(p.dialogue));
-    }
-    const timeline = buildTimeline(project.panels, durationMap, project.voiceAssignments, project.introDuration, gap);
-    const srt = generateSRT(timeline, project.intro, project.outro, project.introDuration, project.outroDuration);
-    updateProject({ settings: { ...project.settings, panelGap: gap }, timeline, srt });
+    const rebuilt = rebuildProjectSrt({ panelGap: gap });
+    if (!rebuilt) return;
+    updateProject({ settings: { ...project.settings, panelGap: gap }, timeline: rebuilt.timeline, srt: rebuilt.srt });
+  };
+
+  /** Смена интро/аутро (текст или длительность) → SRT пересобирается сразу. */
+  const applyIntroOutroChange = (patch: { intro?: string; outro?: string; introDuration?: number; outroDuration?: number }) => {
+    if (!project) return;
+    const rebuilt = rebuildProjectSrt(patch);
+    if (!rebuilt) return;
+    updateProject({ ...patch, timeline: rebuilt.timeline, srt: rebuilt.srt });
   };
 
   const handleSeek = useCallback((t: number) => {
@@ -1043,8 +1101,8 @@ export default function EditorPage() {
               const newPanels = project.panels.map(p => p.id === id ? { ...p, ...updates } : p);
               updateProject({ panels: newPanels });
             }}
-            onUpdateIntro={(text, dur) => updateProject({ intro: text, introDuration: dur })}
-            onUpdateOutro={(text, dur) => updateProject({ outro: text, outroDuration: dur })}
+            onUpdateIntro={(text, dur) => applyIntroOutroChange({ intro: text, introDuration: dur })}
+            onUpdateOutro={(text, dur) => applyIntroOutroChange({ outro: text, outroDuration: dur })}
             voiceAssignments={project.voiceAssignments}
             onVoiceChange={(char, voiceId) => updateProject({ voiceAssignments: { ...project.voiceAssignments, [char]: voiceId } })}
             onGenerateIntro={handleGenerateIntro}
@@ -1130,6 +1188,7 @@ export default function EditorPage() {
         onExport={handleExport}
         hasAudio={audioBlobs.size > 0 || !!introAudio}
         hasSRT={!!project.srt}
+        srtDraft={srtDraft}
         hasSEO={!!project.seoPackage}
         duration={duration}
         backendCaps={backendCaps}

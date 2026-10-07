@@ -8,6 +8,8 @@ interface ExportModalProps {
   onExport: (type: 'mp4' | 'mp3' | 'srt' | 'seo' | 'all') => void;
   hasAudio: boolean;
   hasSRT: boolean;
+  /** SRT собран из оценочных длительностей (озвучка ещё не готова) — «черновик». */
+  srtDraft?: boolean;
   hasSEO: boolean;
   duration: number;
   backendCaps: BackendCapabilities | null;
@@ -19,7 +21,7 @@ interface ExportModalProps {
   generatingSEO?: boolean;
 }
 
-export function ExportModal({ open, onClose, onExport, hasAudio, hasSRT, hasSEO, duration, backendCaps, preferredBackend, onBackendChange, isExporting, costEstimate, onGenerateSEO, generatingSEO }: ExportModalProps) {
+export function ExportModal({ open, onClose, onExport, hasAudio, hasSRT, srtDraft, hasSEO, duration, backendCaps, preferredBackend, onBackendChange, isExporting, costEstimate, onGenerateSEO, generatingSEO }: ExportModalProps) {
   if (!open) return null;
 
   const formatTime = (s: number) => {
@@ -76,8 +78,10 @@ export function ExportModal({ open, onClose, onExport, hasAudio, hasSRT, hasSEO,
             </button>
 
             <button onClick={() => onExport('srt')} disabled={isExporting} className={`w-full p-3 rounded-[10px] border text-left transition-colors disabled:opacity-50 ${hasSRT ? 'bg-[#0B0B0C] border-[#26262C] hover:bg-[#1E1E23]' : 'bg-[#0B0B0C] border-[#26262C] opacity-60'}`}>
-              <span className="text-[13px] font-medium">📝 SRT — субтитры</span>
-              <p className="text-[11px] text-[#8A8A93] mt-1">Из таймлайна {hasSRT ? '' : '(нет SRT)'}</p>
+              <span className="text-[13px] font-medium">📝 SRT — субтитры{srtDraft ? <span className="text-[#8A8A93] font-normal"> · черновик</span> : ''}</span>
+              <p className="text-[11px] text-[#8A8A93] mt-1">
+                Из таймлайна {hasSRT ? '' : '(нет SRT)'}{srtDraft ? ' · точные тайминги после озвучки' : ''}
+              </p>
             </button>
 
             <button onClick={() => onExport('seo')} disabled={isExporting} className={`w-full p-3 rounded-[10px] border text-left transition-colors disabled:opacity-50 ${hasSEO ? 'bg-[#0B0B0C] border-[#26262C] hover:bg-[#1E1E23]' : 'bg-[#0B0B0C] border-[#26262C] opacity-60'}`}>

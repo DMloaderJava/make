@@ -48,6 +48,53 @@ export function buildTimeline(
 }
 
 /**
+ * ЕДИНАЯ точка сборки таймлайна + SRT. Все места, где SRT «вручную» строился
+ * (сценарий, смена паузы, озвучка, интро/аутро), вызывают отсюда:
+ * — длительности = реальные (audioDurations), если есть, иначе оценка;
+ * — интро/аутро и их длительности передаются как есть (SRT сдвигается на
+ *   introDuration, аутро — после последней панели);
+ * — draft = true, пока хотя бы у одной панели нет РЕАЛЬНОЙ длительности
+ *   (озвучка ещё не сгенерирована) — SRT «черновой», не влияет на экспорт.
+ */
+export interface RebuildSrtInput {
+  panels: PanelData[];
+  /** panelId → длительность (реальная или оценочная). */
+  audioDurations: Map<number, number>;
+  voiceAssignments: Record<string, string>;
+  intro: string;
+  outro: string;
+  introDuration: number;
+  outroDuration: number;
+  panelGap: number;
+  /** Реальные (сохранённые) длительности — для флага черновика. */
+  realDurations?: Record<number, number>;
+}
+
+export interface RebuildSrtResult {
+  timeline: SyncTimeline[];
+  srt: string;
+  draft: boolean;
+}
+
+export function rebuildSrt(input: RebuildSrtInput): RebuildSrtResult {
+  const durationMap = new Map<number, number>();
+  for (const p of input.panels) {
+    durationMap.set(p.id, input.audioDurations.get(p.id) ?? estimateDuration(p.dialogue));
+  }
+  const timeline = buildTimeline(
+    input.panels,
+    durationMap,
+    input.voiceAssignments,
+    input.introDuration,
+    input.panelGap
+  );
+  const srt = generateSRT(timeline, input.intro, input.outro, input.introDuration, input.outroDuration);
+  const real = input.realDurations ?? {};
+  const draft = input.panels.length > 0 && input.panels.some(p => real[p.id] === undefined);
+  return { timeline, srt, draft };
+}
+
+/**
  * Временной разряд группы СОСЕДНИХ сегментов на одном изображении.
  * Камера (Ken Burns) идёт по progress этой группы, а не отдельного сегмента —
  * иначе на каждой панели той же страницы зум «скачет» от 1.08 к 1.0.
@@ -83,11 +130,14 @@ export function generateSRT(timeline: SyncTimeline[], introText: string, outroTe
   const lines: string[] = [];
   let index = 1;
 
+  // Округляем ОБЩИЕ миллисекунды: floor((t % 1) * 1000) на плавающей точке
+  // даёт 7.6s → 07,599 (0.6*1000 = 599.9999… — классический fp-баг).
   const formatTime = (seconds: number): string => {
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    const s = Math.floor(seconds % 60);
-    const ms = Math.floor((seconds % 1) * 1000);
+    const totalMs = Math.round(Math.max(0, seconds) * 1000);
+    const h = Math.floor(totalMs / 3600000);
+    const m = Math.floor((totalMs % 3600000) / 60000);
+    const s = Math.floor((totalMs % 60000) / 1000);
+    const ms = totalMs % 1000;
     return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')},${String(ms).padStart(3, '0')}`;
   };
 
