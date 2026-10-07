@@ -5,7 +5,7 @@ title Manga Voice Studio - Установка
 
 echo ========================================
 echo  Manga Voice Studio - Установка
-echo  v1.3.14
+echo  v1.3.15
 echo ========================================
 echo.
 

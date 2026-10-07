@@ -1,0 +1,178 @@
+'use client';
+
+import { useMemo, useState } from 'react';
+import { Button } from '@/components/ui/button';
+import {
+  genderLabel,
+  parseScenario,
+  SCENARIO_EXAMPLE,
+  SCENARIO_GAP_SECONDS,
+  SCENARIO_IMAGE_LABEL,
+  type ScenarioLine,
+} from '@/lib/pipeline/scenario';
+import { targetLanguageName } from '@/lib/pipeline/translateScenario';
+
+interface ScenarioModalProps {
+  open: boolean;
+  onClose: () => void;
+  /** Сколько изображений загружено в проекте (для предупреждений). */
+  imagesCount: number;
+  /** Код языка озвучки проекта (ru/en/...) — на него переводятся реплики. */
+  ttsLanguage: string;
+  /** Применить разобранный сценарий; translatedTexts — уже переведённые реплики (null — без перевода). */
+  onApply: (lines: ScenarioLine[], translatedTexts: string[] | null) => Promise<void> | void;
+  /** Перевести реплики на язык озвучки. Бросает ошибку, если LLM недоступен. */
+  onTranslate: (texts: string[]) => Promise<string[]>;
+}
+
+/**
+ * Сценарий — текстовый формат озвучки:
+ *
+ *   Изображение 1
+ *
+ *   Персонаж 1 (Жен.): текст реплики
+ *
+ *   Изображение 2
+ *
+ *   Персонаж 2 (Муж.): текст реплики
+ *
+ * Правила: 1) сначала изображение, затем озвучка; 2) реплики переводятся на
+ * язык озвучки; 3) после реплики — пауза 0,6 с и переход к следующему
+ * изображению; 4) пол в скобках: (Жен.) или (Муж.); 5) без лишнего текста.
+ */
+export function ScenarioModal({ open, onClose, imagesCount, ttsLanguage, onApply, onTranslate }: ScenarioModalProps) {
+  const [text, setText] = useState('');
+  const [applying, setApplying] = useState(false);
+  const [translating, setTranslating] = useState(false);
+
+  const parsed = useMemo(() => (text.trim() ? parseScenario(text) : null), [text]);
+  const canApply = !!parsed && parsed.lines.length > 0 && parsed.errors.length === 0;
+  const languageName = targetLanguageName(ttsLanguage);
+
+  if (!open) return null;
+
+  const handleApply = async () => {
+    if (!canApply || !parsed) return;
+    setApplying(true);
+    try {
+      // Правило 2: реплики переводятся на язык озвучки. Если LLM недоступна —
+      // спрашиваем, применять ли без перевода, вместо тихого пропуска.
+      let translated: string[] | null = null;
+      setTranslating(true);
+      try {
+        translated = await onTranslate(parsed.lines.map(l => l.text));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const proceed = confirm(
+          `Перевод на ${languageName} не удался:\n${message}\n\nПрименить сценарий без перевода?`
+        );
+        if (!proceed) return;
+      } finally {
+        setTranslating(false);
+      }
+      await onApply(parsed.lines, translated);
+    } finally {
+      setApplying(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-[#0B0B0C]/80 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative w-full max-w-[600px] bg-[#16161A] border border-[#26262C] rounded-[16px] shadow-2xl overflow-hidden">
+        <div className="p-5 border-b border-[#26262C] flex items-center justify-between">
+          <div>
+            <h2 className="text-[15px] font-medium">Сценарий</h2>
+            <p className="text-[11px] text-[#8A8A93] mt-0.5">
+              Сначала изображение, затем реплика · пауза {String(SCENARIO_GAP_SECONDS).replace('.', ',')} с между репликами
+            </p>
+          </div>
+          <button onClick={onClose} className="w-8 h-8 rounded-[6px] bg-[#1E1E23] hover:bg-[#26262C] flex items-center justify-center text-[#8A8A93]">×</button>
+        </div>
+
+        <div className="p-5 space-y-4 max-h-[70vh] overflow-y-auto">
+          <details className="rounded-[10px] bg-[#0B0B0C] border border-[#26262C] px-4 py-3">
+            <summary className="cursor-pointer text-[12px] text-[#A1A1AA] select-none">Формат и правила</summary>
+            <div className="mt-3 space-y-3">
+              <pre className="text-[11px] leading-5 font-mono text-[#F5F5F7] whitespace-pre-wrap">{SCENARIO_EXAMPLE}</pre>
+              <ol className="text-[11px] leading-5 text-[#8A8A93] list-decimal list-inside space-y-0.5">
+                <li>Сначала загружается изображение, затем озвучивается диалог.</li>
+                <li>Каждая реплика переводится на язык озвучки: <span className="text-[#E8B44C]">{languageName}</span>.</li>
+                <li>После завершения чтения реплики — переход к следующему изображению через {String(SCENARIO_GAP_SECONDS).replace('.', ',')} секунды.</li>
+                <li>Пол персонажа указывается в скобках: (Жен.) или (Муж.).</li>
+                <li>Никакого лишнего текста — только «{SCENARIO_IMAGE_LABEL} N» и реплики.</li>
+              </ol>
+              <p className="text-[11px] leading-5 text-[#8A8A93]">
+                При применении: интро и аутро очищаются, пол используется для автоподбора голоса
+                {imagesCount > 0 ? `; изображений в проекте: ${imagesCount}` : ''}.
+              </p>
+            </div>
+          </details>
+
+          <textarea
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            spellCheck={false}
+            placeholder={`Вставьте сценарий в формате:\n\n${SCENARIO_EXAMPLE.slice(0, SCENARIO_EXAMPLE.indexOf('\n\n\n'))}...`}
+            className="w-full min-h-[180px] max-h-[300px] rounded-[10px] bg-[#0B0B0C] border border-[#26262C] px-3 py-2.5 font-mono text-[12px] leading-5 text-[#F5F5F7] placeholder:text-[#8A8A93]/50 resize-y"
+          />
+
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="outline" size="sm" onClick={() => setText(SCENARIO_EXAMPLE)} className="h-8 text-xs bg-[#0B0B0C] border-[#26262C] hover:bg-[#1E1E23]">
+              Пример
+            </Button>
+            {text && (
+              <Button variant="outline" size="sm" onClick={() => setText('')} className="h-8 text-xs bg-[#0B0B0C] border-[#26262C] hover:bg-[#1E1E23]">
+                Очистить
+              </Button>
+            )}
+            <Button
+              size="sm"
+              onClick={() => void handleApply()}
+              disabled={!canApply || applying || translating}
+              className="ml-auto h-8 text-xs bg-[#E8B44C] text-[#0B0B0C] hover:bg-[#B88A2E] disabled:opacity-50"
+            >
+              {translating ? 'Перевод реплик…' : applying ? 'Применение…' : `Применить к проекту${parsed?.lines.length ? ` · ${parsed.lines.length} реплик` : ''}`}
+            </Button>
+          </div>
+
+          {parsed && (
+            parsed.errors.length > 0 ? (
+              <div className="space-y-1">
+                {parsed.errors.slice(0, 8).map((err, i) => (
+                  <p key={i} className="text-[11px] leading-4 text-[#E86C4C]">• {err}</p>
+                ))}
+                {parsed.errors.length > 8 && (
+                  <p className="text-[11px] text-[#C97A66]">…ещё {parsed.errors.length - 8} ошибок</p>
+                )}
+              </div>
+            ) : (
+              <div className="rounded-[10px] bg-[#0B0B0C] border border-[#26262C] px-4 py-3 space-y-2">
+                <p className="text-[11px] text-[#8A8A93]">
+                  Разобрано: <span className="text-[#F5F5F7]">{parsed.lines.length}</span> реплик ·
+                  изображения <span className="text-[#F5F5F7]">{new Set(parsed.lines.map(l => l.imageIndex + 1)).size}</span>
+                </p>
+                {parsed.warnings.slice(0, 4).map((w, i) => (
+                  <p key={i} className="text-[11px] leading-4 text-[#C9B27A]">⚠ {w}</p>
+                ))}
+                <div className="max-h-[160px] overflow-y-auto space-y-1 pr-1">
+                  {parsed.lines.map((line, i) => (
+                    <div key={i} className="flex items-baseline gap-2 text-[11px] leading-5">
+                      <span className="font-mono text-[#8A8A93] shrink-0">{String(i + 1).padStart(2, '0')}</span>
+                      <span className="font-mono text-[#E8B44C] shrink-0">{SCENARIO_IMAGE_LABEL} {line.imageIndex + 1}</span>
+                      <span className="truncate">
+                        <span className="text-[#F5F5F7]">{line.character}</span>
+                        {line.gender && <span className="text-[#8A8A93]"> ({genderLabel(line.gender)})</span>}
+                        <span className="text-[#A1A1AA]"> — {line.text}</span>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}

@@ -21,6 +21,8 @@ export interface Character {
   appearance: string;
   voiceId: string;
   emotion: string;
+  /** Пол персонажа из сценария: (Жен.) → 'female', (Муж.) → 'male'. */
+  gender?: 'female' | 'male';
 }
 
 export interface SyncTimeline {
@@ -83,6 +85,11 @@ export interface Project {
     stripViewport?: number;
     /** Отступ между страницами ленты, px. */
     stripGap?: number;
+    /**
+     * Пауза (сек) между репликами: после завершения чтения — переход к
+     * следующему изображению. По умолчанию 0,3; формат сценария задаёт 0,6.
+     */
+    panelGap?: number;
     backgroundMusic?: string;
     musicVolume: number;
   };

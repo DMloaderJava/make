@@ -1,0 +1,235 @@
+/**
+ * Сценарий — текстовый формат озвучки:
+ *
+ *   Изображение 1
+ *
+ *   Персонаж 1 (Жен.): текст реплики
+ *
+ *   Изображение 2
+ *
+ *   Персонаж 2 (Муж.): текст реплики
+ *
+ * Правила формата:
+ * 1. Сначала загружается изображение, затем озвучивается диалог (изображение
+ *    показывается на время реплики; таймлайн строится по сегментам панелей).
+ * 2. Каждая реплика переводится на нужный язык озвучки (см. translateScenario.ts).
+ * 3. После завершения чтения реплики — переход к следующему изображению
+ *    через 0,6 секунды (SCENARIO_GAP_SECONDS, задаётся в buildTimeline).
+ * 4. Пол персонажа указывается в скобках: (Жен.) или (Муж.).
+ * 5. Никакого лишнего текста — только «Изображение N» и реплики.
+ */
+
+import { PanelData } from './extractPanels';
+
+export type ScenarioGender = 'female' | 'male';
+
+/** Одна реплика сценария. */
+export interface ScenarioLine {
+  /** 0-индекс изображения: «Изображение N» → N-1. */
+  imageIndex: number;
+  /** Имя персонажа без пометки пола. */
+  character: string;
+  /** Пол из скобок; null, если в сценарии не указан. */
+  gender: ScenarioGender | null;
+  /** Текст реплики. */
+  text: string;
+}
+
+export interface ScenarioParseResult {
+  lines: ScenarioLine[];
+  /** Жёсткие ошибки: с таким сценарием проект не применяется. */
+  errors: string[];
+  /** Предупреждения: применение возможно, но стоит обратить внимание. */
+  warnings: string[];
+}
+
+/** Правило 3: пауза после реплики перед следующим изображением, сек. */
+export const SCENARIO_GAP_SECONDS = 0.6;
+
+/** Подпись изображения в сценарии: «Изображение N». */
+export const SCENARIO_IMAGE_LABEL = 'Изображение';
+
+export function genderLabel(gender: ScenarioGender): string {
+  return gender === 'female' ? 'Жен.' : 'Муж.';
+}
+
+const GENDERS: Record<string, ScenarioGender> = {
+  'жен': 'female',
+  'жен.': 'female',
+  'ж': 'female',
+  'female': 'female',
+  'муж': 'male',
+  'муж.': 'male',
+  'м': 'male',
+  'male': 'male',
+};
+
+/** Разделители «Имя — текст»: двоеточие и тире (обычный дефис — нет, он бывает в именах). */
+const SEPARATORS = new Set([':', '—', '–']);
+
+function findSeparator(line: string): number {
+  for (let i = 0; i < line.length; i++) {
+    if (SEPARATORS.has(line[i])) return i;
+  }
+  return -1;
+}
+
+function parseGender(raw: string | undefined): { gender: ScenarioGender | null; label?: string } {
+  if (!raw) return { gender: null };
+  const key = raw.trim().toLowerCase();
+  const gender = GENDERS[key];
+  return { gender: gender ?? null, label: raw.trim() };
+}
+
+/**
+ * Разбирает текст сценария. Пустые строки — допустимые разделители блоков.
+ * Любая строка, которая не «Изображение N» и не «Имя (Пол): текст», — ошибка.
+ */
+export function parseScenario(text: string): ScenarioParseResult {
+  const lines: ScenarioLine[] = [];
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  let currentImage: number | null = null;
+
+  (text || '').split(/\r?\n/).forEach((raw, idx) => {
+    const lineNo = idx + 1;
+    const line = raw.trim();
+    if (!line) return;
+
+    // «Изображение N» (допускаем «:»/«-» и точку в конце)
+    const imageMatch = line.match(new RegExp(
+      `^${SCENARIO_IMAGE_LABEL}\\s*[:\\-]?\\s*(\\d+)\\s*[.:]?$`, 'i'
+    ));
+    if (imageMatch) {
+      const n = parseInt(imageMatch[1], 10);
+      if (n < 1) {
+        errors.push(`Строка ${lineNo}: номер «${SCENARIO_IMAGE_LABEL}» должен быть ≥ 1`);
+        currentImage = null;
+      } else {
+        currentImage = n - 1;
+      }
+      return;
+    }
+
+    const sep = findSeparator(line);
+    if (sep === -1) {
+      errors.push(`Строка ${lineNo}: не реплика (нет разделителя «:»). В сценарии допускаются только «${SCENARIO_IMAGE_LABEL} N» и реплики «Имя (Пол): текст»`);
+      return;
+    }
+
+    const left = line.slice(0, sep).trim();
+    const right = line.slice(sep + 1).trim();
+    if (!left) {
+      errors.push(`Строка ${lineNo}: не указано имя персонажа`);
+      return;
+    }
+    if (!right) {
+      errors.push(`Строка ${lineNo}: текст реплики пуст`);
+      return;
+    }
+    if (currentImage === null) {
+      errors.push(`Строка ${lineNo}: реплика стоит до первого «${SCENARIO_IMAGE_LABEL} N»`);
+      return;
+    }
+
+    const leftMatch = left.match(/^([^()]+?)(?:\s*\(([^)]*)\))?$/);
+    const character = (leftMatch?.[1] || left).trim();
+    if (!character) {
+      errors.push(`Строка ${lineNo}: не указано имя персонажа`);
+      return;
+    }
+    const { gender, label } = parseGender(leftMatch?.[2]);
+    if (leftMatch?.[2] !== undefined && gender === null) {
+      warnings.push(`Строка ${lineNo}: неизвестный пол «${label}» — голос по полу не будет подбираться`);
+    } else if (gender === null) {
+      warnings.push(`Строка ${lineNo}: пол не указан — формат «${character} (Жен.)» или «${character} (Муж.)»`);
+    }
+
+    lines.push({ imageIndex: currentImage, character, gender, text: right });
+  });
+
+  return { lines, errors, warnings };
+}
+
+/**
+ * Собирает текст сценария из панелей проекта — ровно в том же формате,
+ * что и парсер: «Изображение N», пустая строка, реплики. Лишнего текста нет.
+ */
+export function serializeScenario(
+  panels: Array<{ dialogue: string; character: string; imageIndex: number; order?: number }>,
+  genders: Record<string, ScenarioGender> = {}
+): string {
+  const sorted = [...panels].sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.imageIndex - b.imageIndex);
+  const blocks: string[] = [];
+  let lastImage = -1;
+  let currentBlock: string[] = [];
+
+  const flush = () => {
+    if (currentBlock.length > 0) {
+      blocks.push(currentBlock.join('\n'));
+      currentBlock = [];
+    }
+  };
+
+  for (const panel of sorted) {
+    if (panel.imageIndex !== lastImage) {
+      flush();
+      currentBlock.push(`${SCENARIO_IMAGE_LABEL} ${panel.imageIndex + 1}`, '');
+      lastImage = panel.imageIndex;
+    }
+    const gender = genders[panel.character];
+    const name = gender ? `${panel.character} (${genderLabel(gender)})` : panel.character;
+    currentBlock.push(`${name}: ${panel.dialogue}`);
+  }
+  flush();
+
+  return blocks.join('\n\n') + (blocks.length ? '\n' : '');
+}
+
+/**
+ * Панели из сценария: одна реплика — одна панель на всё изображение.
+ * Если изображение не загружено — клампим в последнее и говорим об этом.
+ */
+export function scenarioToPanels(lines: ScenarioLine[], imageCount: number): {
+  panels: PanelData[];
+  warnings: string[];
+} {
+  const panels: PanelData[] = [];
+  const warnings: string[] = [];
+
+  lines.forEach((line, i) => {
+    let imageIndex = line.imageIndex;
+    if (imageCount > 0 && imageIndex >= imageCount) {
+      imageIndex = imageCount - 1;
+      warnings.push(
+        `«${SCENARIO_IMAGE_LABEL} ${line.imageIndex + 1}» не загружено (изображений: ${imageCount}) — реплика «${line.character}» привязана к изображению ${imageCount}`
+      );
+    }
+    panels.push({
+      id: i,
+      bbox: { x: 0, y: 0, width: 100, height: 100 },
+      dialogue: line.text,
+      character: line.character,
+      emotion: 'neutral',
+      type: 'speech',
+      order: i,
+      imageIndex,
+    });
+  });
+
+  return { panels, warnings };
+}
+
+/** Пример формата для кнопки «Пример». */
+export const SCENARIO_EXAMPLE = `Изображение 1
+
+Персонаж 1 (Жен.): Привет! Ты готов к сегодняшней вылазке?
+
+Изображение 2
+
+Персонаж 2 (Муж.): Как никогда. Главное — не отставать от группы.
+
+Изображение 3
+
+Персонаж 1 (Жен.): Договорились. Встречаемся у ворот на закате.`;

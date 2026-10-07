@@ -9,10 +9,13 @@ import { ContextPanel } from '@/components/studio/ContextPanel';
 import { RenderModePanel, RENDER_DEFAULTS, type RenderSettings } from '@/components/studio/RenderModePanel';
 import { VoicesModal } from '@/components/studio/modals/VoicesModal';
 import { ExportModal } from '@/components/studio/modals/ExportModal';
+import { ScenarioModal } from '@/components/studio/modals/ScenarioModal';
 import { Input } from '@/components/ui/input';
 import { getAllKeys, getSettings } from '@/lib/storage/local';
 import { getLLMProvider, resolveLLMVisionModel } from '@/lib/providers/llm';
-import { buildTimeline, estimateDuration, generateSRT, calculateTotalDuration } from '@/lib/pipeline/buildTimeline';
+import { buildTimeline, DEFAULT_PANEL_GAP, estimateDuration, generateSRT, calculateTotalDuration } from '@/lib/pipeline/buildTimeline';
+import { scenarioToPanels, SCENARIO_GAP_SECONDS, type ScenarioLine } from '@/lib/pipeline/scenario';
+import { translateScenarioLines, isTranslatableLanguage } from '@/lib/pipeline/translateScenario';
 import { generateIntro, generateOutro, generateFallbackIntro, generateFallbackOutro } from '@/lib/pipeline/generateIntro';
 import { formatSEOPackage, generateSEO, generateFallbackSEO } from '@/lib/pipeline/generateSEO';
 import { generateAllAudio } from '@/lib/pipeline/generateAudio';
@@ -21,7 +24,7 @@ import { getTTSProvider } from '@/lib/providers/tts/catalog';
 import { concatenateAudioBlobs } from '@/lib/pipeline/assembleVideo';
 import { renderVideo, checkCapabilities, BackendCapabilities } from '@/lib/pipeline/videoEncoder';
 import type { AudioPlacement } from '@/lib/pipeline/audioMix';
-import { loadProjectAudio, loadProjectIntroAudio, loadProjectOutroAudio, isOPFSSupported } from '@/lib/storage/opfs';
+import { loadProjectAudio, loadProjectIntroAudio, loadProjectOutroAudio, deleteProjectAudio, isOPFSSupported } from '@/lib/storage/opfs';
 import { estimateTotalCost } from '@/lib/validators';
 import { downloadBlob, formatTime } from '@/lib/utils';
 import { ArrowLeft, Loader2 } from 'lucide-react';
@@ -64,6 +67,9 @@ export default function EditorPage() {
     stripViewport: project?.settings.stripViewport ?? RENDER_DEFAULTS.stripViewport,
     stripGap: project?.settings.stripGap ?? RENDER_DEFAULTS.stripGap,
   };
+  // Пауза между репликами (сек): формат сценария задаёт 0,6 (правило 3),
+  // иначе — дефолт 0,3.
+  const panelGap = project?.settings.panelGap ?? DEFAULT_PANEL_GAP;
 
   const [currentTime, setCurrentTime] = useState(0);
   const currentTimeRef = useRef(0);
@@ -94,15 +100,16 @@ export default function EditorPage() {
   const [selectedId, setSelectedId] = useState<number | 'intro' | 'outro' | null>(null);
   const [showVoices, setShowVoices] = useState(false);
   const [showExport, setShowExport] = useState(false);
+  const [showScenario, setShowScenario] = useState(false);
   const [backendCaps, setBackendCaps] = useState<BackendCapabilities | null>(null);
   const [preferredBackend, setPreferredBackend] = useState<'auto' | 'webcodecs' | 'canvas'>('auto');
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'unsaved'>('saved');
 
   const duration = useMemo(() => {
     if (!project) return 0;
-    const timeline = buildTimeline(project.panels, audioDurations, project.voiceAssignments, project.introDuration);
+    const timeline = buildTimeline(project.panels, audioDurations, project.voiceAssignments, project.introDuration, panelGap);
     return calculateTotalDuration(timeline, project.introDuration, project.outroDuration);
-  }, [project, audioDurations]);
+  }, [project, audioDurations, panelGap]);
 
   useEffect(() => {
     let cancelled = false;
@@ -237,6 +244,7 @@ export default function EditorPage() {
     project?.settings?.renderMode,
     project?.settings?.stripViewport,
     project?.settings?.stripGap,
+    project?.settings?.panelGap,
     project?.settings?.backgroundMusic,
     project?.settings?.musicVolume,
   ]);
@@ -470,7 +478,7 @@ export default function EditorPage() {
       if (result.introAudio) setIntroAudio(result.introAudio);
       if (result.outroAudio) setOutroAudio(result.outroAudio);
 
-      const tl = buildTimeline(project.panels, newDur, project.voiceAssignments, project.introDuration);
+      const tl = buildTimeline(project.panels, newDur, project.voiceAssignments, project.introDuration, panelGap);
       const srt = generateSRT(tl, project.intro, project.outro, project.introDuration, project.outroDuration);
       const obj: Record<number, number> = {};
       newDur.forEach((v, k) => obj[k] = v);
@@ -571,6 +579,118 @@ export default function EditorPage() {
     await runAudioGeneration([panelId], { forceRegenerate: true });
   };
 
+  /**
+   * Сценарий, правило 2: реплики переводятся на язык озвучки проекта.
+   * Бросает ошибку, если LLM недоступна — модалка предложит применить без перевода.
+   */
+  const handleTranslateScenario = async (texts: string[]): Promise<string[]> => {
+    if (!project) throw new Error('Проект не загружен');
+    const { provider, llmId, baseUrl, model, accountId } = resolveLLMConfig();
+    const keys = getAllKeys();
+    const apiKey = keys[llmId] || (provider ? keys[provider.id] : '') || (llmId === 'gemini' ? keys['google-ai'] : '');
+    if (!provider || !apiKey) {
+      throw new Error('LLM-провайдер не настроен: добавьте ключ в «Настройки → Провайдеры»');
+    }
+    const language = project.settings.ttsLanguage || 'ru';
+    if (!isTranslatableLanguage(language)) {
+      throw new Error(`Перевод недоступен для языка «${language}» — выберите конкретный язык озвучки в «Голоса».`);
+    }
+    // Для перевода используем обычную chat-модель провайдера,
+    // а не vision-модель, которую resolveLLMConfig подбирает под анализ изображений.
+    const chatModel = provider.defaultModel || model;
+    return translateScenarioLines(texts, language, provider, { apiKey, model: chatModel, baseUrl, accountId });
+  };
+
+  /**
+   * Применение сценария к проекту:
+   * — каждая реплика становится панелью на своём изображении («Изображение N»);
+   * — пол (Жен.)/(Муж.) сохраняется на персонаже и используется для автоподбора голоса;
+   * — пауза между репликами = 0,6 с (правило 3): после чтения — переход к следующему изображению;
+   * — без лишнего текста (правило 5): интро/аутро очищаются.
+   * Старое аудио удаляется — иначе в экспорт попала бы чужая озвучка старых реплик.
+   */
+  const handleApplyScenario = async (lines: ScenarioLine[], translatedTexts: string[] | null) => {
+    if (!project) return;
+    const appliedLines = lines.map((line, i) =>
+      translatedTexts?.[i] ? { ...line, text: translatedTexts[i] } : line
+    );
+    const { panels: newPanels, warnings } = scenarioToPanels(appliedLines, images.length);
+
+    // Персонажи: существующие сохраняем, пол обновляем/добавляем
+    const charMap = new Map(project.characters.map(c => [c.name, { ...c }]));
+    for (const line of appliedLines) {
+      const existing = charMap.get(line.character);
+      if (existing) {
+        if (line.gender) existing.gender = line.gender;
+      } else {
+        charMap.set(line.character, {
+          name: line.character,
+          appearance: '',
+          voiceId: '',
+          emotion: 'neutral',
+          gender: line.gender ?? undefined,
+        });
+      }
+    }
+    const characters = Array.from(charMap.values());
+
+    // Голоса: у персонажа с известным полом и без назначенного голоса подбираем по полу
+    const voiceAssignments = { ...project.voiceAssignments };
+    try {
+      const ttsId = resolveTTSProviderId(project.settings.ttsProvider, getSettings().defaultTTSProvider);
+      const provider = ttsId ? getTTSProvider(ttsId) : undefined;
+      const keys = getAllKeys();
+      if (provider && keys[ttsId]) {
+        const voices = await provider.getVoices(keys[ttsId]);
+        for (const char of characters) {
+          if (!char.gender || voiceAssignments[char.name]) continue;
+          const match = voices.find(v => v.gender === char.gender) || voices.find(v => v.gender === 'neutral');
+          if (match) voiceAssignments[char.name] = match.id;
+        }
+      }
+    } catch (error) {
+      console.warn('Не удалось подобрать голоса по полу', error);
+    }
+
+    // Старое аудио больше не соответствует тексту — удаляем (OPFS + память)
+    for (const panel of project.panels) {
+      try {
+        await deleteProjectAudio(project.id, panel.id);
+      } catch {}
+    }
+    setAudioBlobs(new Map());
+    setAudioFull(new Map());
+    setAudioDurations(new Map());
+
+    const settings = { ...project.settings, panelGap: SCENARIO_GAP_SECONDS };
+    const durationMap = new Map<number, number>(newPanels.map(p => [p.id, estimateDuration(p.dialogue)]));
+    const timeline = buildTimeline(newPanels, durationMap, voiceAssignments, 0, SCENARIO_GAP_SECONDS);
+    const srt = generateSRT(timeline, '', '', 0, 0);
+
+    updateProject({
+      panels: newPanels,
+      characters,
+      voiceAssignments,
+      settings,
+      intro: '',
+      outro: '',
+      introDuration: 0,
+      outroDuration: 0,
+      timeline,
+      srt,
+      audioDurations: {},
+      audioTexts: {},
+    });
+    if (newPanels.length > 0) {
+      setSelectedId(newPanels[0].id);
+      setCurrentPanelIdx(0);
+    }
+    setShowScenario(false);
+    if (warnings.length > 0) {
+      alert(warnings.join('\n'));
+    }
+  };
+
   const handleExport = async (type: 'mp4' | 'mp3' | 'srt' | 'seo' | 'all') => {
     if (!project) return;
     setIsExporting(true);
@@ -603,7 +723,7 @@ export default function EditorPage() {
           alert('Нет изображений для видео');
           return;
         }
-        const tl = project.timeline.length > 0 ? project.timeline : buildTimeline(project.panels, audioDurations, project.voiceAssignments, project.introDuration);
+        const tl = project.timeline.length > 0 ? project.timeline : buildTimeline(project.panels, audioDurations, project.voiceAssignments, project.introDuration, panelGap);
 
         // Точные позиции аудио на таймлайне: интро с 0, панели со своих audioStart,
         // аутро — после последней панели. Это чинит рассинхрон (раньше дорожка
@@ -666,8 +786,8 @@ export default function EditorPage() {
   // Memoize timeline to avoid recalculating on every render (perf fix for 30+ panels)
   const tl = useMemo(() => {
     if (!project) return [];
-    return project.timeline.length > 0 ? project.timeline : buildTimeline(project.panels, audioDurations, project.voiceAssignments, project.introDuration);
-  }, [project, audioDurations]);
+    return project.timeline.length > 0 ? project.timeline : buildTimeline(project.panels, audioDurations, project.voiceAssignments, project.introDuration, panelGap);
+  }, [project, audioDurations, panelGap]);
 
   const handleSeek = useCallback((t: number) => {
     if (!isFinite(t)) return;
@@ -745,6 +865,9 @@ export default function EditorPage() {
         </div>
 
         <div className="flex items-center gap-2">
+          <button onClick={() => setShowScenario(true)} className="h-8 px-3 rounded-[6px] bg-[#16161A] border border-[#26262C] text-xs hover:bg-[#1E1E23] transition-colors">
+            Сценарий
+          </button>
           <button onClick={() => setShowVoices(true)} className="h-8 px-3 rounded-[6px] bg-[#16161A] border border-[#26262C] text-xs hover:bg-[#1E1E23] transition-colors">
             Голоса
           </button>
@@ -883,6 +1006,15 @@ export default function EditorPage() {
           </div>
         </div>
       </div>
+
+      <ScenarioModal
+        open={showScenario}
+        onClose={() => setShowScenario(false)}
+        imagesCount={images.length}
+        ttsLanguage={project.settings.ttsLanguage || 'ru'}
+        onApply={handleApplyScenario}
+        onTranslate={handleTranslateScenario}
+      />
 
       <VoicesModal
         open={showVoices}

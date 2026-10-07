@@ -8,14 +8,20 @@ export interface AudioSegment {
   base64?: string;
 }
 
+/** Пауза по умолчанию между репликами, сек (сценарий задаёт 0,6 — см. SCENARIO_GAP_SECONDS). */
+export const DEFAULT_PANEL_GAP = 0.3;
+
 export function buildTimeline(
   panels: PanelData[],
   audioDurations: Map<number, number>, // panelId -> duration
   voiceAssignments: Record<string, string>,
-  introDuration: number = 8
+  introDuration: number = 8,
+  /** Пауза между репликами, сек: после завершения чтения — переход к следующему изображению. */
+  panelGap: number = DEFAULT_PANEL_GAP
 ): SyncTimeline[] {
   const timeline: SyncTimeline[] = [];
   let currentTime = introDuration;
+  const gap = Number.isFinite(panelGap) && panelGap >= 0 ? panelGap : DEFAULT_PANEL_GAP;
 
   // Sort panels by order
   const sorted = [...panels].sort((a, b) => a.order - b.order);
@@ -35,7 +41,7 @@ export function buildTimeline(
       character: panel.character,
     });
 
-    currentTime += duration + 0.3; // small pause between panels
+    currentTime += duration + gap; // пауза между репликами перед следующим изображением
   }
 
   return timeline;
