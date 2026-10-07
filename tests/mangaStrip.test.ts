@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { STRIP_SCENARIOS } from './fixtures/stripScenarios';
 import {
+  buildPanelScrollSpans,
   buildScrollKeyframes,
   buildScrollSpans,
   clampScroll,
@@ -13,6 +14,7 @@ import {
   STRIP_ZOOM_MAX,
   STRIP_ZOOM_MIN,
   targetScrollForSlot,
+  timeAtScroll,
   visibleSlots,
 } from '../src/lib/pipeline/mangaStrip';
 
@@ -408,4 +410,59 @@ test('короткие страницы с совпадающей позицие
   // и остаётся в границах ленты
   const max = maxScrollY(layout);
   assert.ok(second >= 0 && second <= max);
+});
+
+// ---- Задача 1: маппинг panelId ⇄ пиксели скролла и обратный seek ----
+
+test('buildPanelScrollSpans: длинная страница — полный диапазон, короткая — одна точка (центр)', () => {
+  // PAGES: 1000×1000 → 1920 px, 1000×2000 → 3840 px (обе выше кадра 1080).
+  const layout = computeStripLayout(PAGES, { ...FRAME, viewport: 1080, gap: 24 });
+  const spans = buildPanelScrollSpans(
+    [
+      { panelId: 0, imageIndex: 0, audioStart: 0, audioEnd: 3 },
+      { panelId: 1, imageIndex: 0, audioStart: 3.6, audioEnd: 6 },
+      { panelId: 2, imageIndex: 1, audioStart: 6.6, audioEnd: 10 },
+    ],
+    layout
+  );
+  assert.equal(spans.length, 3);
+  assert.deepEqual([spans[0].startPx, spans[0].endPx], [0, 840], 'слот 0: [0, 1920-1080]');
+  assert.deepEqual([spans[1].startPx, spans[1].endPx], [0, 840], 'вторая панель той же страницы — тот же диапазон');
+  assert.deepEqual([spans[2].startPx, spans[2].endPx], [1944, 4704], 'слот 1: [1944, 1944+3840-1080]');
+
+  const layout2 = computeStripLayout([{ width: 1000, height: 200 }], { ...FRAME, viewport: 1080, gap: 24 });
+  const spans2 = buildPanelScrollSpans([{ panelId: 0, imageIndex: 0, audioStart: 0, audioEnd: 3 }], layout2);
+  assert.equal(spans2[0].startPx, spans2[0].endPx, 'короткая страница: startPx === endPx (центр)');
+});
+
+test('timeAtScroll: верх страницы — первая панель, низ — вторая; края — null/смысл', () => {
+  const layout = computeStripLayout(PAGES, { ...FRAME, viewport: 1080, gap: 24 });
+  const timeline = [
+    { panelId: 0, imageIndex: 0, audioStart: 0, audioEnd: 3 },
+    { panelId: 1, imageIndex: 0, audioStart: 3.6, audioEnd: 6 },
+    { panelId: 2, imageIndex: 1, audioStart: 6.6, audioEnd: 10 },
+  ];
+  assert.equal(timeAtScroll(layout, timeline, 0), 0, 'верх ленты → первая панель');
+  assert.equal(timeAtScroll(layout, timeline, 630), 3.6, '75% диапазона страницы → вторая панель страницы');
+  assert.equal(timeAtScroll(layout, timeline, 1944), 6.6, 'верх второй страницы → её панель');
+  assert.equal(timeAtScroll(layout, timeline, 4704), 6.6, 'конец ленты → панель последней страницы');
+  assert.equal(timeAtScroll(layout, [], 0), null, 'пустой таймлайн → null');
+  const emptyLayout = computeStripLayout([], { ...FRAME, viewport: 1080, gap: 24 });
+  assert.equal(timeAtScroll(emptyLayout, timeline, 0), null, 'пустая лента → null');
+});
+
+test('лента → время → лента: scrollAt(t) приводит к панели, которая реально звучит', () => {
+  const layout = computeStripLayout(PAGES, { ...FRAME, viewport: 1080, gap: 24 });
+  const timeline = [
+    { panelId: 0, imageIndex: 0, audioStart: 0, audioEnd: 3 },
+    { panelId: 1, imageIndex: 1, audioStart: 3.6, audioEnd: 10 },
+  ];
+  const keys = buildScrollKeyframes(buildScrollSpans(timeline), layout, { transition: 0.8 });
+  for (const t of [1.5, 5, 7, 9]) {
+    const scroll = sampleScroll(keys, t);
+    const panelTime = timeAtScroll(layout, timeline, scroll);
+    const active = timeline.find(s => t >= s.audioStart && t < s.audioEnd);
+    assert.ok(active, `t=${t}: должен быть активный сегмент`);
+    assert.equal(panelTime, active.audioStart, `t=${t}: scroll ${scroll.toFixed(0)} → панель ${active.audioStart}`);
+  }
 });

@@ -107,11 +107,19 @@ export default function EditorPage() {
   const [preferredBackend, setPreferredBackend] = useState<'auto' | 'webcodecs' | 'canvas'>('auto');
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'unsaved'>('saved');
 
+  // ЕДИНЫЙ источник времени превью: таймлайн, по которому считаются и
+  // длительность (clock), и сегменты Timeline, и траектория скролла ленты.
+  // Раньше duration строился ОТДЕЛЬНО (fresh buildTimeline), а tl брал
+  // сохранённый project.timeline — при рассинхроне часы и лента разъезжались.
+  const tl = useMemo(() => {
+    if (!project) return [];
+    return project.timeline.length > 0 ? project.timeline : buildTimeline(project.panels, audioDurations, project.voiceAssignments, project.introDuration, panelGap);
+  }, [project, audioDurations, panelGap]);
+
   const duration = useMemo(() => {
     if (!project) return 0;
-    const timeline = buildTimeline(project.panels, audioDurations, project.voiceAssignments, project.introDuration, panelGap);
-    return calculateTotalDuration(timeline, project.introDuration, project.outroDuration);
-  }, [project, audioDurations, panelGap]);
+    return calculateTotalDuration(tl, project.introDuration, project.outroDuration);
+  }, [project, tl]);
 
   useEffect(() => {
     let cancelled = false;
@@ -271,20 +279,23 @@ export default function EditorPage() {
   ]);
 
   // Playback timer.
-  // Раньше startTime брался из замыкания при старте эффекта, поэтому перемотка
-  // во время проигрывания тут же откатывалась назад. Теперь смещение читается
-  // из ref, а тик идёт через requestAnimationFrame.
+  // Дельта-тик: каждый кадр прибавляем время с прошлого кадра, а смещение
+  // читаем из ref на КАЖДОМ тике. Раньше startOffset захватывался один раз при
+  // старте эффекта — и перемотка во время проигрывания (таймлайн, колесо ленты,
+  // стрелки) откатывалась на следующем кадре: лента и часы «резали» seek.
   useEffect(() => {
     if (!isPlaying) return;
     if (!duration || duration <= 0 || !isFinite(duration)) {
       setIsPlaying(false);
       return;
     }
-    const startWall = performance.now();
-    const startOffset = currentTimeRef.current;
+    let lastWall = performance.now();
     let raf = 0;
     const tick = () => {
-      const next = startOffset + (performance.now() - startWall) / 1000;
+      const now = performance.now();
+      const dt = (now - lastWall) / 1000;
+      lastWall = now;
+      const next = currentTimeRef.current + dt;
       if (next >= duration) {
         currentTimeRef.current = duration;
         setCurrentTime(duration);
@@ -812,11 +823,6 @@ export default function EditorPage() {
   };
 
   // Memoize timeline to avoid recalculating on every render (perf fix for 30+ panels)
-  const tl = useMemo(() => {
-    if (!project) return [];
-    return project.timeline.length > 0 ? project.timeline : buildTimeline(project.panels, audioDurations, project.voiceAssignments, project.introDuration, panelGap);
-  }, [project, audioDurations, panelGap]);
-
   /** Сценарий текущего проекта текстом: модалка открывается с этим содержимым. */
   const currentScenarioText = useMemo(() => {
     if (!project || project.panels.length === 0) return '';
@@ -1008,6 +1014,7 @@ export default function EditorPage() {
             renderMode={renderSettings.renderMode}
             stripViewport={renderSettings.stripViewport}
             stripGap={renderSettings.stripGap}
+            onSeek={handleSeek}
           />
 
           <RenderModePanel
