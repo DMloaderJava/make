@@ -1063,6 +1063,7 @@ export default function EditorPage() {
         open={showScenario}
         onClose={() => setShowScenario(false)}
         imagesCount={images.length}
+        existingPanels={project.panels.length}
         ttsLanguage={project.settings.ttsLanguage || 'ru'}
         currentScenario={currentScenarioText}
         llmProviderId={project.settings.llmProvider || getSettings().defaultLLMProvider || 'openrouter'}

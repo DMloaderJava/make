@@ -19,6 +19,8 @@ interface ScenarioModalProps {
   onClose: () => void;
   /** Сколько изображений загружено в проекте (для предупреждений). */
   imagesCount: number;
+  /** Сколько панелей уже есть в проекте (>0 — применение требует подтверждения). */
+  existingPanels: number;
   /** Код языка озвучки проекта (ru/en/...) — на него переводятся реплики. */
   ttsLanguage: string;
   /** Сценарий текущего проекта в текстовом формате — модалка открывается с ним. */
@@ -49,21 +51,37 @@ interface ScenarioModalProps {
  * язык озвучки; 3) после реплики — пауза 0,6 с и переход к следующему
  * изображению; 4) пол в скобках: (Жен.) или (Муж.); 5) без лишнего текста.
  */
-export function ScenarioModal({ open, onClose, imagesCount, ttsLanguage, currentScenario, llmProviderId, chatModel, onSettingsChange, onApply, onTranslate }: ScenarioModalProps) {
+export function ScenarioModal({ open, onClose, imagesCount, existingPanels, ttsLanguage, currentScenario, llmProviderId, chatModel, onSettingsChange, onApply, onTranslate }: ScenarioModalProps) {
   const [text, setText] = useState('');
   const [applying, setApplying] = useState(false);
   const [translating, setTranslating] = useState(false);
+  // Подтверждение замены существующих панелей: явный чекбокс, а не confirm() —
+  // во встроенном превью (iframe без allow-modals) confirm молча вернёт false.
+  const [replaceConfirmed, setReplaceConfirmed] = useState(false);
+  const needsReplaceConfirm = existingPanels > 0 && !replaceConfirmed;
 
   const parsed = useMemo(() => (text.trim() ? parseScenario(text) : null), [text]);
   const canApply = !!parsed && parsed.lines.length > 0 && parsed.errors.length === 0;
   const languageName = targetLanguageName(ttsLanguage);
   const llmProvider = LLM_PROVIDERS.find(p => p.id === llmProviderId);
-  const modelOptions = llmProvider?.models || [];
+  // Модели каталога — строки, но нормализуем defensively: если когда-нибудь
+  // станут объектами {id, name}, в DOM не уедет [object Object].
+  const modelOptions: Array<{ id: string; label: string }> = (llmProvider?.models || [])
+    .map((m: unknown) => {
+      if (typeof m === 'string') return { id: m, label: m };
+      const obj = m as { id?: string; name?: string; label?: string };
+      const id = obj.id || obj.name || '';
+      return { id, label: obj.label || obj.name || obj.id || '' };
+    })
+    .filter(m => m.id);
 
   // Модалка открывается с текстом текущего проекта (обратная связь
   // «проект → сценарий»): сериализация из панелей, а не пустое поле.
   useEffect(() => {
-    if (open) setText(currentScenario);
+    if (open) {
+      setText(currentScenario);
+      setReplaceConfirmed(false);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
@@ -71,6 +89,7 @@ export function ScenarioModal({ open, onClose, imagesCount, ttsLanguage, current
 
   const handleApply = async () => {
     if (!canApply || !parsed) return;
+    if (needsReplaceConfirm) return; // защита: кнопка и так disabled
     setApplying(true);
     try {
       // Правило 2: реплики переводятся на язык озвучки. Если LLM недоступна —
@@ -147,10 +166,25 @@ export function ScenarioModal({ open, onClose, imagesCount, ttsLanguage, current
               >
                 <option value="">{llmProvider?.name || 'Провайдер'} · по умолчанию</option>
                 {modelOptions.map(m => (
-                  <option key={m} value={m}>{m}</option>
+                  <option key={m.id} value={m.id}>{m.label}</option>
                 ))}
               </select>
             </div>
+          )}
+
+          {existingPanels > 0 && (
+            <label className="flex items-start gap-2 rounded-[8px] border border-[#3A2E14] bg-[#1E1A10] px-3 py-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={replaceConfirmed}
+                onChange={(e) => setReplaceConfirmed(e.target.checked)}
+                className="mt-0.5 accent-[#E8B44C]"
+              />
+              <span className="text-[11px] leading-4 text-[#C9B27A]">
+                В проекте уже {existingPanels} {existingPanels === 1 ? 'панель' : 'панелей'} — они будут заменены сценарием целиком (вместе с озвучкой).
+                Отметьте, чтобы подтвердить.
+              </span>
+            </label>
           )}
 
           <div className="flex flex-wrap items-center gap-2">
@@ -168,7 +202,7 @@ export function ScenarioModal({ open, onClose, imagesCount, ttsLanguage, current
             <Button
               size="sm"
               onClick={() => void handleApply()}
-              disabled={!canApply || applying || translating}
+              disabled={!canApply || applying || translating || needsReplaceConfirm}
               className="ml-auto h-8 text-xs bg-[#E8B44C] text-[#0B0B0C] hover:bg-[#B88A2E] disabled:opacity-50"
             >
               {translating ? 'Перевод реплик…' : applying ? 'Применение…' : `Применить к проекту${parsed?.lines.length ? ` · ${parsed.lines.length} реплик` : ''}`}

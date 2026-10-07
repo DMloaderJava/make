@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from 'react';
 import { SyncTimeline } from '@/lib/storage/db';
 
 interface TimelineProps {
@@ -19,6 +20,16 @@ interface TimelineProps {
 }
 
 export function Timeline({ timeline, currentTime, duration, onSeek, onSelectPanel, onSelectIntro, onSelectOutro, selectedId, introDuration = 8, outroDuration = 5, panelGap = 0.3, onGapChange }: TimelineProps) {
+  // Локальное значение ползунка: onChange двигает только его, запись в проект
+  // — по завершении жеста (иначе на каждый тик драга updateProject +
+  // buildTimeline + generateSRT + сброс дебаунса автосейва).
+  const [localGap, setLocalGap] = useState(panelGap);
+  useEffect(() => { setLocalGap(panelGap); }, [panelGap]);
+
+  const commitGap = () => {
+    if (onGapChange && Math.abs(localGap - panelGap) > 0.001) onGapChange(localGap);
+  };
+
   const formatTime = (s: number) => {
     if (!isFinite(s) || s <= 0) return '00:00';
     const m = Math.floor(s / 60);
@@ -45,15 +56,19 @@ export function Timeline({ timeline, currentTime, duration, onSeek, onSelectPane
           {onGapChange && (
             <label className="flex items-center gap-2" title="Пауза после реплики до перехода к следующему изображению">
               <span className="font-mono text-[10px] text-[#8A8A93] whitespace-nowrap">
-                пауза {panelGap.toFixed(2).replace(/\.?0+$/, '').replace('.', ',')} с
+                пауза {localGap.toFixed(2).replace(/\.?0+$/, '').replace('.', ',')} с
               </span>
               <input
                 type="range"
                 min={0}
                 max={1.5}
                 step={0.05}
-                value={panelGap}
-                onChange={(e) => onGapChange(Number(e.target.value))}
+                value={localGap}
+                onChange={(e) => setLocalGap(Number(e.target.value))}
+                onMouseUp={commitGap}
+                onTouchEnd={commitGap}
+                onKeyUp={commitGap}
+                onBlur={commitGap}
                 className="w-24 accent-[#E8B44C]"
               />
             </label>
