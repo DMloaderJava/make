@@ -27,6 +27,7 @@ import { renderVideo, checkCapabilities, BackendCapabilities } from '@/lib/pipel
 import type { AudioPlacement } from '@/lib/pipeline/audioMix';
 import { loadProjectAudio, loadProjectIntroAudio, loadProjectOutroAudio, deleteProjectAudio, isOPFSSupported } from '@/lib/storage/opfs';
 import { estimateTotalCost } from '@/lib/validators';
+import { getVoiceButtonState } from '@/lib/pipeline/voiceButtonState';
 import { downloadBlob, formatTime } from '@/lib/utils';
 import { ArrowLeft, Loader2 } from 'lucide-react';
 import Link from 'next/link';
@@ -95,7 +96,6 @@ export default function EditorPage() {
   // Число панелей в текущем прогоне: при точечной переозвучке это НЕ project.panels.length,
   // иначе полоса показывала 2% вместо 20%.
   const [audioTotal, setAudioTotal] = useState(0);
-  const [costEstimate, setCostEstimate] = useState<{ characters: number; cost: string } | null>(null);
   const [isGeneratingIntro, setIsGeneratingIntro] = useState(false);
   const [generatingSEO, setGeneratingSEO] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
@@ -131,6 +131,26 @@ export default function EditorPage() {
     if (!project || project.panels.length === 0) return false;
     return project.panels.some(p => !audioBlobs.has(p.id));
   }, [project, audioBlobs]);
+
+  // Счётчик символов и стоимость — производные от проекта, а не state: раньше
+  // setCostEstimate вызывался только при загрузке и при клике по кнопке, и
+  // после создания панелей/правок текста под кнопкой висело «1 симв.».
+  const costEstimate = useMemo(() => {
+    if (!project) return null;
+    const ttsId = resolveTTSProviderId(project.settings.ttsProvider, getSettings().defaultTTSProvider);
+    if (!ttsId) return null;
+    const cost = estimateTotalCost(project.panels, project.intro, project.outro, ttsId);
+    return { characters: cost.characters, cost: cost.estimatedCost };
+  }, [project]);
+
+  // Что осталось озвучить: панели без аудио или с изменённым после озвучки
+  // текстом. От этого зависят подпись кнопки, её подсветка и подсказка под ней
+  // (связка «панели появились / аудио удалено → нажми озвучить»).
+  const voiceButton = useMemo(() => getVoiceButtonState({
+    panels: project?.panels ?? [],
+    voicedPanelIds: audioBlobs.keys(),
+    audioTexts: project?.audioTexts,
+  }), [project, audioBlobs]);
 
   useEffect(() => {
     let cancelled = false;
@@ -206,9 +226,6 @@ export default function EditorPage() {
         setCurrentTime(0);
         setIsPlaying(false);
         setAudioProgress('');
-
-        const cost = estimateTotalCost(loadedProject.panels, loadedProject.intro, loadedProject.outro, loadedProject.settings.ttsProvider);
-        setCostEstimate({ characters: cost.characters, cost: cost.estimatedCost });
 
         if (loadedProject.panels.length > 0) {
           setSelectedId(loadedProject.panels[0].id);
@@ -662,12 +679,13 @@ export default function EditorPage() {
     }
     const cost = estimateTotalCost(project.panels, project.intro, project.outro, ttsId);
     const providerName = getTTSProvider(ttsId)?.name || ttsId;
+    // Первая строка диалога — та же, что на кнопке: «Озвучить все N панелей»,
+    // «Озвучить оставшиеся N» или «Переозвучить всё».
     const confirmed = confirm(
-      `Озвучить ${project.panels.length} панелей?\nПровайдер: ${providerName} (${ttsId})\nСимволов: ${cost.characters}\nСтоимость: ${cost.estimatedCost}\n\nOPFS кэш — повтор бесплатно. Изменённый текст/голос озвучивается заново.`
+      `${voiceButton.label}?\nПровайдер: ${providerName} (${ttsId})\nСимволов: ${cost.characters}\nСтоимость: ${cost.estimatedCost}\n\nOPFS кэш — повтор бесплатно. Изменённый текст/голос озвучивается заново.`
     );
     if (!confirmed) return;
 
-    setCostEstimate({ characters: cost.characters, cost: cost.estimatedCost });
     try {
       await saveProject(project);
       setSaveStatus('saved');
@@ -833,8 +851,14 @@ export default function EditorPage() {
     }
     setShowScenario(false);
     // Без alert: в встроенном превью диалоги могут быть запрещены браузером.
-    const messages = [notice, ...patch.warnings].filter(Boolean).join('\n');
-    if (messages) setNotice(messages);
+    const messages = [notice, ...patch.warnings].filter(Boolean);
+    // Связка «сценарий → озвучка»: аудио удалено, следующий шаг — «Озвучить всё»
+    // (кнопка при этом подсвечена и показывает «Озвучить все N панелей»).
+    if (patch.panels.length > 0) {
+      messages.push('Аудио удалено. Нажмите «Озвучить всё» — сгенерируется озвучка, SRT станет финальным.');
+    }
+    const noticeText = messages.join('\n');
+    if (noticeText) setNotice(noticeText);
   };
 
   const handleExport = async (type: 'mp4' | 'mp3' | 'srt' | 'seo' | 'all') => {
@@ -1194,15 +1218,20 @@ export default function EditorPage() {
           />
 
           <div className="pt-2">
+            {/* needsAttention: панели появились или аудио удалено/устарело —
+                подсвечиваем кнопку, пока всё не озвучено (связка с остальным UI) */}
             <button
               onClick={handleGenerateAudio}
               disabled={isGeneratingAudio}
-              className="w-full h-11 rounded-[10px] bg-[#E8B44C] text-[#0B0B0C] font-medium text-[14px] hover:bg-[#B88A2E] transition-colors duration-[150ms] disabled:opacity-50 flex items-center justify-center gap-2"
+              className={`w-full h-11 rounded-[10px] bg-[#E8B44C] text-[#0B0B0C] font-medium text-[14px] hover:bg-[#B88A2E] transition-colors duration-[150ms] disabled:opacity-50 flex items-center justify-center gap-2 ${voiceButton.needsAttention && !isGeneratingAudio ? 'shadow-[0_0_18px_rgba(232,180,76,0.35)]' : ''}`}
             >
-              {isGeneratingAudio ? <><Loader2 className="w-4 h-4 animate-spin" /> {audioProgress}</> : 'Озвучить всё'}
+              {isGeneratingAudio ? <><Loader2 className="w-4 h-4 animate-spin" /> {audioProgress}</> : voiceButton.label}
             </button>
             {costEstimate && !isGeneratingAudio && (
               <p className="text-center font-mono text-[11px] text-[#8A8A93] mt-2">{costEstimate.characters} симв. · {costEstimate.cost} · OPFS кэш — повтор бесплатно</p>
+            )}
+            {voiceButton.hint && !isGeneratingAudio && (
+              <p className="text-center text-[11px] text-[#E8B44C] mt-1">{voiceButton.hint}</p>
             )}
             {project.panels.length === 0 && (
               <div className="mt-6 p-8 rounded-[16px] border border-dashed border-[#26262C] bg-[#16161A]/50 text-center">
