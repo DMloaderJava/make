@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import {
+  formatRangeNum,
   genderLabel,
   parseScenario,
   SCENARIO_EXAMPLE,
@@ -138,9 +139,15 @@ export function ScenarioModal({ open, onClose, imagesCount, existingPanels, ttsL
                 <li>После завершения чтения реплики — переход к следующему изображению через {String(SCENARIO_GAP_SECONDS).replace('.', ',')} секунды.</li>
                 <li>Пол персонажа указывается в скобках: (Жен.) или (Муж.).</li>
                 <li>Никакого лишнего текста — только «{SCENARIO_IMAGE_LABEL} N» и реплики.</li>
+                <li>
+                  <span className="text-[#F5F5F7]">Y-диапазон (опционально).</span>{' '}
+                  <span className="font-mono text-[#E8B44C]">{SCENARIO_IMAGE_LABEL} 1 [0..30%]</span> — панель занимает верхние 30% картинки.
+                  Если не указан — вся картинка = одна панель (лента не скроллится). Для длинных webtoon-полос указывайте
+                  диапазоны — тогда лента едет по панелям и совпадает с озвучкой.
+                </li>
               </ol>
               <p className="text-[11px] leading-5 text-[#8A8A93]">
-                При применении: интро и аутро очищаются, пол используется для автоподбора голоса
+                При применении: интро и аутро сохраняются, пол используется для автоподбора голоса
                 {imagesCount > 0 ? `; изображений в проекте: ${imagesCount}` : ''}.
               </p>
             </div>
@@ -240,7 +247,10 @@ export function ScenarioModal({ open, onClose, imagesCount, existingPanels, ttsL
                   {parsed.lines.map((line, i) => (
                     <div key={i} className="flex items-baseline gap-2 text-[11px] leading-5">
                       <span className="font-mono text-[#8A8A93] shrink-0">{String(i + 1).padStart(2, '0')}</span>
-                      <span className="font-mono text-[#E8B44C] shrink-0">{SCENARIO_IMAGE_LABEL} {line.imageIndex + 1}</span>
+                      <span className="font-mono text-[#E8B44C] shrink-0">
+                        {SCENARIO_IMAGE_LABEL} {line.imageIndex + 1}
+                        {line.yRange && <span className="text-[#8A8A93]"> [{formatRangeNum(line.yRange.from)}..{formatRangeNum(line.yRange.to)}%]</span>}
+                      </span>
                       <span className="truncate">
                         <span className="text-[#F5F5F7]">{line.character}</span>
                         {line.gender && <span className="text-[#8A8A93]"> ({genderLabel(line.gender)})</span>}

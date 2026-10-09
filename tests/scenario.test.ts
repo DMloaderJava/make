@@ -40,7 +40,10 @@ test('parseScenario: разбирает формат ТЗ (изображени�
 test('parseScenario: пример из модуля тоже валиден', () => {
   const { lines, errors } = parseScenario(SCENARIO_EXAMPLE);
   assert.deepEqual(errors, []);
-  assert.equal(lines.length, 3);
+  // v1.3.17: одна картинка на три панели с y-диапазонами + блок без диапазона.
+  assert.equal(lines.length, 4);
+  assert.deepEqual(lines.map(l => l.imageIndex), [0, 0, 0, 1]);
+  assert.deepEqual(lines.map(l => l.yRange), [{ from: 0, to: 30 }, { from: 30, to: 60 }, { from: 60, to: 100 }, null]);
 });
 
 test('parseScenario: устойчив к регистру, пробелам и тире-разделителю', () => {

@@ -88,7 +88,7 @@ export function Preview({
       images,
       loaded,
       timeline,
-      panels: panels.map(p => ({ id: p.id, imageIndex: p.imageIndex })),
+      panels: panels.map(p => ({ id: p.id, imageIndex: p.imageIndex, bbox: p.bbox, fullFrame: p.fullFrame })),
       frameWidth: FRAME_W,
       frameHeight: FRAME_H,
       viewport: resolveStripViewport(EXPORT_FRAME_H, stripViewport) * ratio,
@@ -124,7 +124,7 @@ export function Preview({
         state.stripScene.layout,
         state.timeline,
         next,
-        state.panels.map(p => ({ id: p.id, imageIndex: p.imageIndex }))
+        state.panels
       );
       if (target !== null && Math.abs(target - state.currentTime) > 0.01) state.onSeek(target);
       window.clearTimeout(wheelIdleTimer.current);
@@ -149,7 +149,7 @@ export function Preview({
       stripScene.layout,
       timeline,
       next,
-      panels.map(p => ({ id: p.id, imageIndex: p.imageIndex }))
+      panels
     );
     if (target !== null) onSeek(target);
   };

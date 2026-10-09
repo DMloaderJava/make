@@ -1,6 +1,6 @@
 {
   "name": "manga-voice-studio",
-  "version": "1.3.16",
+  "version": "1.3.17",
   "private": true,
   "description": "Self-hosted веб-инструмент для автоматической генерации озвученных видео из изображений манги/комиксов",
   "engines": {
@@ -12,7 +12,7 @@
     "start": "next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test tests/wav.test.ts tests/mime.test.ts tests/audioMix.test.ts tests/audioSignature.test.ts tests/mangaStrip.test.ts tests/ttsProviderPolicy.test.ts tests/voiceResolver.test.ts tests/cartesia.test.ts tests/renderClock.test.ts tests/pipelineScheduler.test.ts tests/launcherChecks.test.ts tests/providerErrorMapping.test.ts tests/projectSettings.test.ts tests/gemini.test.ts tests/deepgram.test.ts tests/speechify.test.ts tests/llmProviderCatalog.test.ts tests/scenario.test.ts tests/draw.test.ts tests/srt.test.ts tests/channel.test.ts tests/voicePipeline.test.ts",
+    "test": "tsx --test tests/wav.test.ts tests/mime.test.ts tests/audioMix.test.ts tests/audioSignature.test.ts tests/mangaStrip.test.ts tests/ttsProviderPolicy.test.ts tests/voiceResolver.test.ts tests/cartesia.test.ts tests/renderClock.test.ts tests/pipelineScheduler.test.ts tests/launcherChecks.test.ts tests/providerErrorMapping.test.ts tests/projectSettings.test.ts tests/gemini.test.ts tests/deepgram.test.ts tests/speechify.test.ts tests/llmProviderCatalog.test.ts tests/scenario.test.ts tests/scenarioRanges.test.ts tests/draw.test.ts tests/srt.test.ts tests/channel.test.ts tests/voicePipeline.test.ts",
     "check:versions": "node scripts/check-version.mjs",
     "check:launchers": "node scripts/check-launchers.mjs",
     "smoke:tts": "tsx scripts/smoke-tts.ts",

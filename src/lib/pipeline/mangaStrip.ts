@@ -47,6 +47,58 @@ export interface ScrollSpan {
   slotIndex: number;
   start: number;
   end: number;
+  /**
+   * Явный диапазон скролла (px ленты) для панели с y-bbox (v1.3.17): окно
+   * приходит в startPx к началу звучания и доезжает до endPx к его концу.
+   * Без них позиция считается по слоту целиком (страница как одна панель).
+   */
+  startPx?: number;
+  endPx?: number;
+}
+
+/** Панель для ленты: достаточно id, страницы и (опционально) bbox/fullFrame. */
+export interface StripPanelRef {
+  id: number;
+  imageIndex: number;
+  bbox?: { x: number; y: number; width: number; height: number };
+  fullFrame?: boolean;
+}
+
+/**
+ * Y-диапазон панели в процентах высоты страницы, если он «настоящий».
+ * null — панель на всю страницу: fullFrame, нет bbox, bbox 0..100 или битые числа.
+ * X не учитывается — лента всегда на всю ширину.
+ */
+export function panelYRange(panel: StripPanelRef | undefined): { from: number; to: number } | null {
+  if (!panel || panel.fullFrame === true || !panel.bbox) return null;
+  const { y, height } = panel.bbox;
+  if (!Number.isFinite(y) || !Number.isFinite(height) || height <= 0) return null;
+  const from = Math.max(0, Math.min(100, y));
+  const to = Math.max(0, Math.min(100, y + height));
+  if (to <= from) return null;
+  if (from <= 0 && to >= 100) return null;
+  return { from, to };
+}
+
+/**
+ * Диапазон скролла для y-полосы [from..to]% страницы: верх полосы — у верха
+ * кадра в начале, низ полосы — у низа кадра в конце. Полоса ниже кадра —
+ * одна точка (центр полосы по центру кадра).
+ */
+function rangeScrollPx(
+  layout: StripLayout,
+  slot: StripSlot,
+  range: { from: number; to: number }
+): { startPx: number; endPx: number } {
+  const yTop = slot.y + slot.height * (range.from / 100);
+  const yBot = slot.y + slot.height * (range.to / 100);
+  const topPx = yTop;
+  const botPx = yBot - layout.frameHeight;
+  if (botPx <= topPx) {
+    const center = clampScroll((yTop + yBot) / 2 - layout.frameHeight / 2, layout);
+    return { startPx: center, endPx: center };
+  }
+  return { startPx: clampScroll(topPx, layout), endPx: clampScroll(botPx, layout) };
 }
 
 export interface ScrollKeyframe {
@@ -175,21 +227,26 @@ export function buildScrollKeyframes(
 
   const isLong = (slot: StripSlot): boolean => slot.height > layout.frameHeight + 1;
 
-  /** Куда окно приходит, когда страница начинает звучать. */
-  const entryY = (slotIndex: number): number => {
-    const slot = layout.slots[slotIndex];
+  const hasPx = (span: ScrollSpan): boolean =>
+    typeof span.startPx === 'number' && typeof span.endPx === 'number';
+
+  /** Куда окно приходит, когда страница (панель) начинает звучать. */
+  const entryY = (span: ScrollSpan): number => {
+    if (hasPx(span)) return clampScroll(panInside ? span.startPx! : (span.startPx! + span.endPx!) / 2, layout);
+    const slot = layout.slots[span.slotIndex];
     if (!slot) return 0;
     // Длинную страницу читаем с верха, короткую — с центра.
-    return isLong(slot) && panInside ? clampScroll(slot.y, layout) : targetScrollForSlot(layout, slotIndex);
+    return isLong(slot) && panInside ? clampScroll(slot.y, layout) : targetScrollForSlot(layout, span.slotIndex);
   };
 
-  /** Где окно оказывается к концу звучания страницы. */
-  const exitY = (slotIndex: number): number => {
-    const slot = layout.slots[slotIndex];
+  /** Где окно оказывается к концу звучания страницы (панели). */
+  const exitY = (span: ScrollSpan): number => {
+    if (hasPx(span)) return clampScroll(panInside ? span.endPx! : (span.startPx! + span.endPx!) / 2, layout);
+    const slot = layout.slots[span.slotIndex];
     if (!slot) return 0;
     const top = clampScroll(slot.y, layout);
     const bottom = clampScroll(slot.y + slot.height - layout.frameHeight, layout);
-    return isLong(slot) && panInside && bottom > top ? bottom : targetScrollForSlot(layout, slotIndex);
+    return isLong(slot) && panInside && bottom > top ? bottom : targetScrollForSlot(layout, span.slotIndex);
   };
 
   const keys: ScrollKeyframe[] = [];
@@ -213,11 +270,13 @@ export function buildScrollKeyframes(
   // страницы дают совпадающую позицию окна, смена страницы визуально не читается.
   // В таком случае смещаем вход следующей страницы так, чтобы она въезжала
   // сверху, а не появлялась в той же точке.
-  const entries = ordered.map(span => entryY(span.slotIndex));
+  // Панели с явным диапазоном (y-bbox) не нуджим: их позиция задана автором.
+  const entries = ordered.map(span => entryY(span));
   for (let i = 1; i < entries.length; i++) {
+    if (hasPx(ordered[i])) continue;
     const slot = layout.slots[ordered[i].slotIndex];
     if (!slot) continue;
-    const prevExit = exitY(ordered[i - 1].slotIndex);
+    const prevExit = exitY(ordered[i - 1]);
     if (Math.abs(entries[i] - prevExit) < 8) {
       const nudged = clampScroll(slot.y - Math.min(layout.gap, 8), layout);
       if (Math.abs(nudged - prevExit) >= 8) entries[i] = nudged;
@@ -236,11 +295,16 @@ export function buildScrollKeyframes(
     const transitionLength = Math.min(transition, Math.max(0, duration - minHold));
     const transitionStart = Math.max(span.start, span.end - transitionLength);
 
-    if (isLong(slot) && panInside) {
+    if (hasPx(span)) {
+      // Панель с y-диапазоном: проезжаем ровно её полосу (для короткой
+      // полосы startPx === endPx — окно стоит на её центре).
+      pushKey(span.start, entries[i], 'linear');
+      pushKey(transitionStart, exitY(span), 'linear');
+    } else if (isLong(slot) && panInside) {
       // Страница длиннее кадра: пока звучит озвучка — медленно проезжаем её
       // сверху вниз (вебтун-чтение).
       pushKey(span.start, entries[i], 'linear');
-      pushKey(transitionStart, exitY(span.slotIndex), 'linear');
+      pushKey(transitionStart, exitY(span), 'linear');
     } else {
       // Для короткой страницы entryY == target, НО нудж выше мог сдвинуть
       // entries[i]. Раньше здесь брался target — и ключ удержания с тем же
@@ -258,7 +322,7 @@ export function buildScrollKeyframes(
     } else {
       // Последняя страница: окно остаётся ТАМ ЖЕ, где закончился проезд,
       // а не откатывается к центру (иначе на длинном вебтуне — рывок вверх).
-      pushKey(span.end, exitY(span.slotIndex), 'linear');
+      pushKey(span.end, exitY(span), 'linear');
     }
   });
 
@@ -430,6 +494,42 @@ export function buildScrollSpans(
     .sort((a, b) => a.start - b.start);
 }
 
+/**
+ * Интервалы скролла для сцены ленты (v1.3.17).
+ *
+ * - Панели без y-диапазона (fullFrame / bbox 0..100 / старые проекты) — как
+ *   раньше: страница звучит от первой до последней своей панели и читается
+ *   как единое целое (buildScrollSpans).
+ * - Панели с y-диапазоном (сценарий «Изображение 1 [0..30%]», vision-bbox) —
+ *   отдельный интервал на каждую реплику с явным диапазоном пикселей:
+ *   лента едет по панелям и совпадает с озвучкой.
+ *
+ * Если ни у одной панели нет диапазона — результат идентичен buildScrollSpans.
+ */
+export function buildStripScrollSpans(
+  timeline: Array<{ panelId: number; imageIndex?: number; audioStart: number; audioEnd: number }>,
+  layout: StripLayout,
+  panels?: StripPanelRef[]
+): ScrollSpan[] {
+  const byId = new Map((panels ?? []).map(p => [p.id, p]));
+  const pageSegments: typeof timeline = [];
+  const out: ScrollSpan[] = [];
+  for (const seg of timeline) {
+    const panel = byId.get(seg.panelId);
+    const range = panelYRange(panel);
+    const imageIndex = typeof seg.imageIndex === 'number' ? seg.imageIndex : panel?.imageIndex;
+    const slotIndex = imageIndex === undefined ? -1 : layout.slots.findIndex(s => s.index === imageIndex);
+    if (!range || slotIndex === -1) {
+      pageSegments.push(seg);
+      continue;
+    }
+    const { startPx, endPx } = rangeScrollPx(layout, layout.slots[slotIndex], range);
+    out.push({ slotIndex, start: seg.audioStart, end: seg.audioEnd, startPx, endPx });
+  }
+  if (out.length === 0) return buildScrollSpans(timeline, panels);
+  return [...buildScrollSpans(pageSegments, panels), ...out].sort((a, b) => a.start - b.start);
+}
+
 /** Дефолты режима ленты (используются и в UI, и в экспорте). */
 export const STRIP_DEFAULTS = {
   viewportRatio: 1, // viewport = frameHeight
@@ -491,21 +591,30 @@ export interface PanelScrollSpan {
 /**
  * Строит PanelScrollSpan для каждой панели таймлайна.
  * Изображение панели берётся из сегмента (imageIndex), fallback — panels.
+ * Если у панели есть y-диапазон (bbox не на всю высоту, не fullFrame) —
+ * диапазон считается по её полосе внутри страницы, иначе — по странице целиком.
  */
 export function buildPanelScrollSpans(
   timeline: Array<{ panelId: number; imageIndex?: number; audioStart: number; audioEnd: number }>,
   layout: StripLayout,
-  panels?: Array<{ id: number; imageIndex: number }>
+  panels?: StripPanelRef[]
 ): PanelScrollSpan[] {
   const out: PanelScrollSpan[] = [];
   for (const seg of timeline) {
+    const panel = panels?.find(p => p.id === seg.panelId);
     const imageIndex = typeof seg.imageIndex === 'number'
       ? seg.imageIndex
-      : panels?.find(p => p.id === seg.panelId)?.imageIndex;
+      : panel?.imageIndex;
     if (imageIndex === undefined) continue;
     const slotIndex = layout.slots.findIndex(s => s.index === imageIndex);
     if (slotIndex === -1) continue;
     const slot = layout.slots[slotIndex];
+    // Панель с y-диапазоном: свой диапазон внутри страницы (v1.3.17).
+    const range = panelYRange(panel);
+    if (range) {
+      out.push({ panelId: seg.panelId, imageIndex, slotIndex, ...rangeScrollPx(layout, slot, range) });
+      continue;
+    }
     const top = clampScroll(slot.y, layout);
     const bottom = clampScroll(slot.y + slot.height - layout.frameHeight, layout);
     const center = targetScrollForSlot(layout, slotIndex);
@@ -522,16 +631,20 @@ export function buildPanelScrollSpans(
 
 /**
  * Обратный маппинг: позиция скролла → audioStart панели, к которой приехал
- * скролл. Точность — до границы панели: берётся последняя панель страницы,
- * чья озвучка уже началась в момент targetTime (положение скролла внутри
- * диапазона страницы линейно переводится в время диапазона озвучки).
+ * скролл.
+ * - Если у панелей страницы есть y-диапазоны (v1.3.17) — берётся панель,
+ *   чья полоса содержит центр окна; в промежутке между полосами — ближайшая
+ *   по вертикали.
+ * - Иначе — до границы панели: последняя панель страницы, чья озвучка уже
+ *   началась в момент targetTime (положение скролла внутри диапазона
+ *   страницы линейно переводится в время диапазона озвучки).
  * @returns null, если ленты/таймлайна нет или на странице нет панелей.
  */
 export function timeAtScroll(
   layout: StripLayout,
   timeline: Array<{ panelId: number; imageIndex?: number; audioStart: number; audioEnd: number }>,
   scrollY: number,
-  panels?: Array<{ id: number; imageIndex: number }>
+  panels?: StripPanelRef[]
 ): number | null {
   if (layout.slots.length === 0 || timeline.length === 0) return null;
   // Страница в центре окна (как pageIndexAtScroll, но с доступом к слоту).
@@ -556,6 +669,30 @@ export function timeAtScroll(
     })
     .sort((a, b) => a.audioStart - b.audioStart);
   if (segs.length === 0) return null;
+
+  // Панели с y-диапазоном: ищем полосу под центром окна.
+  const ranged = segs
+    .map(s => ({ seg: s, range: panelYRange(panels?.find(p => p.id === s.panelId)) }))
+    .filter((r): r is { seg: typeof segs[number]; range: { from: number; to: number } } => r.range !== null);
+  if (ranged.length > 0) {
+    const relPct = ((center - slot.y) / Math.max(1e-6, slot.height)) * 100;
+    let best = ranged[0];
+    let bestScore = Number.POSITIVE_INFINITY;
+    for (const r of ranged) {
+      const inside = relPct >= r.range.from && relPct <= r.range.to;
+      // Внутри полосы — score < 0 (чем ближе к центру полосы, тем лучше);
+      // снаружи — расстояние до ближайшего края полосы.
+      const mid = (r.range.from + r.range.to) / 2;
+      const score = inside
+        ? -1e6 + Math.abs(relPct - mid)
+        : Math.min(Math.abs(relPct - r.range.from), Math.abs(relPct - r.range.to));
+      if (score < bestScore - 1e-9) {
+        best = r;
+        bestScore = score;
+      }
+    }
+    return best.seg.audioStart;
+  }
 
   const pageStart = segs[0].audioStart;
   const pageEnd = segs[segs.length - 1].audioEnd;
@@ -590,12 +727,13 @@ export function createStripScene(params: {
   sizes: Array<{ width: number; height: number }>;
   images: Array<CanvasImageSource | null | undefined>;
   timeline: Array<{ panelId: number; imageIndex?: number; audioStart: number; audioEnd: number }>;
-  panels?: Array<{ id: number; imageIndex: number }>;
+  panels?: StripPanelRef[];
   options: StripSceneOptions;
 }): StripScene {
   const { sizes, images, timeline, panels, options } = params;
   const layout = computeStripLayout(sizes, options);
-  const spans = buildScrollSpans(timeline, panels);
+  // Панели с y-bbox получают свой интервал скролла — лента едет по ним.
+  const spans = buildStripScrollSpans(timeline, layout, panels);
   const keyframes = buildScrollKeyframes(spans, layout, {
     transition: options.transition ?? STRIP_DEFAULTS.transition,
     panInside: options.panInside,
@@ -627,7 +765,8 @@ export interface StripMediaOptions {
   /** Уже загруженные изображения по тому же ключу. */
   loaded: Map<string, HTMLImageElement>;
   timeline: Array<{ panelId: number; imageIndex?: number; audioStart: number; audioEnd: number }>;
-  panels?: Array<{ id: number; imageIndex: number }>;
+  /** Панели с bbox/fullFrame — без bbox лента читает страницы целиком. */
+  panels?: StripPanelRef[];
   frameWidth: number;
   frameHeight: number;
   /** Сколько px ленты помещается в кадр (по умолчанию — высота кадра). */

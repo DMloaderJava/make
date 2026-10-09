@@ -32,7 +32,7 @@ export interface RenderOptions {
   /** Отступ между страницами ленты, px. */
   stripGap?: number;
   /** Панели проекта: нужны ленте, если в таймлайне нет imageIndex. */
-  panels?: Array<{ id: number; imageIndex: number; fullFrame?: boolean }>;
+  panels?: Array<{ id: number; imageIndex: number; fullFrame?: boolean; bbox?: { x: number; y: number; width: number; height: number } }>;
   /** Предупреждения об обрезанных репликах (текстом, для UI). */
   onAudioTrimmed?: (messages: string[]) => void;
   onProgress?: (progress: number) => void;

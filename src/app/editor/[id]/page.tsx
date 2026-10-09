@@ -937,7 +937,7 @@ export default function EditorPage() {
           renderMode: renderSettings.renderMode,
           stripViewport: renderSettings.stripViewport,
           stripGap: renderSettings.stripGap,
-          panels: project.panels.map(p => ({ id: p.id, imageIndex: p.imageIndex, fullFrame: p.fullFrame })),
+          panels: project.panels.map(p => ({ id: p.id, imageIndex: p.imageIndex, bbox: p.bbox, fullFrame: p.fullFrame })),
           onAudioTrimmed: (messages) => setAudioWarnings(messages),
           preferredBackend: preferredBackend === 'auto' ? undefined : preferredBackend
         });
