@@ -17,6 +17,8 @@
  *      если номер есть у ВСЕХ оставшихся файлов;
  *      иначе — natural sort оставшихся файлов 1:1 с оставшимися целями
  *      (количество обязано совпасть — иначе ошибка, а не усечение).
+ * Этот порядок — контракт (тесты «приоритет: …» в tests/audioImport.test.ts);
+ * менять только вместе с тестами и ТЗ.
  * Конфликт на одном уровне (два файла → одна цель, один файл → две цели,
  * дубль якоря) — ошибка. Более высокий уровень молча вытесняет более низкий.
  */
@@ -86,15 +88,53 @@ export interface PlanImportOptions<TTarget> {
 const DEFAULT_NOUNS: ImportNouns = { genitivePlural: 'панелей', genitiveSingular: 'панели' };
 
 /**
- * Natural sort: «2.mp3» < «10.mp3», «001» ≡ «1». Локаль фиксирована ('ru'),
- * а не системная — иначе план зависел бы от машины. При равенстве по
- * коллатору (регистр, ведущие нули) — по кодовым точкам: порядок полный.
+ * Natural sort: «2.mp3» < «10.mp3», «001» ≡ «1» по значению.
+ *
+ * Без Intl.Collator/localeCompare: их порядок зависит от версии ICU/CLDR
+ * (Node в CI и Chrome у пользователя могли бы разложить файлы по-разному),
+ * а план обязан быть детерминированным. Правила:
+ * - имя режется на куски «цифры» / «не цифры»;
+ * - цифры сравниваются как числа любой длины (без parseInt и переполнения),
+ *   числовой кусок раньше текстового;
+ * - текст — без учёта регистра (toLowerCase не зависит от локали), «ё» = «е»,
+ *   затем по кодовым точкам;
+ * - при полном равенстве (регистр, ведущие нули) — по кодовым точкам исходных
+ *   строк: порядок полный, равных разных имён нет.
  */
-const COLLATOR = new Intl.Collator('ru', { numeric: true, sensitivity: 'base' });
-
 export function naturalCompare(a: string, b: string): number {
-  const byCollator = COLLATOR.compare(a, b);
-  if (byCollator !== 0) return byCollator;
+  const ca = a.match(/\d+|\D+/g) ?? [];
+  const cb = b.match(/\d+|\D+/g) ?? [];
+  const n = Math.min(ca.length, cb.length);
+  for (let i = 0; i < n; i++) {
+    const d = compareChunk(ca[i], cb[i]);
+    if (d !== 0) return d;
+  }
+  if (ca.length !== cb.length) return ca.length - cb.length;
+  return codePointCompare(a, b);
+}
+
+function isDigits(s: string): boolean {
+  return s.charCodeAt(0) >= 48 && s.charCodeAt(0) <= 57;
+}
+
+function compareChunk(x: string, y: string): number {
+  const dx = isDigits(x);
+  const dy = isDigits(y);
+  if (dx && dy) {
+    const nx = x.replace(/^0+(?=\d)/, '');
+    const ny = y.replace(/^0+(?=\d)/, '');
+    if (nx.length !== ny.length) return nx.length - ny.length;
+    return codePointCompare(nx, ny);
+  }
+  if (dx !== dy) return dx ? -1 : 1;
+  return codePointCompare(foldText(x), foldText(y));
+}
+
+function foldText(s: string): string {
+  return s.toLowerCase().replace(/ё/g, 'е');
+}
+
+function codePointCompare(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
@@ -364,7 +404,7 @@ export function planImport<TTarget>(opts: PlanImportOptions<TTarget>): ImportPla
         rest.forEach((file, i) => {
           const n = numbers[i]!;
           if (n < 1 || n > total) {
-            errors.push(`Файл «${file}»: номер ${n} вне 1..${total} (${nouns.genitivePlural} в проекте: ${total})`);
+            errors.push(`Файл «${file}»: номер ${n} вне 1..${total} (${nouns.genitivePlural} в проекте: ${total}) — переименуйте файл или сопоставьте вручную`);
             return;
           }
           claim(file, sortedTargets[n - 1], 'number');

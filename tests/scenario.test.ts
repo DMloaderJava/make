@@ -6,6 +6,7 @@ import {
   scenarioToPanels,
   applyScenarioToProject,
   SCENARIO_EXAMPLE,
+  SCENARIO_EXAMPLE_STRIP,
   SCENARIO_GAP_SECONDS,
   genderLabel,
 } from '../src/lib/pipeline/scenario';
@@ -40,8 +41,13 @@ test('parseScenario: разбирает формат ТЗ (изображени�
 test('parseScenario: пример из модуля тоже валиден', () => {
   const { lines, errors } = parseScenario(SCENARIO_EXAMPLE);
   assert.deepEqual(errors, []);
-  // v1.3.17: одна картинка на три панели с y-диапазонами + блок без диапазона.
-  assert.equal(lines.length, 4);
+  // Базовый пример: три картинки — три реплики, без диапазонов.
+  assert.deepEqual(lines.map(l => [l.imageIndex, l.yRange]), [[0, null], [1, null], [2, null]]);
+});
+
+test('parseScenario: пример webtoon-полос валиден — три полосы одной картинки + картинка целиком', () => {
+  const { lines, errors } = parseScenario(SCENARIO_EXAMPLE_STRIP);
+  assert.deepEqual(errors, []);
   assert.deepEqual(lines.map(l => l.imageIndex), [0, 0, 0, 1]);
   assert.deepEqual(lines.map(l => l.yRange), [{ from: 0, to: 30 }, { from: 30, to: 60 }, { from: 60, to: 100 }, null]);
 });

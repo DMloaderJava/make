@@ -196,8 +196,25 @@ test('номера: вне диапазона и дубль номера (001 �
   const plan = planAudioImport(files('001.mp3', '1.wav', '005.mp3'), PANELS);
   assert.deepEqual(plan.errors, [
     'Дубль: «001.mp3» и «1.wav» претендуют на «Изображение 1 [0..30%] · Аня»',
-    'Файл «005.mp3»: номер 5 вне 1..4 (панелей в проекте: 4)',
+    'Файл «005.mp3»: номер 5 вне 1..4 (панелей в проекте: 4) — переименуйте файл или сопоставьте вручную',
   ]);
+});
+
+test('номера: дырка — 001 и 003 при трёх панелях → панель 2 без файла, предупреждение', () => {
+  const three = PANELS.slice(0, 3);
+  const plan = planAudioImport(files('003.mp3', '001.mp3'), three);
+  assert.deepEqual(plan.errors, []);
+  assert.deepEqual(pairs(plan), [[1, '001.mp3'], [3, '003.mp3']]);
+  assert.deepEqual(plan.unmatchedTargets.map(p => p.id), [2]);
+  assert.deepEqual(plan.warnings, ['Панель «Изображение 1 [30..60%] · Борис» без файла — останется TTS']);
+});
+
+test('naturalCompare: без Intl — кириллица, «ё» = «е», длинные числа, числа раньше текста', () => {
+  assert.deepEqual(['яма.mp3', 'жук.mp3', 'ёж.mp3', 'еда.mp3'].sort(naturalCompare), ['еда.mp3', 'ёж.mp3', 'жук.mp3', 'яма.mp3']);
+  assert.ok(naturalCompare('9.mp3', '12345678901234567890.mp3') < 0, 'числа любой длины, без переполнения');
+  assert.ok(naturalCompare('1.mp3', 'a.mp3') < 0);
+  assert.ok(naturalCompare('Глава 2 — сцена 10', 'глава 2 — сцена 9') > 0);
+  assert.equal(naturalCompare('a.mp3', 'a.mp3'), 0);
 });
 
 test('leadingNumber: только номер в начале, за которым разделитель', () => {
