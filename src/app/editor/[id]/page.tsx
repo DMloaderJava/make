@@ -11,6 +11,7 @@ import { VoicesModal } from '@/components/studio/modals/VoicesModal';
 import { ExportModal } from '@/components/studio/modals/ExportModal';
 import { ScenarioModal } from '@/components/studio/modals/ScenarioModal';
 import { IntroOutroModal } from '@/components/studio/modals/IntroOutroModal';
+import { AudioImportModal, type AudioImportApplyControls } from '@/components/studio/modals/AudioImportModal';
 import { Input } from '@/components/ui/input';
 import { getAllKeys, getSettings } from '@/lib/storage/local';
 import { getLLMProvider, resolveLLMVisionModel } from '@/lib/providers/llm';
@@ -20,7 +21,7 @@ import { translateScenarioLines, isTranslatableLanguage } from '@/lib/pipeline/t
 import { generateIntro, generateOutro, generateFallbackIntro, generateFallbackOutro, resolveChannelName } from '@/lib/pipeline/generateIntro';
 import { formatSEOPackage, generateSEO, generateFallbackSEO } from '@/lib/pipeline/generateSEO';
 import { generateAllAudio } from '@/lib/pipeline/generateAudio';
-import { clearImportMark } from '@/lib/pipeline/audioImport';
+import { applyAudioImport, clearImportMark, markPanelsImported, type AppliedAudio, type AudioImportPlan } from '@/lib/pipeline/audioImport';
 import { resolveTTSProviderId } from '@/lib/pipeline/projectSettings';
 import { getTTSProvider } from '@/lib/providers/tts/catalog';
 import { concatenateAudioBlobs } from '@/lib/pipeline/assembleVideo';
@@ -106,6 +107,7 @@ export default function EditorPage() {
   const [showExport, setShowExport] = useState(false);
   const [showScenario, setShowScenario] = useState(false);
   const [showIntroOutro, setShowIntroOutro] = useState(false);
+  const [showAudioImport, setShowAudioImport] = useState(false);
   const [voicingIntroOutro, setVoicingIntroOutro] = useState(false);
   const [backendCaps, setBackendCaps] = useState<BackendCapabilities | null>(null);
   const [preferredBackend, setPreferredBackend] = useState<'auto' | 'webcodecs' | 'canvas'>('auto');
@@ -748,14 +750,90 @@ export default function EditorPage() {
     }
   };
 
-  /** Точечная переозвучка одной панели: чистим OPFS-аудио и синтезируем заново. */
-  const handleRegeneratePanel = async (panelId: number) => {
+  /** id панелей, у которых сейчас есть аудио — «уже есть» для плана импорта. */
+  const existingAudioIds = useMemo(() => [...audioBlobs.keys()], [audioBlobs]);
+
+  /**
+   * Импорт аудио (v1.3.18): applyAudioImport пишет файлы в OPFS по ключам
+   * панелей; после КАЖДОГО записанного файла отметка «импорт» сразу уходит в
+   * IDB (падение вкладки на 4-м файле оставит 3 видимых импорта, а не файлы без
+   * отметки, которые «Озвучить всё» приняло бы за устаревший TTS). Состояние
+   * редактора, таймлайн и SRT — один раз в конце.
+   */
+  const handleImportAudio = async (
+    plan: AudioImportPlan,
+    files: Map<string, File>,
+    controls: AudioImportApplyControls
+  ) => {
+    if (!project) throw new Error('Проект не загружен');
+    const snapshot = project;
+    const baseDurations: Record<number, number> = {};
+    audioDurations.forEach((v, k) => { baseDurations[k] = v; });
+    const appliedSoFar: AppliedAudio[] = [];
+    let saveChain: Promise<void> = Promise.resolve();
+    const persistProgress = () => {
+      const durations = { ...baseDurations };
+      for (const a of appliedSoFar) durations[a.panelId] = a.duration;
+      const next = { ...snapshot, panels: markPanelsImported(snapshot.panels, appliedSoFar), audioDurations: durations };
+      saveChain = saveChain.then(() => saveProject(next)).catch((e) => console.warn('Не удалось сохранить отметку импорта', e));
+    };
+
+    const report = await applyAudioImport(plan, files, {
+      projectId: snapshot.id,
+      currentPanelIds: snapshot.panels.map(p => p.id),
+      signal: controls.signal,
+      onProgress: (done, total) => controls.onProgress(done, total),
+      onApplied: (entry) => {
+        appliedSoFar.push(entry);
+        persistProgress();
+      },
+    });
+    await saveChain;
+    if (report.applied.length === 0) return report;
+
+    const blobs = new Map(audioBlobs);
+    const full = new Map(audioFull);
+    const newDur = new Map(audioDurations);
+    for (const a of report.applied) {
+      const blob = files.get(a.file);
+      if (!blob) continue;
+      blobs.set(a.panelId, blob);
+      full.set(a.panelId, { blob, duration: a.duration });
+      newDur.set(a.panelId, a.duration);
+    }
+    setAudioBlobs(blobs);
+    setAudioFull(full);
+    setAudioDurations(newDur);
+
+    const panels = markPanelsImported(snapshot.panels, report.applied);
+    const obj: Record<number, number> = {};
+    newDur.forEach((v, k) => { obj[k] = v; });
+    const real: Record<number, number> = {};
+    blobs.forEach((_, k) => { if (newDur.has(k)) real[k] = newDur.get(k)!; });
+    const rebuilt = rebuildSrt({
+      panels,
+      audioDurations: newDur,
+      voiceAssignments: snapshot.voiceAssignments,
+      intro: snapshot.intro,
+      outro: snapshot.outro,
+      introDuration: snapshot.introDuration,
+      outroDuration: snapshot.outroDuration,
+      panelGap,
+      realDurations: real,
+    });
+    updateProject({ panels, timeline: rebuilt.timeline, srt: rebuilt.srt, audioDurations: obj });
+    return report;
+  };
+
+  /**
+   * Точечная переозвучка одной панели: чистим OPFS-аудио и синтезируем заново.
+   * Импортированное аудио — только с подтверждением из карточки панели
+   * (двойной клик по кнопке, не confirm(): в iframe-превью он молча false).
+   */
+  const handleRegeneratePanel = async (panelId: number, opts?: { confirmedImportOverwrite?: boolean }) => {
     if (!project || isGeneratingAudio) return;
     const panel = project.panels.find(p => p.id === panelId);
-    if (panel?.audioSource === 'import') {
-      const name = panel.audioFileName ? ` «${panel.audioFileName}»` : '';
-      if (!confirm(`Перезаписать импортированное аудио${name} озвучкой TTS?\nФайл будет удалён из проекта.`)) return;
-    }
+    if (panel?.audioSource === 'import' && !opts?.confirmedImportOverwrite) return;
     try {
       const { deleteProjectAudio } = await import('@/lib/storage/opfs');
       await deleteProjectAudio(project.id, panelId);
@@ -1108,8 +1186,16 @@ export default function EditorPage() {
         </div>
 
         <div className="flex items-center gap-2">
-          <button onClick={() => setShowScenario(true)} className="h-8 px-3 rounded-[6px] bg-[#16161A] border border-[#26262C] text-xs hover:bg-[#1E1E23] transition-colors">
+          <button onClick={() => setShowScenario(true)} className="h-8 px-3 rounded-[6px] bg-[#16161A] border border-[#26262C] text-xs hover:bg-[#1E1E23] transition-colors whitespace-nowrap">
             Сценарий
+          </button>
+          <button
+            onClick={() => setShowAudioImport(true)}
+            disabled={isGeneratingAudio || project.panels.length === 0}
+            title={project.panels.length === 0 ? 'Сначала создайте панели (сценарий или анализ изображений)' : 'Свои аудиофайлы на панели — по манифесту, якорю в имени, номеру или порядку'}
+            className="h-8 px-3 rounded-[6px] bg-[#16161A] border border-[#26262C] text-xs hover:bg-[#1E1E23] transition-colors whitespace-nowrap disabled:opacity-40 disabled:hover:bg-[#16161A]"
+          >
+            Импорт аудио
           </button>
           <button onClick={() => setShowIntroOutro(true)} className="h-8 px-3 rounded-[6px] bg-[#16161A] border border-[#26262C] text-xs hover:bg-[#1E1E23] transition-colors">
             Интро/Аутро
@@ -1289,6 +1375,14 @@ export default function EditorPage() {
         onApply={handleApplyScenario}
         onTranslate={handleTranslateScenario}
       />
+
+      {showAudioImport && <AudioImportModal
+        open
+        onClose={() => setShowAudioImport(false)}
+        panels={project.panels}
+        existingAudio={existingAudioIds}
+        onApply={handleImportAudio}
+      />}
 
       <IntroOutroModal
         open={showIntroOutro}

@@ -303,3 +303,48 @@ export function clearImportMark<P extends { id: number; audioSource?: 'tts' | 'i
     return rest;
   });
 }
+
+// ---------------------------------------------------------------------------
+// Режим для модалки (без ручного переключателя в этой итерации)
+// ---------------------------------------------------------------------------
+
+/**
+ * Аргументы плана из состояния модалки. Есть манифест → он главный, а
+ * оставшиеся файлы не раскладываются по порядку (иначе неполный манифест
+ * давал бы ошибку «Файлов N, панелей M» вместо «файл не сопоставлен»).
+ * Нет манифеста → имя-якорь, затем номер/порядок (приоритет planImport).
+ */
+export function autoImportOptions(state: {
+  manifest: string;
+  overwrite: boolean;
+  existingAudio: Iterable<number>;
+}): PlanAudioImportOptions {
+  const manifest = state.manifest.trim();
+  return {
+    manifest: manifest || undefined,
+    allowNameAnchor: true,
+    useOrder: !manifest,
+    overwrite: state.overwrite,
+    existingAudio: state.existingAudio,
+  };
+}
+
+const VIA_LABEL: Record<string, string> = {
+  manual: 'вручную',
+  manifest: 'по манифесту',
+  name: 'по якорю в имени',
+  number: 'по номеру в имени',
+  order: 'по порядку имён',
+};
+
+/** «по манифесту + по якорю в имени» — чем реально сопоставлены файлы плана. */
+export function describeImportMode(plan: Pick<AudioImportPlan, 'matches' | 'skipped'>): string {
+  const vias = new Set([...plan.matches, ...plan.skipped].map(m => m.via));
+  const order = ['manual', 'manifest', 'name', 'number', 'order'];
+  const labels = order.filter(v => vias.has(v as never)).map(v => VIA_LABEL[v]);
+  return labels.length > 0 ? labels.join(' + ') : '—';
+}
+
+export function importViaLabel(via: string): string {
+  return VIA_LABEL[via] ?? via;
+}

@@ -8,7 +8,7 @@ import './fixtures/browserEnv';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { PanelData } from '../src/lib/pipeline/extractPanels';
-import { applyAudioImport, clearImportMark, markPanelsImported, planAudioImport } from '../src/lib/pipeline/audioImport';
+import { applyAudioImport, autoImportOptions, clearImportMark, describeImportMode, markPanelsImported, planAudioImport } from '../src/lib/pipeline/audioImport';
 import { getProjectAudioSignature, loadProjectAudio, saveProjectAudio, saveProjectAudioSignature } from '../src/lib/storage/opfs';
 import { leadingNumber, naturalCompare, parseManifest, planImport } from '../src/lib/pipeline/importPlan';
 import { serializeScenario } from '../src/lib/pipeline/scenario';
@@ -532,4 +532,43 @@ test('идемпотентность: повторный импорт тех ж�
   const first = await applyAudioImport(planAudioImport(files(...names), PANELS), fileMap(names), { projectId, decode: fakeDecode, estimateStorage: noQuota });
   const again = planAudioImport(files(...names), markPanelsImported(PANELS, first.applied), { existingAudio: first.applied.map(a => a.panelId) });
   assert.deepEqual([again.errors, again.matches.length, again.skipped.length], [[], 0, 4]);
+});
+
+// ---------- Автовыбор режима (модалка: useAudioImportPlan → autoImportOptions) ----------
+
+test('модалка без манифеста: имя-якорь, затем номер/порядок', () => {
+  const plan = planAudioImport(
+    files('Изображение 2.mp3', '01.wav', '02.wav', '03.wav'),
+    PANELS,
+    autoImportOptions({ manifest: '  \n', overwrite: false, existingAudio: [] }),
+  );
+  assert.deepEqual(plan.errors, []);
+  assert.deepEqual(pairs(plan).sort(), [[1, '01.wav'], [2, '02.wav'], [3, '03.wav'], [4, 'Изображение 2.mp3']]);
+  assert.match(describeImportMode(plan), /по якорю в имени/);
+});
+
+test('модалка с манифестом: неполный манифест не превращается в ошибку количества', () => {
+  const plan = planAudioImport(
+    files('a.mp3', 'Изображение 2.mp3', 'лишний.mp3'),
+    PANELS,
+    autoImportOptions({ manifest: 'Изображение 1 [0..30%] = a.mp3', overwrite: false, existingAudio: [] }),
+  );
+  assert.deepEqual(pairs(plan).sort(), [[1, 'a.mp3'], [4, 'Изображение 2.mp3']]);
+  assert.deepEqual(plan.unmatchedFiles, ['лишний.mp3']);
+  assert.deepEqual(plan.errors, []);
+  assert.ok(plan.warnings.includes('Файл «лишний.mp3» не сопоставлен'));
+  // без манифеста те же 2 из 4 — это уже ошибка количества
+  const noManifest = planAudioImport(files('a.mp3', 'b.mp3'), PANELS, autoImportOptions({ manifest: '', overwrite: false, existingAudio: [] }));
+  assert.deepEqual(noManifest.errors, ['Файлов 2, панелей 4 — сопоставьте вручную или добавьте манифест']);
+  assert.equal(describeImportMode(plan), 'по манифесту + по якорю в имени');
+});
+
+test('модалка: «Перезаписать» выключен → панели с аудио пропускаются, включён → применяются', () => {
+  const names = files('01.mp3', '02.mp3', '03.mp3', '04.mp3');
+  const keep = planAudioImport(names, PANELS, autoImportOptions({ manifest: '', overwrite: false, existingAudio: [2, 4] }));
+  assert.deepEqual(keep.matches.map(m => m.target.id), [1, 3]);
+  assert.deepEqual(keep.skipped.map(m => m.target.id), [2, 4]);
+  const over = planAudioImport(names, PANELS, autoImportOptions({ manifest: '', overwrite: true, existingAudio: [2, 4] }));
+  assert.deepEqual(over.matches.map(m => m.target.id), [1, 2, 3, 4]);
+  assert.deepEqual(over.skipped, []);
 });

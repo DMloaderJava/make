@@ -19,12 +19,16 @@ interface ContextPanelProps {
   onGenerateIntro?: () => void;
   onGenerateOutro?: () => void;
   generating?: boolean;
-  onRegeneratePanel?: (panelId: number) => void;
+  onRegeneratePanel?: (panelId: number, opts?: { confirmedImportOverwrite?: boolean }) => void;
   regenerating?: boolean;
 }
 
 export function ContextPanel({ selected, onUpdatePanel, onUpdateIntro, onUpdateOutro, voiceAssignments, onVoiceChange, onGenerateIntro, onGenerateOutro, generating, onRegeneratePanel, regenerating }: ContextPanelProps) {
   const [voices, setVoices] = useState<Voice[]>([]);
+  // Переозвучка импортированного файла — в два клика (первый вооружает кнопку).
+  // Не confirm(): во встроенном превью (iframe без allow-modals) он молча false.
+  const [armedPanelId, setArmedPanelId] = useState<number | null>(null);
+  // Привязано к id панели и снимается по blur — смена панели снимает его сама.
 
   useEffect(() => {
     const load = async () => {
@@ -134,19 +138,40 @@ export function ContextPanel({ selected, onUpdatePanel, onUpdateIntro, onUpdateO
       <div className="flex items-center justify-between">
         <h4 className="text-[13px] font-medium">Панель {selected.index + 1} · {panel.character} · {panel.emotion}</h4>
         <div className="flex items-center gap-2">
-          <span className="font-mono text-[11px] text-[#8A8A93]">{panel.type}</span>
-          {onRegeneratePanel && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => onRegeneratePanel(panel.id)}
-              disabled={regenerating}
-              title="Синтезировать заново, игнорируя кэши (OPFS и общий TTS-кэш)"
-              className="h-7 text-[11px] bg-[#0B0B0C] border-[#26262C] hover:bg-[#1E1E23]"
+          {panel.audioSource === 'import' && (
+            <span
+              className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-[#1E1A10] border border-[#3A2E14] text-[#C9B27A] max-w-[160px] truncate"
+              title={`Импортированное аудио${panel.audioFileName ? `: ${panel.audioFileName}` : ''} — «Озвучить всё» его не трогает`}
             >
-              ↻ Переозвучить
-            </Button>
+              импорт{panel.audioFileName ? ` · ${panel.audioFileName}` : ''}
+            </span>
           )}
+          <span className="font-mono text-[11px] text-[#8A8A93]">{panel.type}</span>
+          {onRegeneratePanel && (() => {
+            const imported = panel.audioSource === 'import';
+            const armed = imported && armedPanelId === panel.id;
+            return (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  if (imported && !armed) { setArmedPanelId(panel.id); return; }
+                  setArmedPanelId(null);
+                  onRegeneratePanel(panel.id, imported ? { confirmedImportOverwrite: true } : undefined);
+                }}
+                onBlur={() => { if (armed) setArmedPanelId(null); }}
+                disabled={regenerating}
+                title={imported
+                  ? 'Заменить импортированный файл озвучкой TTS (второй клик подтверждает)'
+                  : 'Синтезировать заново, игнорируя кэши (OPFS и общий TTS-кэш)'}
+                className={armed
+                  ? 'h-7 text-[11px] bg-[#1E1010] border-[#3A1414] text-[#E86C4C] hover:bg-[#2A1414]'
+                  : 'h-7 text-[11px] bg-[#0B0B0C] border-[#26262C] hover:bg-[#1E1E23]'}
+              >
+                {armed ? 'Перезаписать импорт?' : '↻ Переозвучить'}
+              </Button>
+            );
+          })()}
         </div>
       </div>
 
