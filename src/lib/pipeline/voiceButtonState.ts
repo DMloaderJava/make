@@ -33,12 +33,12 @@ export function pluralize(n: number, one: string, few: string, many: string): st
 }
 
 /**
- * @param panels        панели проекта
+ * @param panels        панели проекта (audioSource: 'import' — внешний файл, v1.3.18)
  * @param voicedPanelIds ID панелей, для которых сейчас есть аудио (audioBlobs)
  * @param audioTexts    снимок текстов на момент последней озвучки (project.audioTexts)
  */
 export function getVoiceButtonState(params: {
-  panels: Array<{ id: number; dialogue: string }>;
+  panels: Array<{ id: number; dialogue: string; audioSource?: 'tts' | 'import' }>;
   voicedPanelIds: Iterable<number>;
   audioTexts?: Record<number, string> | null;
 }): VoiceButtonState {
@@ -48,6 +48,12 @@ export function getVoiceButtonState(params: {
   let voicedCount = 0;
   for (const panel of params.panels) {
     if (!voicedIds.has(panel.id)) continue;
+    // Импортированный файл не зависит от текста панели: правка реплики его не
+    // «устаревает», и «Озвучить всё» его не тронет — значит, панель озвучена.
+    if (panel.audioSource === 'import') {
+      voicedCount += 1;
+      continue;
+    }
     const snapshot = params.audioTexts?.[panel.id];
     // Аудио есть, но текст панели изменился после озвучки: при следующем
     // прогоне панель уйдёт в TTS заново — для пользователя она «не озвучена».

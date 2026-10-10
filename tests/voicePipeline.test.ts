@@ -9,6 +9,7 @@ import { TTS_PROVIDERS, getTTSProvider } from '../src/lib/providers/tts/catalog'
 import type { TTSProvider } from '../src/lib/providers/tts/types';
 import type { PanelData } from '../src/lib/storage/db';
 import { saveApiKey } from '../src/lib/storage/local';
+import { loadProjectAudio, saveProjectAudio } from '../src/lib/storage/opfs';
 
 /**
  * Сквозной smoke-тест цепочки «Озвучить всё» без браузера и без сети:
@@ -49,6 +50,8 @@ function makeWav(text: string): ArrayBuffer {
 }
 
 let mockCalls = 0;
+/** Тексты, реально ушедшие в синтез (кэш-попадания сюда не попадают). */
+const mockTexts: string[] = [];
 const mockProvider: TTSProvider = {
   id: 'mock',
   name: 'Mock',
@@ -60,6 +63,7 @@ const mockProvider: TTSProvider = {
   },
   async generate(text: string) {
     mockCalls += 1;
+    mockTexts.push(text);
     return makeWav(text);
   },
 };
@@ -276,4 +280,90 @@ test('end-to-end: повторный прогон берёт аудио из к�
   assert.equal(result.panelAudios.size, PANELS.length);
   // OPFS-подписи совпали → панели из сохранённых файлов, синтез не вызывался.
   assert.equal(mockCalls, callsBefore);
+});
+
+// --- F: импортированное аудио (v1.3.18) ---
+
+// У импортированной панели уникальный текст: если бы TTS её тронул, текст
+// оказался бы в mockTexts (общий TTS-кэш его не знает).
+const IMPORTED_TEXT = 'Эта реплика записана актёром, а не TTS.';
+const IMPORTED_PANELS: PanelData[] = PANELS.map(p => (p.id === 2
+  ? { ...p, dialogue: IMPORTED_TEXT, audioSource: 'import' as const, audioFileName: 'voice2.mp3' }
+  : p));
+
+test('generateAllAudio: импортированную панель «Озвучить всё» не перезаписывает и не оплачивает', async () => {
+  const projectId = 'import-skip';
+  await saveProjectAudio(projectId, 2, new Blob(['IMPORTED']));
+  const callsBefore = mockCalls;
+  let estimate: { characters: number } | null = null;
+  const result = await generateAllAudio({
+    projectId,
+    panels: IMPORTED_PANELS,
+    voiceAssignments: {},
+    ttsProviderId: 'mock',
+    language: 'ru',
+    onCostEstimate: (e) => { estimate = e; },
+  });
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(result.keptImported, [2]);
+  assert.ok(!mockTexts.includes(IMPORTED_TEXT), 'импортированная панель в синтез не ушла');
+  assert.ok(mockCalls - callsBefore <= 2, 'синтез — не больше чем для панелей 1 и 3 (остальное из кэша)');
+  assert.equal(result.panelAudios.size, 3);
+  assert.equal(estimate!.characters, PANELS[0].dialogue.length + PANELS[2].dialogue.length, 'импорт не входит в стоимость');
+  assert.equal(await result.panelAudios.get(2)?.blob.text(), 'IMPORTED', 'в результате — импортированный файл');
+  assert.equal(await (await loadProjectAudio(projectId, 2))?.text(), 'IMPORTED', 'в OPFS — он же');
+
+  // Повторный прогон («Переозвучить всё» без force) — тоже не трогает.
+  const again = await generateAllAudio({ projectId, panels: IMPORTED_PANELS, voiceAssignments: {}, ttsProviderId: 'mock', language: 'ru' });
+  assert.deepEqual(again.keptImported, [2]);
+  assert.equal(await (await loadProjectAudio(projectId, 2))?.text(), 'IMPORTED');
+});
+
+test('generateAllAudio: forceRegenerate (кнопка «↻» после подтверждения) перезаписывает импорт', async () => {
+  const projectId = 'import-force';
+  await saveProjectAudio(projectId, 2, new Blob(['IMPORTED']));
+  const callsBefore = mockCalls;
+  const result = await generateAllAudio({
+    projectId,
+    panels: IMPORTED_PANELS,
+    voiceAssignments: {},
+    ttsProviderId: 'mock',
+    language: 'ru',
+    onlyPanelIds: [2],
+    forceRegenerate: true,
+  });
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(result.keptImported, []);
+  assert.equal(mockCalls - callsBefore, 1);
+  assert.equal(mockTexts.at(-1), IMPORTED_TEXT);
+  const stored = await (await loadProjectAudio(projectId, 2))!.arrayBuffer();
+  assert.equal(new TextDecoder().decode(stored.slice(0, 4)), 'RIFF', 'теперь там TTS (WAV)');
+});
+
+test('generateAllAudio: импортированный файл пропал — ошибка, а не тихий TTS', async () => {
+  const callsBefore = mockCalls;
+  const result = await generateAllAudio({
+    projectId: 'import-missing',
+    panels: IMPORTED_PANELS,
+    voiceAssignments: {},
+    ttsProviderId: 'mock',
+    language: 'ru',
+    onlyPanelIds: [2],
+  });
+  assert.deepEqual(result.errors, ['Панель 2: импортированный файл «voice2.mp3» не найден в хранилище — импортируйте заново или переозвучьте панель']);
+  assert.equal(mockCalls, callsBefore);
+  assert.equal(result.panelAudios.has(2), false);
+});
+
+test('getVoiceButtonState: импортированная панель озвучена, даже если текст изменился', () => {
+  const panels = [
+    { id: 1, dialogue: 'Новый текст', audioSource: 'import' as const },
+    { id: 2, dialogue: 'Новый текст' },
+  ];
+  const audioTexts = { 1: 'Старый текст', 2: 'Старый текст' };
+  const state = getVoiceButtonState({ panels, voicedPanelIds: [1, 2], audioTexts });
+  assert.equal(state.voicedCount, 1, 'импорт — озвучен, TTS с изменённым текстом — нет');
+  assert.equal(state.kind, 'partial');
+  // Отметка без файла — не озвучена.
+  assert.equal(getVoiceButtonState({ panels, voicedPanelIds: [], audioTexts }).voicedCount, 0);
 });

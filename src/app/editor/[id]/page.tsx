@@ -20,6 +20,7 @@ import { translateScenarioLines, isTranslatableLanguage } from '@/lib/pipeline/t
 import { generateIntro, generateOutro, generateFallbackIntro, generateFallbackOutro, resolveChannelName } from '@/lib/pipeline/generateIntro';
 import { formatSEOPackage, generateSEO, generateFallbackSEO } from '@/lib/pipeline/generateSEO';
 import { generateAllAudio } from '@/lib/pipeline/generateAudio';
+import { clearImportMark } from '@/lib/pipeline/audioImport';
 import { resolveTTSProviderId } from '@/lib/pipeline/projectSettings';
 import { getTTSProvider } from '@/lib/providers/tts/catalog';
 import { concatenateAudioBlobs } from '@/lib/pipeline/assembleVideo';
@@ -653,7 +654,17 @@ export default function EditorPage() {
       // которые остались в кэше) — это база для следующей мягкой миграции.
       const audioTexts: Record<number, string> = { ...(project.audioTexts || {}) };
       for (const panel of project.panels) audioTexts[panel.id] = panel.dialogue;
-      updateProject({ timeline: tl, srt, audioDurations: obj, audioTexts });
+      // Явная переозвучка (forceRegenerate) заменила импортированный файл TTS —
+      // снимаем отметку «импорт», даже если синтез упал: файл уже удалён.
+      const regeneratedIds = options?.forceRegenerate ? (onlyPanelIds ?? project.panels.map(p => p.id)) : [];
+      const panelsAfter = clearImportMark(project.panels, regeneratedIds);
+      updateProject({
+        timeline: tl,
+        srt,
+        audioDurations: obj,
+        audioTexts,
+        ...(panelsAfter !== project.panels ? { panels: panelsAfter } : {}),
+      });
 
       if (result.errors.length > 0) {
         const [firstError, ...otherErrors] = result.errors;
@@ -677,12 +688,19 @@ export default function EditorPage() {
       setAudioError('Не выбран TTS-провайдер. Откройте «Голоса» и выберите его.');
       return;
     }
-    const cost = estimateTotalCost(project.panels, project.intro, project.outro, ttsId);
+    // Импортированные панели TTS не трогает (generateAllAudio их пропускает) —
+    // и в стоимость они не входят.
+    const ttsPanels = project.panels.filter(p => p.audioSource !== 'import');
+    const importedCount = project.panels.length - ttsPanels.length;
+    const cost = estimateTotalCost(ttsPanels, project.intro, project.outro, ttsId);
     const providerName = getTTSProvider(ttsId)?.name || ttsId;
     // Первая строка диалога — та же, что на кнопке: «Озвучить все N панелей»,
     // «Озвучить оставшиеся N» или «Переозвучить всё».
+    const importedNote = importedCount > 0
+      ? `\nИмпортированное аудио (${importedCount}) не трогается — переозвучить его можно кнопкой «↻» у панели.`
+      : '';
     const confirmed = confirm(
-      `${voiceButton.label}?\nПровайдер: ${providerName} (${ttsId})\nСимволов: ${cost.characters}\nСтоимость: ${cost.estimatedCost}\n\nOPFS кэш — повтор бесплатно. Изменённый текст/голос озвучивается заново.`
+      `${voiceButton.label}?\nПровайдер: ${providerName} (${ttsId})\nСимволов: ${cost.characters}\nСтоимость: ${cost.estimatedCost}${importedNote}\n\nOPFS кэш — повтор бесплатно. Изменённый текст/голос озвучивается заново.`
     );
     if (!confirmed) return;
 
@@ -733,6 +751,11 @@ export default function EditorPage() {
   /** Точечная переозвучка одной панели: чистим OPFS-аудио и синтезируем заново. */
   const handleRegeneratePanel = async (panelId: number) => {
     if (!project || isGeneratingAudio) return;
+    const panel = project.panels.find(p => p.id === panelId);
+    if (panel?.audioSource === 'import') {
+      const name = panel.audioFileName ? ` «${panel.audioFileName}»` : '';
+      if (!confirm(`Перезаписать импортированное аудио${name} озвучкой TTS?\nФайл будет удалён из проекта.`)) return;
+    }
     try {
       const { deleteProjectAudio } = await import('@/lib/storage/opfs');
       await deleteProjectAudio(project.id, panelId);
