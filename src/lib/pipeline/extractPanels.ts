@@ -3,27 +3,10 @@ import { generateLLM, getLLMHttpError } from '../providers/llm/router';
 import { VISION_SYSTEM_PROMPT } from '../prompts/vision-prompt';
 import { validateVisionResult, normalizeCharacters } from '../validators';
 
-export interface PanelData {
-  id: number;
-  bbox: { x: number; y: number; width: number; height: number };
-  dialogue: string;
-  character: string;
-  emotion: string;
-  type: 'speech' | 'thought' | 'narration' | 'sfx';
-  order: number;
-  imageIndex: number;
-  /** Панель на всё изображение (сценарий): contain без камеры, см. db.ts. */
-  fullFrame?: boolean;
-  /**
-   * Откуда аудио панели (v1.3.18). 'import' — внешний файл из «Импорт аудио»:
-   * «Озвучить всё» его не трогает, «↻ Переозвучить» спрашивает подтверждение.
-   * Нет поля — TTS (или аудио ещё нет). Сам файл — по тому же ключу
-   * audio/{id}.mp3, длительность — project.audioDurations[id].
-   */
-  audioSource?: 'tts' | 'import';
-  /** Имя импортированного файла — для подписи в UI и повторного импорта. */
-  audioFileName?: string;
-}
+// Единственный источник типа — сохраняемая схема в db.ts (type-only импорт:
+// runtime-зависимости pipeline → storage не появляется).
+import type { PanelData } from '../storage/db';
+export type { PanelData };
 
 export interface VisionResult {
   imageWidth: number;

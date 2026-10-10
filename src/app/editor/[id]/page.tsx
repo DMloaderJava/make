@@ -15,13 +15,14 @@ import { AudioImportModal, type AudioImportApplyControls } from '@/components/st
 import { Input } from '@/components/ui/input';
 import { getAllKeys, getSettings } from '@/lib/storage/local';
 import { getLLMProvider, resolveLLMVisionModel } from '@/lib/providers/llm';
-import { buildTimeline, DEFAULT_PANEL_GAP, estimateDuration, calculateTotalDuration, rebuildSrt } from '@/lib/pipeline/buildTimeline';
+import { buildTimeline, DEFAULT_PANEL_GAP, calculateTotalDuration, rebuildSrt } from '@/lib/pipeline/buildTimeline';
 import { applyScenarioToProject, serializeScenario, SCENARIO_GAP_SECONDS, type ScenarioLine } from '@/lib/pipeline/scenario';
 import { translateScenarioLines, isTranslatableLanguage } from '@/lib/pipeline/translateScenario';
 import { generateIntro, generateOutro, generateFallbackIntro, generateFallbackOutro, resolveChannelName } from '@/lib/pipeline/generateIntro';
 import { formatSEOPackage, generateSEO, generateFallbackSEO } from '@/lib/pipeline/generateSEO';
 import { generateAllAudio } from '@/lib/pipeline/generateAudio';
-import { applyAudioImport, clearImportMark, markPanelsImported, type AppliedAudio, type AudioImportPlan } from '@/lib/pipeline/audioImport';
+import { applyAudioImport, createImportPersister, mergeAppliedAudio, settleImportRegeneration, type AudioImportPlan } from '@/lib/pipeline/audioImport';
+import { loadPanelAudios } from '@/lib/pipeline/loadPanelAudio';
 import { resolveTTSProviderId } from '@/lib/pipeline/projectSettings';
 import { getTTSProvider } from '@/lib/providers/tts/catalog';
 import { concatenateAudioBlobs } from '@/lib/pipeline/assembleVideo';
@@ -189,26 +190,16 @@ export default function EditorPage() {
         const loadedProject = safeVisionModel === storedProject.settings.visionModel
           ? storedProject
           : { ...storedProject, settings: { ...storedProject.settings, visionModel: safeVisionModel } };
-        const durations = new Map<number, number>();
-        const blobs = new Map<number, Blob>();
-        const full = new Map<number, { blob: Blob; duration: number }>();
-
-        for (const panel of loadedProject.panels) {
-          if (cancelled) return;
-          try {
-            const blob = await loadProjectAudio(loadedProject.id, panel.id);
-            if (blob) {
-              const duration = await getAudioDuration(blob);
-              durations.set(panel.id, duration);
-              blobs.set(panel.id, blob);
-              full.set(panel.id, { blob, duration });
-            } else {
-              durations.set(panel.id, loadedProject.audioDurations?.[panel.id] || estimateDuration(panel.dialogue));
-            }
-          } catch {
-            durations.set(panel.id, loadedProject.audioDurations?.[panel.id] || estimateDuration(panel.dialogue));
-          }
-        }
+        // Аудио панелей — по наличию файла, без фильтра по .sig (импорт без подписи).
+        const loadedAudio = await loadPanelAudios({
+          projectId: loadedProject.id,
+          panels: loadedProject.panels,
+          storedDurations: loadedProject.audioDurations,
+          decode: getAudioDuration,
+          isCancelled: () => cancelled,
+        });
+        if (!loadedAudio) return;
+        const { durations, blobs, full } = loadedAudio;
 
         let loadedIntroAudio: Blob | null = null;
         let loadedOutroAudio: Blob | null = null;
@@ -656,10 +647,19 @@ export default function EditorPage() {
       // которые остались в кэше) — это база для следующей мягкой миграции.
       const audioTexts: Record<number, string> = { ...(project.audioTexts || {}) };
       for (const panel of project.panels) audioTexts[panel.id] = panel.dialogue;
-      // Явная переозвучка (forceRegenerate) заменила импортированный файл TTS —
-      // снимаем отметку «импорт», даже если синтез упал: файл уже удалён.
+      // Явная переозвучка (forceRegenerate): отметка «импорт» снимается только
+      // там, где TTS записал новый файл. Импортированный файл заранее не
+      // удаляется (см. handleRegeneratePanel), так что при упавшем синтезе он
+      // цел — и сообщение об ошибке это говорит. Панели, до которых синтез не
+      // дошёл, и упавшие неотличимы для отметки: обе остаются «импортом».
       const regeneratedIds = options?.forceRegenerate ? (onlyPanelIds ?? project.panels.map(p => p.id)) : [];
-      const panelsAfter = clearImportMark(project.panels, regeneratedIds);
+      const settled = settleImportRegeneration({
+        panels: project.panels,
+        regeneratedIds,
+        succeededIds: result.panelAudios.keys(),
+        errors: result.errors,
+      });
+      const panelsAfter = settled.panels;
       updateProject({
         timeline: tl,
         srt,
@@ -668,8 +668,8 @@ export default function EditorPage() {
         ...(panelsAfter !== project.panels ? { panels: panelsAfter } : {}),
       });
 
-      if (result.errors.length > 0) {
-        const [firstError, ...otherErrors] = result.errors;
+      if (settled.errors.length > 0) {
+        const [firstError, ...otherErrors] = settled.errors;
         setAudioError(otherErrors.length > 0
           ? `${firstError}\nЕщё ошибок: ${otherErrors.length}.`
           : firstError);
@@ -767,61 +767,46 @@ export default function EditorPage() {
   ) => {
     if (!project) throw new Error('Проект не загружен');
     const snapshot = project;
-    const baseDurations: Record<number, number> = {};
-    audioDurations.forEach((v, k) => { baseDurations[k] = v; });
-    const appliedSoFar: AppliedAudio[] = [];
-    let saveChain: Promise<void> = Promise.resolve();
-    const persistProgress = () => {
-      const durations = { ...baseDurations };
-      for (const a of appliedSoFar) durations[a.panelId] = a.duration;
-      const next = { ...snapshot, panels: markPanelsImported(snapshot.panels, appliedSoFar), audioDurations: durations };
-      saveChain = saveChain.then(() => saveProject(next)).catch((e) => console.warn('Не удалось сохранить отметку импорта', e));
-    };
+    const persister = createImportPersister({
+      snapshot,
+      save: saveProject,
+      onSaveError: (e) => console.warn('Не удалось сохранить отметку импорта', e),
+    });
 
     const report = await applyAudioImport(plan, files, {
       projectId: snapshot.id,
       currentPanelIds: snapshot.panels.map(p => p.id),
       signal: controls.signal,
-      onProgress: (done, total) => controls.onProgress(done, total),
-      onApplied: (entry) => {
-        appliedSoFar.push(entry);
-        persistProgress();
-      },
+      onProgress: controls.onProgress,
+      onApplied: persister.onApplied,
     });
-    await saveChain;
+    await persister.flush();
     if (report.applied.length === 0) return report;
 
-    const blobs = new Map(audioBlobs);
-    const full = new Map(audioFull);
-    const newDur = new Map(audioDurations);
-    for (const a of report.applied) {
-      const blob = files.get(a.file);
-      if (!blob) continue;
-      blobs.set(a.panelId, blob);
-      full.set(a.panelId, { blob, duration: a.duration });
-      newDur.set(a.panelId, a.duration);
-    }
-    setAudioBlobs(blobs);
-    setAudioFull(full);
-    setAudioDurations(newDur);
+    const merged = mergeAppliedAudio({
+      panels: snapshot.panels,
+      applied: report.applied,
+      files,
+      blobs: audioBlobs,
+      full: audioFull,
+      durations: audioDurations,
+    });
+    setAudioBlobs(merged.blobs);
+    setAudioFull(merged.full);
+    setAudioDurations(merged.durations);
 
-    const panels = markPanelsImported(snapshot.panels, report.applied);
-    const obj: Record<number, number> = {};
-    newDur.forEach((v, k) => { obj[k] = v; });
-    const real: Record<number, number> = {};
-    blobs.forEach((_, k) => { if (newDur.has(k)) real[k] = newDur.get(k)!; });
     const rebuilt = rebuildSrt({
-      panels,
-      audioDurations: newDur,
+      panels: merged.panels,
+      audioDurations: merged.durations,
       voiceAssignments: snapshot.voiceAssignments,
       intro: snapshot.intro,
       outro: snapshot.outro,
       introDuration: snapshot.introDuration,
       outroDuration: snapshot.outroDuration,
       panelGap,
-      realDurations: real,
+      realDurations: merged.realDurations,
     });
-    updateProject({ panels, timeline: rebuilt.timeline, srt: rebuilt.srt, audioDurations: obj });
+    updateProject({ panels: merged.panels, timeline: rebuilt.timeline, srt: rebuilt.srt, audioDurations: merged.durationsObj });
     return report;
   };
 
@@ -833,16 +818,21 @@ export default function EditorPage() {
   const handleRegeneratePanel = async (panelId: number, opts?: { confirmedImportOverwrite?: boolean }) => {
     if (!project || isGeneratingAudio) return;
     const panel = project.panels.find(p => p.id === panelId);
-    if (panel?.audioSource === 'import' && !opts?.confirmedImportOverwrite) return;
-    try {
-      const { deleteProjectAudio } = await import('@/lib/storage/opfs');
-      await deleteProjectAudio(project.id, panelId);
-    } catch {}
-    setAudioBlobs(prev => {
-      const next = new Map(prev);
-      next.delete(panelId);
-      return next;
-    });
+    const imported = panel?.audioSource === 'import';
+    if (imported && !opts?.confirmedImportOverwrite) return;
+    // Импортированный файл заранее не удаляем: forceRegenerate его не читает,
+    // успешный синтез перезапишет, а упавший оставит запись пользователя целой.
+    if (!imported) {
+      try {
+        const { deleteProjectAudio } = await import('@/lib/storage/opfs');
+        await deleteProjectAudio(project.id, panelId);
+      } catch {}
+      setAudioBlobs(prev => {
+        const next = new Map(prev);
+        next.delete(panelId);
+        return next;
+      });
+    }
     // forceRegenerate: без него при неизменном тексте и голосе генерация
     // возвращала тот же файл из общего TTS-кэша — кнопка «Переозвучить» врала.
     await runAudioGeneration([panelId], { forceRegenerate: true });

@@ -309,8 +309,22 @@ function audioFileName(slot: ProjectAudioSlot): string {
  * Удаляет только подпись: файл остаётся, но перестаёт считаться TTS-аудио
  * с известными параметрами (импорт внешнего файла, v1.3.18).
  */
+/**
+ * Удаляет подпись TTS перед записью импортированного файла. Подписи нет
+ * (панель без TTS или повторный импорт) — норма, а не ошибка: OPFS бросает
+ * NotFoundError, его гасим. Любую другую ошибку пробрасываем — в отличие от
+ * deleteFile: оставшаяся рядом с импортом устаревшая подпись выдавала бы
+ * файл пользователя за TTS, поэтому импорт такой панели должен упасть.
+ */
 export async function deleteProjectAudioSignature(projectId: string, slot: ProjectAudioSlot): Promise<void> {
-  await deleteFile(['projects', projectId, 'audio'], `${slot}.sig`);
+  if (!(await isOPFSSupported())) return;
+  const dir = await ensureDir(['projects', projectId, 'audio']);
+  try {
+    await dir.removeEntry(`${slot}.sig`);
+  } catch (e) {
+    if ((e as { name?: string } | null)?.name === 'NotFoundError') return;
+    throw e;
+  }
 }
 
 /** Удаляет аудио (и подпись) — используется кнопкой «↻ Переозвучить». */

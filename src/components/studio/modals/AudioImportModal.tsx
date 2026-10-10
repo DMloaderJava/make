@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import type { PanelData } from '@/lib/pipeline/extractPanels';
 import {
@@ -8,6 +8,7 @@ import {
   autoImportOptions,
   describeImportMode,
   importViaLabel,
+  mergeManifestText,
   planAudioImport,
   type ApplyAudioImportReport,
   type AudioImportPlan,
@@ -38,7 +39,7 @@ export function useAudioImportPlan(params: {
 
 export interface AudioImportApplyControls {
   signal: AbortSignal;
-  onProgress: (done: number, total: number) => void;
+  onProgress: (done: number, total: number, file?: string) => void;
 }
 
 interface AudioImportModalProps {
@@ -78,11 +79,23 @@ export function AudioImportModal({ open, onClose, panels, existingAudio, onApply
   const [overwrite, setOverwrite] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [phase, setPhase] = useState<Phase>('edit');
-  const [progress, setProgress] = useState<{ done: number; total: number }>({ done: 0, total: 0 });
+  const [progress, setProgress] = useState<{ done: number; total: number; file?: string }>({ done: 0, total: 0 });
   const [report, setReport] = useState<ApplyAudioImportReport | null>(null);
   const [applyError, setApplyError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  /** Тексты брошенных .txt по имени — повторный drop не дублирует манифест. */
+  const manifestFilesRef = useRef(new Map<string, string>());
+
+  // Escape закрывает, как клик по фону; во время применения — нет (сначала «Отменить»).
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && phase !== 'applying') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, phase, onClose]);
 
   const plan = useAudioImportPlan({ files, panels, manifest, overwrite, existingAudio });
   const mode = describeImportMode(plan);
@@ -96,8 +109,13 @@ export function AudioImportModal({ open, onClose, panels, existingAudio, onApply
     const manifests = incoming.filter(f => fileExtension(f.name) === 'txt');
     const audio = incoming.filter(f => fileExtension(f.name) !== 'txt');
     if (manifests.length > 0) {
-      const texts = await Promise.all(manifests.map(f => f.text()));
-      setManifest(prev => [prev.trim(), ...texts.map(t => t.trim())].filter(Boolean).join('\n'));
+      const texts = await Promise.all(manifests.map(async f => [f.name, await f.text()] as const));
+      setManifest(current => {
+        let next = current;
+        for (const [name, text] of texts) next = mergeManifestText(next, text, manifestFilesRef.current.get(name));
+        return next;
+      });
+      for (const [name, text] of texts) manifestFilesRef.current.set(name, text);
       setManifestOpen(true);
     }
     if (audio.length > 0) {
@@ -121,7 +139,7 @@ export function AudioImportModal({ open, onClose, panels, existingAudio, onApply
       const byName = new Map(files.map(f => [f.name, f]));
       const result = await onApply(plan, byName, {
         signal: controller.signal,
-        onProgress: (done, total) => setProgress({ done, total }),
+        onProgress: (done, total, file) => setProgress({ done, total, file }),
       });
       setReport(result);
     } catch (e) {
@@ -193,13 +211,6 @@ export function AudioImportModal({ open, onClose, panels, existingAudio, onApply
                 />
               </details>
 
-              <label className="flex items-start gap-2 cursor-pointer">
-                <input type="checkbox" checked={overwrite} onChange={(e) => setOverwrite(e.target.checked)} className="mt-0.5 accent-[#E8B44C]" />
-                <span className="text-[11px] leading-4 text-[#A1A1AA]">
-                  Перезаписать существующее аудио панелей (TTS и прошлый импорт)
-                  {existingAudio.length > 0 && <span className="text-[#8A8A93]"> · сейчас с аудио: {existingAudio.length}</span>}
-                </span>
-              </label>
 
               {files.length > 0 && (
                 <div className="rounded-[10px] bg-[#0B0B0C] border border-[#26262C] px-4 py-3 space-y-2">
@@ -238,6 +249,14 @@ export function AudioImportModal({ open, onClose, panels, existingAudio, onApply
                 </div>
               )}
 
+              <label className="flex items-start gap-2 cursor-pointer">
+                <input type="checkbox" checked={overwrite} onChange={(e) => setOverwrite(e.target.checked)} className="mt-0.5 accent-[#E8B44C]" />
+                <span className="text-[11px] leading-4 text-[#A1A1AA]">
+                  Перезаписать существующее аудио панелей (TTS и прошлый импорт) — иначе такие строки выше зачёркнуты как «аудио есть»
+                  {existingAudio.length > 0 && <span className="text-[#8A8A93]"> · сейчас с аудио: {existingAudio.length}</span>}
+                </span>
+              </label>
+
               {plan.errors.length > 0 && (
                 <div className="space-y-1" role="alert">
                   {plan.errors.slice(0, MAX_LINES).map((err, i) => (
@@ -259,7 +278,10 @@ export function AudioImportModal({ open, onClose, panels, existingAudio, onApply
 
           {phase === 'applying' && (
             <div className="space-y-2" aria-live="polite">
-              <p className="text-[12px] text-[#F5F5F7]">Импорт: {progress.done} из {progress.total}…</p>
+              <p className="text-[12px] text-[#F5F5F7] truncate">
+                Импорт: {progress.done} из {progress.total}
+                {progress.file && <span className="text-[#8A8A93]"> · {progress.file}</span>}
+              </p>
               <div className="h-1 w-full rounded bg-[#0B0B0C]" role="progressbar" aria-valuemin={0} aria-valuemax={progress.total} aria-valuenow={progress.done}>
                 <div className="h-full rounded bg-[#E8B44C] transition-all duration-200" style={{ width: `${(progress.done / Math.max(1, progress.total)) * 100}%` }} />
               </div>

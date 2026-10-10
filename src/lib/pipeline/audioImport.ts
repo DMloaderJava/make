@@ -342,9 +342,138 @@ export function describeImportMode(plan: Pick<AudioImportPlan, 'matches' | 'skip
   const vias = new Set([...plan.matches, ...plan.skipped].map(m => m.via));
   const order = ['manual', 'manifest', 'name', 'number', 'order'];
   const labels = order.filter(v => vias.has(v as never)).map(v => VIA_LABEL[v]);
-  return labels.length > 0 ? labels.join(' + ') : '—';
+  return labels.length > 0 ? labels.join(' + ') : 'нет совпадений';
+}
+
+/**
+ * Брошенный в модалку .txt-манифест → текст манифеста. Тот же файл повторно
+ * (или такой же текст под другим именем) не дублируется — иначе дубли якорей
+ * дали бы ошибку плана без видимой причины; новая версия файла с тем же
+ * именем заменяет свой прежний блок, если пользователь его не правил.
+ */
+export function mergeManifestText(current: string, text: string, previousFromSameFile?: string): string {
+  const block = text.trim();
+  if (!block) return current;
+  const prev = previousFromSameFile?.trim();
+  if (prev && current.includes(prev)) return current.replace(prev, block);
+  if (current.includes(block)) return current;
+  return [current.trim(), block].filter(Boolean).join('\n');
 }
 
 export function importViaLabel(via: string): string {
   return VIA_LABEL[via] ?? via;
+}
+
+// ---------------------------------------------------------------------------
+// Редактор: сохранение по ходу импорта и слияние результата (чистая логика
+// handleImportAudio — вынесена сюда, чтобы покрыть тестами без браузера)
+// ---------------------------------------------------------------------------
+
+type ImportableProject = { panels: PanelData[]; audioDurations?: Record<number, number> };
+
+/**
+ * Сохраняет отметку «импорт» после КАЖДОГО записанного файла: падение вкладки
+ * на 4-м файле оставит в IDB 3 отмеченные панели, а не файлы без отметки,
+ * которые «Озвучить всё» приняло бы за аудио без подписи (легаси-путь).
+ *
+ * Сохранения идут строго по очереди (applyAudioImport пишет параллельно, а
+ * onApplied приходит в порядке завершения), каждое — полный накопленный
+ * снимок от исходного проекта, поэтому последнее сохранение = итог. Ошибка
+ * одного сохранения не рвёт цепочку: следующее запишет всё накопленное.
+ */
+export function createImportPersister<T extends ImportableProject>(opts: {
+  snapshot: T;
+  save: (project: T) => Promise<void>;
+  onSaveError?: (error: unknown) => void;
+}) {
+  const applied: AppliedAudio[] = [];
+  const base = { ...(opts.snapshot.audioDurations ?? {}) };
+  let chain: Promise<void> = Promise.resolve();
+
+  const projectWith = (entries: readonly AppliedAudio[]): T => {
+    const audioDurations = { ...base };
+    for (const a of entries) audioDurations[a.panelId] = a.duration;
+    return { ...opts.snapshot, panels: markPanelsImported(opts.snapshot.panels, entries), audioDurations };
+  };
+
+  return {
+    onApplied(entry: AppliedAudio) {
+      applied.push(entry);
+      const next = projectWith([...applied]);
+      chain = chain.then(() => opts.save(next)).catch((e) => opts.onSaveError?.(e));
+    },
+    /** Дождаться последнего сохранения. Никогда не отклоняется. */
+    flush(): Promise<void> {
+      return chain;
+    },
+    get applied(): readonly AppliedAudio[] {
+      return applied;
+    },
+  };
+}
+
+/**
+ * Слияние отчёта импорта с аудио редактора: новые Map (старые не мутируются),
+ * отмеченные панели, длительности объектом для проекта и «реальные»
+ * длительности для rebuildSrt (только панели, у которых есть аудио — иначе
+ * SRT считался бы финальным при неозвученных панелях).
+ */
+export function mergeAppliedAudio(params: {
+  panels: PanelData[];
+  applied: readonly AppliedAudio[];
+  files: ReadonlyMap<string, Blob>;
+  blobs: ReadonlyMap<number, Blob>;
+  full: ReadonlyMap<number, { blob: Blob; duration: number }>;
+  durations: ReadonlyMap<number, number>;
+}) {
+  const blobs = new Map(params.blobs);
+  const full = new Map(params.full);
+  const durations = new Map(params.durations);
+  const used: AppliedAudio[] = [];
+  for (const a of params.applied) {
+    const blob = params.files.get(a.file);
+    if (!blob) continue; // не бывает: applyAudioImport пишет только переданные файлы
+    blobs.set(a.panelId, blob);
+    full.set(a.panelId, { blob, duration: a.duration });
+    durations.set(a.panelId, a.duration);
+    used.push(a);
+  }
+  const durationsObj: Record<number, number> = {};
+  durations.forEach((v, k) => { durationsObj[k] = v; });
+  const realDurations: Record<number, number> = {};
+  blobs.forEach((_, k) => { const d = durations.get(k); if (d !== undefined) realDurations[k] = d; });
+  return { blobs, full, durations, durationsObj, realDurations, panels: markPanelsImported(params.panels, used) };
+}
+
+/**
+ * Итог явной переозвучки (forceRegenerate). Отметка «импорт» снимается только
+ * там, где TTS реально записал новый файл. Редактор импортированный файл
+ * заранее НЕ удаляет (forceRegenerate его и так не читает, а успешный синтез
+ * перезаписывает), поэтому при упавшем синтезе файл пользователя цел — и
+ * ошибка генератора дополняется этим фактом, чтобы «↻» не выглядела как
+ * потеря записи.
+ */
+export function settleImportRegeneration(params: {
+  panels: PanelData[];
+  regeneratedIds: Iterable<number>;
+  succeededIds: Iterable<number>;
+  errors: readonly string[];
+}): { panels: PanelData[]; errors: string[] } {
+  const succeeded = new Set(params.succeededIds);
+  const regenerated = [...new Set(params.regeneratedIds)];
+  const byId = new Map(params.panels.map(p => [p.id, p]));
+  const keptImports = regenerated.filter(id => !succeeded.has(id) && byId.get(id)?.audioSource === 'import');
+  const errors = [...params.errors];
+  for (const id of keptImports) {
+    const name = byId.get(id)?.audioFileName;
+    const kept = `импортированный файл${name ? ` «${name}»` : ''} оставлен без изменений`;
+    const prefix = `Панель ${id}: `;
+    const at = errors.findIndex(e => e.startsWith(prefix));
+    if (at >= 0) errors[at] = `${prefix}переозвучка не удалась (${errors[at].slice(prefix.length)}) — ${kept}`;
+    else errors.push(`${prefix}переозвучка не удалась — ${kept}`);
+  }
+  return {
+    panels: clearImportMark(params.panels, regenerated.filter(id => succeeded.has(id))),
+    errors,
+  };
 }

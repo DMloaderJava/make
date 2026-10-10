@@ -48,6 +48,9 @@ class FakeFileHandle {
   }
 }
 
+/** Инъекция сбоев файловой системы в тестах (вернуть ошибку — она будет брошена). */
+export const fsFaults: { removeEntry: ((name: string) => Error | undefined) | null } = { removeEntry: null };
+
 class FakeDirHandle {
   kind = 'directory' as const;
   private dirs = new Map<string, FakeDirHandle>();
@@ -70,8 +73,12 @@ class FakeDirHandle {
     }
     return file;
   }
+  /** Как в настоящем OPFS: удалить отсутствующее — NotFoundError. */
   async removeEntry(name: string): Promise<void> {
-    if (!this.files.delete(name)) this.dirs.delete(name);
+    const fault = fsFaults.removeEntry?.(name);
+    if (fault) throw fault;
+    if (this.files.delete(name) || this.dirs.delete(name)) return;
+    throw new DOMException(`${name} not found`, 'NotFoundError');
   }
 }
 

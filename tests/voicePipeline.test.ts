@@ -50,6 +50,8 @@ function makeWav(text: string): ArrayBuffer {
 }
 
 let mockCalls = 0;
+/** Не null — провайдер падает с этим сообщением (не ретраится: не 429/5xx). */
+let mockFailWith: string | null = null;
 /** Тексты, реально ушедшие в синтез (кэш-попадания сюда не попадают). */
 const mockTexts: string[] = [];
 const mockProvider: TTSProvider = {
@@ -62,6 +64,7 @@ const mockProvider: TTSProvider = {
     return [{ id: 'mock-voice', name: 'Mock Voice', language: 'ru', gender: 'neutral', provider: 'mock' }];
   },
   async generate(text: string) {
+    if (mockFailWith) throw new Error(mockFailWith);
     mockCalls += 1;
     mockTexts.push(text);
     return makeWav(text);
@@ -338,6 +341,31 @@ test('generateAllAudio: forceRegenerate (кнопка «↻» после под�
   assert.equal(mockTexts.at(-1), IMPORTED_TEXT);
   const stored = await (await loadProjectAudio(projectId, 2))!.arrayBuffer();
   assert.equal(new TextDecoder().decode(stored.slice(0, 4)), 'RIFF', 'теперь там TTS (WAV)');
+});
+
+test('generateAllAudio: forceRegenerate импорта упал — файл пользователя цел', async () => {
+  // Редактор перед переозвучкой импорта файл не удаляет: проверяем, что и
+  // генератор при неудаче его не трогает (forceRegenerate только не читает).
+  const projectId = 'import-force-fail';
+  await saveProjectAudio(projectId, 2, new Blob(['IMPORTED']));
+  mockFailWith = 'mock: invalid api key';
+  try {
+    const result = await generateAllAudio({
+      projectId,
+      panels: IMPORTED_PANELS,
+      voiceAssignments: {},
+      ttsProviderId: 'mock',
+      language: 'ru',
+      onlyPanelIds: [2],
+      forceRegenerate: true,
+    });
+    assert.equal(result.panelAudios.has(2), false);
+    assert.equal(result.errors.length, 1);
+    assert.match(result.errors[0], /^Панель 2: /);
+  } finally {
+    mockFailWith = null;
+  }
+  assert.equal(await (await loadProjectAudio(projectId, 2))?.text(), 'IMPORTED');
 });
 
 test('generateAllAudio: импортированный файл пропал — ошибка, а не тихий TTS', async () => {

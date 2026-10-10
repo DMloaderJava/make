@@ -4,11 +4,17 @@
  * fixtures/browserEnv, декод подменяется — проверяются параллельность,
  * отмена, ошибки и ключ хранения).
  */
-import './fixtures/browserEnv';
+import { fsFaults } from './fixtures/browserEnv';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { PanelData } from '../src/lib/pipeline/extractPanels';
-import { applyAudioImport, autoImportOptions, clearImportMark, describeImportMode, markPanelsImported, planAudioImport } from '../src/lib/pipeline/audioImport';
+import {
+  applyAudioImport, autoImportOptions, clearImportMark, createImportPersister, describeImportMode,
+  markPanelsImported, mergeAppliedAudio, mergeManifestText, planAudioImport, settleImportRegeneration,
+  type AppliedAudio,
+} from '../src/lib/pipeline/audioImport';
+import { loadPanelAudios } from '../src/lib/pipeline/loadPanelAudio';
+import { getVoiceButtonState } from '../src/lib/pipeline/voiceButtonState';
 import { getProjectAudioSignature, loadProjectAudio, saveProjectAudio, saveProjectAudioSignature } from '../src/lib/storage/opfs';
 import { leadingNumber, naturalCompare, parseManifest, planImport } from '../src/lib/pipeline/importPlan';
 import { serializeScenario } from '../src/lib/pipeline/scenario';
@@ -571,4 +577,213 @@ test('модалка: «Перезаписать» выключен → пане
   const over = planAudioImport(names, PANELS, autoImportOptions({ manifest: '', overwrite: true, existingAudio: [2, 4] }));
   assert.deepEqual(over.matches.map(m => m.target.id), [1, 2, 3, 4]);
   assert.deepEqual(over.skipped, []);
+});
+
+// ---------- Подпись .sig при импорте (OPFS бросает NotFoundError) ----------
+
+test('apply: у панели нет .sig — импорт проходит, подпись не появляется', async () => {
+  const projectId = freshProject();
+  assert.equal(await getProjectAudioSignature(projectId, 1), null);
+  const plan = planAudioImport(files('01.mp3'), [PANELS[0]]);
+  const report = await applyAudioImport(plan, fileMap(['01.mp3']), { projectId, decode: fakeDecode, estimateStorage: noQuota });
+  assert.deepEqual(report.failed, []);
+  assert.deepEqual(report.applied.map(a => a.panelId), [1]);
+  assert.equal(await getProjectAudioSignature(projectId, 1), null);
+});
+
+test('apply: .sig не удаляется по другой причине — панель в failed, файл не записан', async () => {
+  const projectId = freshProject();
+  await saveProjectAudio(projectId, 1, bytes('tts'));
+  await saveProjectAudioSignature(projectId, 1, 'tts-signature');
+  fsFaults.removeEntry = (name) => (name === '1.sig' ? new DOMException('locked', 'NoModificationAllowedError') : undefined);
+  try {
+    const plan = planAudioImport(files('01.mp3', '02.mp3'), PANELS.slice(0, 2), { overwrite: true, existingAudio: [1] });
+    const report = await applyAudioImport(plan, fileMap(['01.mp3', '02.mp3']), { projectId, decode: fakeDecode, estimateStorage: noQuota });
+    assert.deepEqual(report.applied.map(a => a.panelId), [2], 'соседняя панель импортирована');
+    assert.equal(report.failed.length, 1);
+    assert.equal(report.failed[0].panelId, 1);
+    assert.match(report.failed[0].reason, /^не удалось записать в хранилище: /);
+    assert.equal(await (await loadProjectAudio(projectId, 1))?.text(), 'tts', 'TTS-файл не затёрт файлом без снятой подписи');
+    assert.equal(await getProjectAudioSignature(projectId, 1), 'tts-signature');
+  } finally {
+    fsFaults.removeEntry = null;
+  }
+});
+
+// ---------- Открытие проекта: импорт без .sig — это аудио ----------
+
+test('загрузка проекта: импортированные файлы без .sig попадают в аудио редактора', async () => {
+  const projectId = freshProject();
+  // Панель 1 — TTS с подписью, 2 — импорт (без подписи), 3 — без аудио, 4 — импорт.
+  await saveProjectAudio(projectId, 1, bytes('tts'));
+  await saveProjectAudioSignature(projectId, 1, 'tts-signature');
+  const plan = planAudioImport(files('Изображение 1 [30..60%].mp3', 'Изображение 2.mp3'), PANELS, autoImportOptions({ manifest: '', overwrite: false, existingAudio: [1] }));
+  assert.deepEqual(plan.errors, []);
+  const report = await applyAudioImport(plan, fileMap(['Изображение 1 [30..60%].mp3', 'Изображение 2.mp3']), { projectId, decode: fakeDecode, estimateStorage: noQuota });
+  const panels = markPanelsImported(PANELS, report.applied);
+
+  const loaded = await loadPanelAudios({
+    projectId,
+    panels,
+    storedDurations: { 3: 7 },
+    decode: async (blob) => blob.size / 10,
+  });
+  assert.ok(loaded);
+  assert.deepEqual([...loaded.blobs.keys()].sort(), [1, 2, 4]);
+  assert.equal(await loaded.blobs.get(2)?.text(), 'audio:Изображение 1 [30..60%].mp3');
+  assert.equal(loaded.durations.get(3), 7, 'без файла — сохранённая длительность');
+
+  // Модалка: existingAudio = ключи аудио → повторный импорт без «Перезаписать» пропускает.
+  const again = planAudioImport(files('Изображение 1 [30..60%].mp3'), panels, autoImportOptions({ manifest: '', overwrite: false, existingAudio: [...loaded.blobs.keys()] }));
+  assert.deepEqual(again.matches, []);
+  assert.deepEqual(again.skipped.map(m => m.target.id), [2]);
+  // Кнопка озвучки: не хватает только панели 3.
+  const button = getVoiceButtonState({ panels, voicedPanelIds: loaded.blobs.keys(), audioTexts: { 1: PANELS[0].dialogue } });
+  assert.equal(button.voicedCount, 3);
+  assert.equal(button.pendingCount, 1);
+});
+
+test('загрузка проекта: отмена посреди перебора → null', async () => {
+  let calls = 0;
+  const loaded = await loadPanelAudios({ projectId: freshProject(), panels: PANELS, decode: async () => 1, isCancelled: () => ++calls > 2 });
+  assert.equal(loaded, null);
+});
+
+// ---------- Редактор: сохранение после каждого файла ----------
+
+type TestProject = { id: string; panels: PanelData[]; audioDurations?: Record<number, number> };
+const FIVE = Array.from({ length: 5 }, (_, i) => panel(i + 1, i, null));
+
+test('persister: 5 файлов, 3-й битый → в IDB 4 отмеченные панели, отчёт и слияние согласованы', async () => {
+  const projectId = freshProject();
+  const names = ['01.mp3', '02.mp3', '03.mp3', '04.mp3', '05.mp3'];
+  const blobs = new Map(names.map((n, i) => [n, bytes(i === 2 ? `broken:${n}` : `audio:${n}`)]));
+  const snapshot: TestProject = { id: projectId, panels: FIVE, audioDurations: { 1: 9, 3: 9 } };
+  const saved: TestProject[] = [];
+  let inFlight = 0;
+  let overlapped = false;
+  const persister = createImportPersister({
+    snapshot,
+    save: async (p) => {
+      inFlight += 1;
+      if (inFlight > 1) overlapped = true;
+      await new Promise(r => setTimeout(r, 3));
+      saved.push(p);
+      inFlight -= 1;
+    },
+  });
+  const plan = planAudioImport(files(...names), FIVE, { overwrite: true, existingAudio: [1, 3] });
+  const report = await applyAudioImport(plan, blobs, { projectId, decode: fakeDecode, estimateStorage: noQuota, onApplied: persister.onApplied });
+  await persister.flush();
+
+  assert.equal(overlapped, false, 'сохранения строго по очереди');
+  assert.deepEqual(report.applied.map(a => a.panelId), [1, 2, 4, 5]);
+  assert.deepEqual(report.failed.map(f => [f.panelId, f.file]), [[3, '03.mp3']]);
+  assert.equal(saved.length, 4, 'по сохранению на каждый записанный файл');
+  saved.forEach((p, i) => assert.equal(p.panels.filter(x => x.audioSource === 'import').length, i + 1, 'снимки накопительные'));
+  const last = saved.at(-1)!;
+  assert.deepEqual(last.panels.filter(p => p.audioSource === 'import').map(p => [p.id, p.audioFileName]).sort(),
+    [[1, '01.mp3'], [2, '02.mp3'], [4, '04.mp3'], [5, '05.mp3']]);
+  assert.equal(last.panels.find(p => p.id === 3)!.audioSource, undefined, 'упавшая панель не отмечена');
+  assert.equal(last.audioDurations![3], 9, 'длительность упавшей панели не тронута');
+  assert.equal(last.audioDurations![4], `audio:04.mp3`.length / 10);
+  assert.equal(snapshot.panels.some(p => p.audioSource), false, 'исходный проект не мутирован');
+  for (const id of [1, 2, 4, 5]) assert.ok(await loadProjectAudio(projectId, id), `файл панели ${id} записан`);
+  assert.equal(await loadProjectAudio(projectId, 3), null);
+
+  // Слияние в редакторе даёт то же, что последнее сохранение.
+  const oldBlob = bytes('tts3');
+  const merged = mergeAppliedAudio({
+    panels: snapshot.panels,
+    applied: report.applied,
+    files: blobs,
+    blobs: new Map([[3, oldBlob]]),
+    full: new Map([[3, { blob: oldBlob, duration: 9 }]]),
+    durations: new Map([[1, 9], [3, 9]]),
+  });
+  assert.deepEqual(merged.panels, last.panels);
+  assert.deepEqual(merged.durationsObj, last.audioDurations);
+  assert.deepEqual([...merged.blobs.keys()].sort(), [1, 2, 3, 4, 5]);
+  assert.equal(merged.blobs.get(2), blobs.get('02.mp3'), 'в памяти — исходный Blob, без перечитывания');
+  assert.deepEqual(Object.keys(merged.realDurations).map(Number).sort(), [1, 2, 3, 4, 5]);
+});
+
+test('persister: упавшее сохранение не рвёт цепочку — следующее пишет всё накопленное', async () => {
+  const saved: TestProject[] = [];
+  const errors: unknown[] = [];
+  let n = 0;
+  const persister = createImportPersister({
+    snapshot: { id: 'p', panels: FIVE } as TestProject,
+    save: async (p) => { if (++n === 1) throw new Error('QuotaExceededError'); saved.push(p); },
+    onSaveError: (e) => errors.push(e),
+  });
+  const entry = (panelId: number): AppliedAudio => ({ panelId, file: `${panelId}.mp3`, duration: 1, size: 1 });
+  persister.onApplied(entry(1));
+  persister.onApplied(entry(2));
+  await persister.flush();
+  assert.equal(errors.length, 1);
+  assert.equal(saved.length, 1);
+  assert.deepEqual(saved[0].panels.filter(p => p.audioSource === 'import').map(p => p.id), [1, 2]);
+  assert.deepEqual(persister.applied.map(a => a.panelId), [1, 2]);
+});
+
+test('mergeAppliedAudio: панели без аудио не попадают в realDurations (SRT остаётся черновым)', () => {
+  const merged = mergeAppliedAudio({
+    panels: FIVE,
+    applied: [{ panelId: 1, file: 'a.mp3', duration: 2, size: 1 }],
+    files: new Map([['a.mp3', bytes('a')]]),
+    blobs: new Map(),
+    full: new Map(),
+    durations: new Map([[2, 3.5]]),
+  });
+  assert.deepEqual(merged.realDurations, { 1: 2 });
+  assert.deepEqual(merged.durationsObj, { 1: 2, 2: 3.5 });
+});
+
+// ---------- Переозвучка импорта (кнопка «↻» после подтверждения) ----------
+
+test('settleImportRegeneration: синтез упал — отметка остаётся, ошибка говорит, что файл цел', () => {
+  const panels = markPanelsImported(PANELS, [{ panelId: 2, file: 'voice2.mp3' }]);
+  const out = settleImportRegeneration({ panels, regeneratedIds: [2], succeededIds: [], errors: ['Панель 2: 401 invalid key'] });
+  assert.equal(out.panels, panels, 'панели не пересозданы');
+  assert.deepEqual(out.errors, ['Панель 2: переозвучка не удалась (401 invalid key) — импортированный файл «voice2.mp3» оставлен без изменений']);
+});
+
+test('settleImportRegeneration: синтез удался — отметка снята; TTS-панели и чужие ошибки не трогаются', () => {
+  const panels = markPanelsImported(PANELS, [{ panelId: 2, file: 'voice2.mp3' }, { panelId: 4, file: 'v4.mp3' }]);
+  const out = settleImportRegeneration({ panels, regeneratedIds: [1, 2], succeededIds: [2], errors: ['Панель 1: 503'] });
+  assert.equal(out.panels.find(p => p.id === 2)!.audioSource, undefined);
+  assert.equal(out.panels.find(p => p.id === 2)!.audioFileName, undefined);
+  assert.equal(out.panels.find(p => p.id === 4)!.audioSource, 'import', 'не переозвучивалась');
+  assert.deepEqual(out.errors, ['Панель 1: 503']);
+});
+
+test('settleImportRegeneration: без строки ошибки генератора — пояснение всё равно есть', () => {
+  const panels = markPanelsImported(PANELS, [{ panelId: 3, file: 'x.wav' }]);
+  const out = settleImportRegeneration({ panels, regeneratedIds: [3], succeededIds: [], errors: [] });
+  assert.deepEqual(out.errors, ['Панель 3: переозвучка не удалась — импортированный файл «x.wav» оставлен без изменений']);
+});
+
+// ---------- Манифест из брошенных .txt ----------
+
+test('mergeManifestText: тот же файл дважды не дублирует, новая версия заменяет свой блок', () => {
+  const v1 = 'Изображение 1 = a.mp3\n';
+  let m = mergeManifestText('', v1);
+  assert.equal(m, 'Изображение 1 = a.mp3');
+  m = mergeManifestText(m, v1, v1);
+  assert.equal(m, 'Изображение 1 = a.mp3', 'повторный drop того же файла');
+  m = mergeManifestText(m, v1);
+  assert.equal(m, 'Изображение 1 = a.mp3', 'тот же текст под другим именем');
+  m = mergeManifestText(m, 'Изображение 2 = b.mp3');
+  assert.equal(m, 'Изображение 1 = a.mp3\nИзображение 2 = b.mp3');
+  m = mergeManifestText(m, 'Изображение 1 = c.mp3', v1);
+  assert.equal(m, 'Изображение 1 = c.mp3\nИзображение 2 = b.mp3', 'новая версия файла');
+  assert.equal(mergeManifestText(m, '  \n'), m);
+  const plan = planAudioImport(files('c.mp3', 'b.mp3'), [panel(1, 0, null), panel(2, 1, null)], autoImportOptions({ manifest: m, overwrite: false, existingAudio: [] }));
+  assert.deepEqual(plan.errors, []);
+});
+
+test('describeImportMode: ничего не сопоставлено — «нет совпадений»', () => {
+  const plan = planAudioImport(files('x.mp3'), PANELS, autoImportOptions({ manifest: 'Изображение 9 = x.mp3', overwrite: false, existingAudio: [] }));
+  assert.equal(describeImportMode(plan), 'нет совпадений');
 });
