@@ -14,6 +14,15 @@ export interface PanelData {
   imageIndex: number;
   /** Панель на всё изображение (сценарий): contain без камеры, см. db.ts. */
   fullFrame?: boolean;
+  /**
+   * Откуда аудио панели (v1.3.18). 'import' — внешний файл из «Импорт аудио»:
+   * «Озвучить всё» его не трогает, «↻ Переозвучить» спрашивает подтверждение.
+   * Нет поля — TTS (или аудио ещё нет). Сам файл — по тому же ключу
+   * audio/{id}.mp3, длительность — project.audioDurations[id].
+   */
+  audioSource?: 'tts' | 'import';
+  /** Имя импортированного файла — для подписи в UI и повторного импорта. */
+  audioFileName?: string;
 }
 
 export interface VisionResult {

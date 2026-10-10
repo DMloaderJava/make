@@ -1,11 +1,15 @@
 /**
- * v1.3.18 — план импорта аудио по якорям (planImport + planAudioImport).
- * Чистые функции: без OPFS, без декода.
+ * v1.3.18 — импорт аудио по якорям: план (planImport + planAudioImport,
+ * чистые функции) и применение (applyAudioImport: in-memory OPFS из
+ * fixtures/browserEnv, декод подменяется — проверяются параллельность,
+ * отмена, ошибки и ключ хранения).
  */
+import './fixtures/browserEnv';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { PanelData } from '../src/lib/pipeline/extractPanels';
-import { planAudioImport } from '../src/lib/pipeline/audioImport';
+import { applyAudioImport, clearImportMark, markPanelsImported, planAudioImport } from '../src/lib/pipeline/audioImport';
+import { getProjectAudioSignature, loadProjectAudio, saveProjectAudio, saveProjectAudioSignature } from '../src/lib/storage/opfs';
 import { leadingNumber, naturalCompare, parseManifest, planImport } from '../src/lib/pipeline/importPlan';
 import { serializeScenario } from '../src/lib/pipeline/scenario';
 
@@ -342,4 +346,190 @@ test('planImport — генерик: цели не обязаны быть па�
   });
   assert.deepEqual(plan.errors, []);
   assert.deepEqual(plan.matches.map(m => [m.target.n, m.file, m.label]), [[1, 'p1.png', 'стр. 1'], [2, 'p2.png', 'стр. 2']]);
+});
+
+// ---------- Применение (applyAudioImport) ----------
+
+const bytes = (text: string) => new Blob([new TextEncoder().encode(text)]);
+const fileMap = (names: string[]) => new Map(names.map(n => [n, bytes(`audio:${n}`)]));
+/** Декод-заглушка: длительность из размера, «битые» файлы бросают. */
+const fakeDecode = async (data: ArrayBuffer) => {
+  const text = new TextDecoder().decode(data);
+  if (text.includes('broken')) throw new Error('EncodingError');
+  return data.byteLength / 10;
+};
+const noQuota = async () => null;
+let projectSeq = 0;
+const freshProject = () => `import-test-${++projectSeq}`;
+
+test('apply: файлы пишутся по ключу TTS (audio/{panelId}.mp3), TTS-подпись снимается, отчёт в порядке плана', async () => {
+  const projectId = freshProject();
+  // У панели 2 было TTS-аудио с подписью — импорт его перезаписывает.
+  await saveProjectAudio(projectId, 2, bytes('tts'));
+  await saveProjectAudioSignature(projectId, 2, 'tts-signature');
+  const names = ['a.mp3', 'b.mp3', 'c.mp3', 'd.mp3'];
+  const plan = planAudioImport(files(...names), PANELS, { existingAudio: [2], overwrite: true });
+  const progress: Array<[number, number]> = [];
+  const report = await applyAudioImport(plan, fileMap(names), {
+    projectId,
+    decode: fakeDecode,
+    estimateStorage: noQuota,
+    onProgress: (done, total) => progress.push([done, total]),
+  });
+  assert.equal(report.blocked, undefined);
+  assert.deepEqual(report.failed, []);
+  assert.equal(report.aborted, false);
+  assert.deepEqual(report.applied.map(a => [a.panelId, a.file]), [[1, 'a.mp3'], [2, 'b.mp3'], [3, 'c.mp3'], [4, 'd.mp3']]);
+  assert.equal(report.applied[0].duration, 'audio:a.mp3'.length / 10);
+  for (const a of report.applied) {
+    const stored = await loadProjectAudio(projectId, a.panelId);
+    assert.equal(await stored?.text(), `audio:${a.file}`, 'тот же ключ, что читают экспорт и TTS');
+  }
+  assert.equal(await getProjectAudioSignature(projectId, 2), null, 'подпись TTS снята');
+  assert.deepEqual(progress.map(p => p[1]), [4, 4, 4, 4]);
+  assert.deepEqual(progress.at(-1), [4, 4]);
+});
+
+test('apply: не больше concurrency декодов одновременно, файлы пишутся по мере готовности', async () => {
+  const projectId = freshProject();
+  const panels = Array.from({ length: 8 }, (_, i) => panel(i + 1, i, null));
+  const names = panels.map((_, i) => `take${i + 1}.mp3`);
+  const plan = planAudioImport(files(...names), panels);
+  assert.deepEqual(plan.errors, []);
+  let active = 0;
+  let maxActive = 0;
+  let started = 0;
+  let appliedSoFar = 0;
+  let appliedBeforeLastDecode = -1;
+  const report = await applyAudioImport(plan, fileMap(names), {
+    projectId,
+    estimateStorage: noQuota,
+    decode: async (data) => {
+      started += 1;
+      if (started === names.length) appliedBeforeLastDecode = appliedSoFar;
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise(r => setTimeout(r, 5));
+      active -= 1;
+      return data.byteLength;
+    },
+    onApplied: () => { appliedSoFar += 1; },
+  });
+  assert.equal(report.applied.length, 8);
+  assert.equal(maxActive, 3, 'по умолчанию 3, и они действительно параллельны');
+  assert.ok(appliedBeforeLastDecode > 0, 'первые файлы записаны до начала последнего декода');
+
+  maxActive = 0;
+  const one = await applyAudioImport(plan, fileMap(names), {
+    projectId,
+    estimateStorage: noQuota,
+    concurrency: 1,
+    decode: async (data) => { active += 1; maxActive = Math.max(maxActive, active); await new Promise(r => setTimeout(r, 1)); active -= 1; return data.byteLength; },
+  });
+  assert.equal(one.applied.length, 8);
+  assert.equal(maxActive, 1);
+});
+
+test('apply: отмена — записанные остаются в applied, новые не начинаются, aborted: true', async () => {
+  const projectId = freshProject();
+  const names = ['a.mp3', 'b.mp3', 'c.mp3', 'd.mp3'];
+  const plan = planAudioImport(files(...names), PANELS);
+  const controller = new AbortController();
+  const report = await applyAudioImport(plan, fileMap(names), {
+    projectId,
+    concurrency: 1,
+    signal: controller.signal,
+    estimateStorage: noQuota,
+    decode: fakeDecode,
+    onApplied: () => controller.abort(), // отмена сразу после первого файла
+  });
+  assert.equal(report.aborted, true);
+  assert.deepEqual(report.applied.map(a => a.file), ['a.mp3']);
+  assert.deepEqual(report.notStarted, ['b.mp3', 'c.mp3', 'd.mp3']);
+  assert.equal(await (await loadProjectAudio(projectId, 1))?.text(), 'audio:a.mp3');
+  assert.equal(await loadProjectAudio(projectId, 2), null, 'не начатые не записаны');
+});
+
+test('apply: отмена во время декода — уже декодируемые файлы дописываются', async () => {
+  const projectId = freshProject();
+  const names = ['a.mp3', 'b.mp3', 'c.mp3', 'd.mp3'];
+  const plan = planAudioImport(files(...names), PANELS);
+  const controller = new AbortController();
+  const report = await applyAudioImport(plan, fileMap(names), {
+    projectId,
+    signal: controller.signal,
+    estimateStorage: noQuota,
+    decode: async (data) => { controller.abort(); await new Promise(r => setTimeout(r, 1)); return data.byteLength; },
+  });
+  assert.equal(report.aborted, true);
+  assert.deepEqual(report.applied.map(a => a.file), ['a.mp3', 'b.mp3', 'c.mp3'], 'три в работе — дописаны');
+  assert.deepEqual(report.notStarted, ['d.mp3']);
+});
+
+test('apply: битый и пустой файл → failed с причиной, остальные применяются', async () => {
+  const projectId = freshProject();
+  const names = ['a.mp3', 'b.mp3', 'c.mp3', 'd.mp3'];
+  const plan = planAudioImport(files(...names), PANELS);
+  const map = fileMap(names);
+  map.set('b.mp3', bytes('broken'));
+  map.set('c.mp3', new Blob([]));
+  const report = await applyAudioImport(plan, map, { projectId, decode: fakeDecode, estimateStorage: noQuota });
+  assert.deepEqual(report.applied.map(a => a.file), ['a.mp3', 'd.mp3']);
+  assert.deepEqual(report.failed, [
+    { file: 'b.mp3', panelId: 2, reason: 'формат не поддержан браузером или файл повреждён' },
+    { file: 'c.mp3', panelId: 3, reason: 'пустой файл (0 байт)' },
+  ]);
+  assert.equal(await loadProjectAudio(projectId, 2), null);
+});
+
+test('apply: план с ошибками и нехватка места — blocked, ничего не записано', async () => {
+  const projectId = freshProject();
+  const bad = planAudioImport(files('a.mp3', 'b.mp3'), PANELS); // 2 файла на 4 панели — ошибка
+  assert.ok(bad.errors.length > 0);
+  const blocked = await applyAudioImport(bad, fileMap(['a.mp3', 'b.mp3']), { projectId, decode: fakeDecode, estimateStorage: noQuota });
+  assert.match(blocked.blocked ?? '', /^В плане 1 ошибка/);
+
+  const names = ['a.mp3', 'b.mp3', 'c.mp3', 'd.mp3'];
+  const plan = planAudioImport(files(...names), PANELS);
+  let decodes = 0;
+  const full = await applyAudioImport(plan, fileMap(names), {
+    projectId,
+    decode: async (d) => { decodes += 1; return d.byteLength; },
+    estimateStorage: async () => ({ usage: 99 * 1024 * 1024, quota: 100 * 1024 * 1024 }),
+  });
+  assert.match(full.blocked ?? '', /^Не хватает места в хранилище браузера: нужно ~5,0 МБ, свободно ~1,0 МБ$/);
+  assert.equal(decodes, 0, 'ни одного декода до проверки места');
+  for (const id of [1, 2, 3, 4]) assert.equal(await loadProjectAudio(projectId, id), null);
+});
+
+test('apply: панель удалена после построения плана → failed, файл не ложится сиротой', async () => {
+  const projectId = freshProject();
+  const names = ['a.mp3', 'b.mp3', 'c.mp3', 'd.mp3'];
+  const plan = planAudioImport(files(...names), PANELS);
+  const report = await applyAudioImport(plan, fileMap(names), {
+    projectId, decode: fakeDecode, estimateStorage: noQuota, currentPanelIds: [1, 2, 4],
+  });
+  assert.deepEqual(report.applied.map(a => a.panelId), [1, 2, 4]);
+  assert.deepEqual(report.failed, [{ file: 'c.mp3', panelId: 3, reason: 'панель удалена из проекта после построения плана' }]);
+  assert.equal(await loadProjectAudio(projectId, 3), null);
+});
+
+test('markPanelsImported / clearImportMark: отметка по отчёту и снятие после TTS', () => {
+  const marked = markPanelsImported(PANELS, [{ panelId: 2, file: 'b.mp3' }]);
+  assert.deepEqual(marked.map(p => [p.id, p.audioSource, p.audioFileName]), [
+    [1, undefined, undefined], [2, 'import', 'b.mp3'], [3, undefined, undefined], [4, undefined, undefined],
+  ]);
+  assert.equal(marked[0], PANELS[0], 'остальные панели — те же объекты');
+  assert.equal(markPanelsImported(PANELS, []), PANELS);
+  const cleared = clearImportMark(marked, [2]);
+  assert.equal('audioSource' in cleared[1], false);
+  assert.equal('audioFileName' in cleared[1], false);
+});
+
+test('идемпотентность: повторный импорт тех же файлов после применения — всё в skipped, 0 ошибок', async () => {
+  const projectId = freshProject();
+  const names = ['a.mp3', 'b.mp3', 'c.mp3', 'd.mp3'];
+  const first = await applyAudioImport(planAudioImport(files(...names), PANELS), fileMap(names), { projectId, decode: fakeDecode, estimateStorage: noQuota });
+  const again = planAudioImport(files(...names), markPanelsImported(PANELS, first.applied), { existingAudio: first.applied.map(a => a.panelId) });
+  assert.deepEqual([again.errors, again.matches.length, again.skipped.length], [[], 0, 4]);
 });

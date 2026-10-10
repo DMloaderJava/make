@@ -305,6 +305,14 @@ function audioFileName(slot: ProjectAudioSlot): string {
   return `${slot}.mp3`;
 }
 
+/**
+ * Удаляет только подпись: файл остаётся, но перестаёт считаться TTS-аудио
+ * с известными параметрами (импорт внешнего файла, v1.3.18).
+ */
+export async function deleteProjectAudioSignature(projectId: string, slot: ProjectAudioSlot): Promise<void> {
+  await deleteFile(['projects', projectId, 'audio'], `${slot}.sig`);
+}
+
 /** Удаляет аудио (и подпись) — используется кнопкой «↻ Переозвучить». */
 export async function deleteProjectAudio(projectId: string, slot: ProjectAudioSlot): Promise<void> {
   await deleteFile(['projects', projectId, 'audio'], audioFileName(slot));
