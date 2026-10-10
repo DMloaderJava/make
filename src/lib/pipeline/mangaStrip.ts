@@ -14,6 +14,8 @@
  * иначе зритель не успевал бы прочитать страницу.
  */
 
+import { isWholeRange, rangeKey, sameRange, yRangeFromBbox, type YRange } from './yRange';
+
 export type StripEase = 'linear' | 'easeInOut';
 
 export interface StripSlot {
@@ -67,17 +69,10 @@ export interface StripPanelRef {
 /**
  * Y-диапазон панели в процентах высоты страницы, если он «настоящий».
  * null — панель на всю страницу: fullFrame, нет bbox, bbox 0..100 или битые числа.
- * X не учитывается — лента всегда на всю ширину.
+ * Правило общее со сценарием — см. yRange.yRangeFromBbox.
  */
-export function panelYRange(panel: StripPanelRef | undefined): { from: number; to: number } | null {
-  if (!panel || panel.fullFrame === true || !panel.bbox) return null;
-  const { y, height } = panel.bbox;
-  if (!Number.isFinite(y) || !Number.isFinite(height) || height <= 0) return null;
-  const from = Math.max(0, Math.min(100, y));
-  const to = Math.max(0, Math.min(100, y + height));
-  if (to <= from) return null;
-  if (from <= 0 && to >= 100) return null;
-  return { from, to };
+export function panelYRange(panel: StripPanelRef | undefined): YRange | null {
+  return panel ? yRangeFromBbox(panel.bbox, panel.fullFrame) : null;
 }
 
 /**
@@ -101,36 +96,56 @@ function rangeScrollPx(
   return { startPx: clampScroll(topPx, layout), endPx: clampScroll(botPx, layout) };
 }
 
-type TimelineSeg = { panelId: number; imageIndex?: number; audioStart: number; audioEnd: number };
+/** Сегмент таймлайна, который нужен ленте. */
+export type StripTimelineSeg = { panelId: number; imageIndex?: number; audioStart: number; audioEnd: number };
+
+/** Сегмент с уже вычисленными страницей и полосой. */
+export interface StripIndexEntry {
+  seg: StripTimelineSeg;
+  imageIndex: number;
+  /** Полоса панели; null — вся страница. */
+  range: YRange | null;
+}
 
 /**
- * id → панель: O(1) вместо panels.find в цикле по таймлайну.
- * Кэш по ссылке на массив: Preview зовёт timeAtScroll на каждое событие колеса
- * с тем же массивом панелей (React-состояние, иммутабельно) — индекс строится
- * один раз. Защита от мутации на месте — пересборка при смене длины.
+ * Индекс ленты: строится один раз на (timeline, panels) — в createStripScene,
+ * — и дальше только читается (spans, timeAtScroll на каждое событие колеса).
+ * Глобального кэша нет: сцена пересобирается при смене панелей/таймлайна
+ * (useMemo в Preview), поэтому мутация массива на месте не даёт стухших данных.
  */
-const PANEL_INDEX_CACHE = new WeakMap<object, { length: number; map: Map<number, unknown> }>();
-
-function panelIndex<P extends { id: number }>(panels: P[] | undefined): Map<number, P> {
-  if (!panels) return new Map();
-  const cached = PANEL_INDEX_CACHE.get(panels);
-  if (cached && cached.length === panels.length) return cached.map as Map<number, P>;
-  const map = new Map<number, P>();
-  for (const p of panels) map.set(p.id, p);
-  PANEL_INDEX_CACHE.set(panels, { length: panels.length, map });
-  return map;
+export interface StripIndex {
+  /** Все сегменты со страницей, по audioStart (стабильно). */
+  ordered: StripIndexEntry[];
+  /** Те же записи по странице, в том же порядке. */
+  byImage: Map<number, StripIndexEntry[]>;
+  /** Есть хотя бы одна панель с полосой. */
+  hasRanged: boolean;
 }
 
-/** Страница сегмента: из таймлайна, fallback — панель (старые сегменты без imageIndex). */
-function segImageIndex(seg: TimelineSeg, byId: Map<number, { imageIndex: number }>): number | undefined {
-  return typeof seg.imageIndex === 'number' ? seg.imageIndex : byId.get(seg.panelId)?.imageIndex;
+export function buildStripIndex(timeline: StripTimelineSeg[], panels?: StripPanelRef[]): StripIndex {
+  const byId = new Map<number, StripPanelRef>();
+  for (const p of panels ?? []) byId.set(p.id, p);
+  const ordered: StripIndexEntry[] = [];
+  const byImage = new Map<number, StripIndexEntry[]>();
+  let hasRanged = false;
+  for (const seg of [...timeline].sort((a, b) => a.audioStart - b.audioStart)) {
+    const panel = byId.get(seg.panelId);
+    // Страница из таймлайна; fallback — панель (старые сегменты без imageIndex).
+    const imageIndex = typeof seg.imageIndex === 'number' ? seg.imageIndex : panel?.imageIndex;
+    if (imageIndex === undefined) continue;
+    const range = panelYRange(panel);
+    if (range) hasRanged = true;
+    const entry = { seg, imageIndex, range };
+    ordered.push(entry);
+    const list = byImage.get(imageIndex);
+    if (list) list.push(entry);
+    else byImage.set(imageIndex, [entry]);
+  }
+  return { ordered, byImage, hasRanged };
 }
 
-const WHOLE_PAGE = { from: 0, to: 100 } as const;
-
-function sameRange(a: { from: number; to: number }, b: { from: number; to: number }): boolean {
-  return Math.abs(a.from - b.from) < 1e-6 && Math.abs(a.to - b.to) < 1e-6;
-}
+/** Реплика без полосы на странице с полосами — интервал на всю страницу. */
+const WHOLE_PAGE: YRange = { from: 0, to: 100 };
 
 export interface ScrollKeyframe {
   time: number;
@@ -500,22 +515,23 @@ function roundedRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: num
  * своей панели до конца последней.
  */
 export function buildScrollSpans(
-  timeline: Array<{ panelId: number; imageIndex?: number; audioStart: number; audioEnd: number }>,
+  timeline: StripTimelineSeg[],
   panels?: Array<{ id: number; imageIndex: number }>
 ): ScrollSpan[] {
+  return scrollSpansByPage(buildStripIndex(timeline, panels));
+}
+
+function scrollSpansByPage(index: StripIndex): ScrollSpan[] {
   const byPage = new Map<number, { start: number; end: number }>();
-  const byId = panelIndex(panels);
-  for (const segment of timeline) {
+  for (const { seg, imageIndex } of index.ordered) {
     // imageIndex есть прямо в сегменте таймлайна; panels нужны лишь для старых
     // сегментов без него (или когда панель переехала на другую страницу).
-    const imageIndex = segImageIndex(segment, byId);
-    if (imageIndex === undefined) continue;
     const current = byPage.get(imageIndex);
     if (!current) {
-      byPage.set(imageIndex, { start: segment.audioStart, end: segment.audioEnd });
+      byPage.set(imageIndex, { start: seg.audioStart, end: seg.audioEnd });
     } else {
-      current.start = Math.min(current.start, segment.audioStart);
-      current.end = Math.max(current.end, segment.audioEnd);
+      current.start = Math.min(current.start, seg.audioStart);
+      current.end = Math.max(current.end, seg.audioEnd);
     }
   }
 
@@ -538,30 +554,30 @@ export function buildScrollSpans(
  *   поэтому keyframes не дёргаются на смешанных страницах.
  */
 export function buildStripScrollSpans(
-  timeline: TimelineSeg[],
+  timeline: StripTimelineSeg[],
   layout: StripLayout,
   panels?: StripPanelRef[]
 ): ScrollSpan[] {
-  const byId = panelIndex(panels);
-  const hasRanged = timeline.some(seg => panelYRange(byId.get(seg.panelId)) !== null);
-  if (!hasRanged) return buildScrollSpans(timeline, panels);
+  return stripScrollSpans(layout, buildStripIndex(timeline, panels));
+}
+
+function stripScrollSpans(layout: StripLayout, index: StripIndex): ScrollSpan[] {
+  if (!index.hasRanged) return scrollSpansByPage(index);
 
   const slotByImage = new Map(layout.slots.map((slot, i) => [slot.index, i]));
-  const ordered = [...timeline].sort((a, b) => a.audioStart - b.audioStart);
   const out: ScrollSpan[] = [];
   // Диапазон каждого интервала (параллельно out) — для слияния соседних реплик.
-  const outRanges: Array<{ from: number; to: number }> = [];
-  for (const seg of ordered) {
-    const imageIndex = segImageIndex(seg, byId);
-    const slotIndex = imageIndex === undefined ? undefined : slotByImage.get(imageIndex);
+  const outRanges: YRange[] = [];
+  for (const { seg, imageIndex, range: own } of index.ordered) {
+    const slotIndex = slotByImage.get(imageIndex);
     if (slotIndex === undefined) continue;
-    const range = panelYRange(byId.get(seg.panelId)) ?? WHOLE_PAGE;
+    const range = own ?? WHOLE_PAGE;
     const last = out[out.length - 1];
     if (last && last.slotIndex === slotIndex && sameRange(outRanges[outRanges.length - 1], range)) {
       last.end = Math.max(last.end, seg.audioEnd);
       continue;
     }
-    if (range === WHOLE_PAGE) {
+    if (isWholeRange(range)) {
       // Реплика на всю страницу — без явных px: buildScrollKeyframes ведёт её
       // старой постраничной логикой (вход/выход, нудж соседних коротких страниц).
       out.push({ slotIndex, start: seg.audioStart, end: seg.audioEnd });
@@ -620,60 +636,6 @@ export interface StripSceneOptions extends StripLayoutOptions {
 }
 
 /**
- * Единый маппинг «панель ⇄ диапазон пикселей скролла».
- * Для каждой панели таймлайна — страница (слот), на которой она лежит, и
- * диапазон скролла, в котором эта страница читается: длинная страница —
- * полный диапазон [верх, низ], короткая — одна точка (центр).
- */
-export interface PanelScrollSpan {
-  panelId: number;
-  imageIndex: number;
-  slotIndex: number;
-  startPx: number;
-  endPx: number;
-}
-
-/**
- * Строит PanelScrollSpan для каждой панели таймлайна.
- * Изображение панели берётся из сегмента (imageIndex), fallback — panels.
- * Если у панели есть y-диапазон (bbox не на всю высоту, не fullFrame) —
- * диапазон считается по её полосе внутри страницы, иначе — по странице целиком.
- */
-export function buildPanelScrollSpans(
-  timeline: Array<{ panelId: number; imageIndex?: number; audioStart: number; audioEnd: number }>,
-  layout: StripLayout,
-  panels?: StripPanelRef[]
-): PanelScrollSpan[] {
-  const out: PanelScrollSpan[] = [];
-  const byId = panelIndex(panels);
-  for (const seg of timeline) {
-    const panel = byId.get(seg.panelId);
-    const imageIndex = segImageIndex(seg, byId);
-    if (imageIndex === undefined) continue;
-    const slotIndex = layout.slots.findIndex(s => s.index === imageIndex);
-    if (slotIndex === -1) continue;
-    const slot = layout.slots[slotIndex];
-    // Панель с y-диапазоном: свой диапазон внутри страницы (v1.3.17).
-    const range = panelYRange(panel);
-    if (range) {
-      out.push({ panelId: seg.panelId, imageIndex, slotIndex, ...rangeScrollPx(layout, slot, range) });
-      continue;
-    }
-    const top = clampScroll(slot.y, layout);
-    const bottom = clampScroll(slot.y + slot.height - layout.frameHeight, layout);
-    const center = targetScrollForSlot(layout, slotIndex);
-    out.push({
-      panelId: seg.panelId,
-      imageIndex,
-      slotIndex,
-      startPx: bottom > top ? top : center,
-      endPx: bottom > top ? bottom : center,
-    });
-  }
-  return out;
-}
-
-/**
  * Обратный маппинг: позиция скролла → audioStart панели, к которой приехал
  * скролл.
  * - Если у панелей страницы есть y-диапазоны (v1.3.17) — реплики группируются
@@ -688,11 +650,16 @@ export function buildPanelScrollSpans(
  */
 export function timeAtScroll(
   layout: StripLayout,
-  timeline: Array<{ panelId: number; imageIndex?: number; audioStart: number; audioEnd: number }>,
+  timeline: StripTimelineSeg[],
   scrollY: number,
   panels?: StripPanelRef[]
 ): number | null {
-  if (layout.slots.length === 0 || timeline.length === 0) return null;
+  return timeAtScrollIndexed(layout, buildStripIndex(timeline, panels), scrollY);
+}
+
+/** timeAtScroll по готовому индексу — без O(n) на каждое событие колеса (StripScene.timeAtScroll). */
+export function timeAtScrollIndexed(layout: StripLayout, index: StripIndex, scrollY: number): number | null {
+  if (layout.slots.length === 0 || index.ordered.length === 0) return null;
   // Страница в центре окна (как pageIndexAtScroll, но с доступом к слоту).
   const center = scrollY + layout.frameHeight / 2;
   let slot: StripSlot | null = null;
@@ -705,22 +672,17 @@ export function timeAtScroll(
     }
   }
   if (!slot) return null;
-  const imageIndex = slot.index;
-  // Вызывается на каждое событие колеса: индекс панелей кэшируется по массиву.
-  const byId = panelIndex(panels);
-  const segs = timeline
-    .filter(t => segImageIndex(t, byId) === imageIndex)
-    .sort((a, b) => a.audioStart - b.audioStart);
-  if (segs.length === 0) return null;
+  const entries = index.byImage.get(slot.index) ?? [];
+  if (entries.length === 0) return null;
+  const segs = entries.map(e => e.seg);
 
   // Страница с y-диапазонами: группы реплик по полосе (без диапазона — 0..100).
-  const segRanges = segs.map(seg => panelYRange(byId.get(seg.panelId)));
-  if (segRanges.some(range => range !== null)) {
-    const groupMap = new Map<string, { range: { from: number; to: number }; segs: TimelineSeg[] }>();
-    for (let i = 0; i < segs.length; i++) {
-      const seg = segs[i];
-      const range = segRanges[i] ?? WHOLE_PAGE;
-      const key = `${range.from}:${range.to}`;
+  // Ключ группы — тот же, что у слияния в stripScrollSpans (rangeKey, 0.1%).
+  if (entries.some(e => e.range !== null)) {
+    const groupMap = new Map<string, { range: YRange; segs: StripTimelineSeg[] }>();
+    for (const { seg, range: own } of entries) {
+      const range = own ?? WHOLE_PAGE;
+      const key = rangeKey(range);
       const group = groupMap.get(key);
       if (group) group.segs.push(seg);
       else groupMap.set(key, { range, segs: [seg] });
@@ -788,21 +750,26 @@ export function timeAtScroll(
 export interface StripScene {
   layout: StripLayout;
   keyframes: ScrollKeyframe[];
+  /** Индекс (timeline, panels), из которого построена сцена. */
+  index: StripIndex;
   scrollAt(time: number): number;
+  /** Позиция скролла → начало реплики (обратный маппинг), по индексу сцены. */
+  timeAtScroll(scrollY: number): number | null;
   render(ctx: CanvasRenderingContext2D, time: number, extras?: { showProgress?: boolean; progress?: number }): void;
 }
 
 export function createStripScene(params: {
   sizes: Array<{ width: number; height: number }>;
   images: Array<CanvasImageSource | null | undefined>;
-  timeline: Array<{ panelId: number; imageIndex?: number; audioStart: number; audioEnd: number }>;
+  timeline: StripTimelineSeg[];
   panels?: StripPanelRef[];
   options: StripSceneOptions;
 }): StripScene {
   const { sizes, images, timeline, panels, options } = params;
   const layout = computeStripLayout(sizes, options);
+  const index = buildStripIndex(timeline, panels);
   // Панели с y-bbox получают свой интервал скролла — лента едет по ним.
-  const spans = buildStripScrollSpans(timeline, layout, panels);
+  const spans = stripScrollSpans(layout, index);
   const keyframes = buildScrollKeyframes(spans, layout, {
     transition: options.transition ?? STRIP_DEFAULTS.transition,
     panInside: options.panInside,
@@ -811,7 +778,9 @@ export function createStripScene(params: {
   return {
     layout,
     keyframes,
+    index,
     scrollAt: (time: number) => sampleScroll(keyframes, time),
+    timeAtScroll: (scrollY: number) => timeAtScrollIndexed(layout, index, scrollY),
     render: (ctx, time, extras) => {
       const scrollY = sampleScroll(keyframes, time);
       renderStripFrame(ctx, {
@@ -833,7 +802,7 @@ export interface StripMediaOptions {
   images: string[];
   /** Уже загруженные изображения по тому же ключу. */
   loaded: Map<string, HTMLImageElement>;
-  timeline: Array<{ panelId: number; imageIndex?: number; audioStart: number; audioEnd: number }>;
+  timeline: StripTimelineSeg[];
   /** Панели с bbox/fullFrame — без bbox лента читает страницы целиком. */
   panels?: StripPanelRef[];
   frameWidth: number;

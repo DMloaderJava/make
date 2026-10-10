@@ -4,7 +4,8 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { anchorFor, panelAnchor, parseImageAnchor, formatImageAnchor } from '../src/lib/pipeline/scenarioFormat';
+import { anchorFor, panelAnchor, parseImageAnchor, formatImageAnchor, formatRangeNum } from '../src/lib/pipeline/scenarioFormat';
+import { rangeKey, sameRange, yRangeFromBbox } from '../src/lib/pipeline/yRange';
 import * as scenario from '../src/lib/pipeline/scenario';
 import * as format from '../src/lib/pipeline/scenarioFormat';
 
@@ -42,4 +43,20 @@ test('scenario.ts реэкспортирует формат — старые и�
   assert.equal(scenario.SCENARIO_IMAGE_LABEL, format.SCENARIO_IMAGE_LABEL);
   assert.equal(scenario.formatRangeNum, format.formatRangeNum);
   assert.equal(scenario.serializableYRange, format.serializableYRange);
+});
+
+test('formatRangeNum: арифметическое округление до 0.1, без «-0»', () => {
+  assert.equal(formatRangeNum(7.25), '7.3');
+  assert.equal(formatRangeNum(7.24), '7.2');
+  assert.equal(formatRangeNum(20), '20');
+  assert.equal(formatRangeNum(-0.04), '0');
+});
+
+test('yRange: кламп bbox и ключ полосы с точностью 0.1%', () => {
+  assert.deepEqual(yRangeFromBbox({ x: 0, y: 90, width: 100, height: 20 }), { from: 90, to: 100 });
+  assert.equal(yRangeFromBbox({ x: 0, y: -5, width: 100, height: 120 }), null, 'больше страницы — вся страница');
+  assert.equal(yRangeFromBbox({ x: 0, y: 30, width: 100, height: 30 }, true), null, 'fullFrame');
+  assert.equal(rangeKey({ from: 30.000001, to: 59.999999 }), '30:60');
+  assert.ok(sameRange({ from: 30, to: 60 }, { from: 30.04, to: 59.96 }));
+  assert.ok(!sameRange({ from: 30, to: 60 }, { from: 30.2, to: 60 }));
 });

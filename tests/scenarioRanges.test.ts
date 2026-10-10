@@ -11,7 +11,6 @@ import {
   formatRangeNum,
 } from '../src/lib/pipeline/scenario';
 import {
-  buildPanelScrollSpans,
   buildScrollKeyframes,
   buildScrollSpans,
   buildStripScrollSpans,
@@ -227,36 +226,25 @@ test('panelYRange: fullFrame, bbox 0..100 и битые числа — null; п�
   assert.deepEqual(panelYRange(band(0, 30, 60)), { from: 30, to: 60 });
 });
 
-test('buildPanelScrollSpans: три полосы на одной картинке → три разных диапазона', () => {
-  const spans = buildPanelScrollSpans(BAND_TIMELINE, LONG, BANDS);
+test('buildStripScrollSpans: три полосы на одной картинке → три разных диапазона px', () => {
+  const spans = buildStripScrollSpans(BAND_TIMELINE, LONG, BANDS);
   assert.equal(spans.length, 3);
   assert.deepEqual(spans.map(s => [s.startPx, s.endPx]), [
     [0, 3456 - 1080],
     [3456, 6912 - 1080],
     [6912, 11520 - 1080],
   ]);
-  const unique = new Set(spans.map(s => `${s.startPx}:${s.endPx}`));
-  assert.equal(unique.size, 3, 'не один и тот же диапазон слота');
 });
 
-test('buildPanelScrollSpans: короткая полоса (ниже кадра) → startPx === endPx (центр полосы)', () => {
+test('buildStripScrollSpans: короткая полоса (ниже кадра) → startPx === endPx (центр полосы)', () => {
   // [50..55%] = 576 px < 1080: центр полосы 6048 → окно 6048 - 540.
-  const spans = buildPanelScrollSpans(
+  const spans = buildStripScrollSpans(
     [{ panelId: 0, imageIndex: 0, audioStart: 0, audioEnd: 3 }],
     LONG,
     [band(0, 50, 55)]
   );
   assert.equal(spans[0].startPx, spans[0].endPx);
   assert.equal(spans[0].startPx, 6048 - 540);
-});
-
-test('buildPanelScrollSpans: панели без bbox/fullFrame — старое поведение (вся страница)', () => {
-  const spans = buildPanelScrollSpans(
-    BAND_TIMELINE,
-    LONG,
-    BANDS.map(p => ({ ...p, fullFrame: true }))
-  );
-  for (const s of spans) assert.deepEqual([s.startPx, s.endPx], [0, 11520 - 1080]);
 });
 
 test('timeAtScroll: верхняя треть полосы → первая панель', () => {
@@ -466,7 +454,7 @@ test('serializeScenario: bbox клампится в 0..100, узкая поло�
   assert.deepEqual(parseScenario(text).errors, [], text);
 });
 
-test('индекс панелей кэшируется по массиву, но видит добавленную панель (смена длины)', () => {
+test('без кэша: мутация массива панелей на месте (push и смена bbox) сразу видна', () => {
   const timeline = [
     { panelId: 0, imageIndex: 0, audioStart: 0, audioEnd: 3 },
     { panelId: 1, imageIndex: 0, audioStart: 3.6, audioEnd: 6.6 },
@@ -475,8 +463,40 @@ test('индекс панелей кэшируется по массиву, но
   // Панели 1 в массиве нет → она «вся страница»; низ страницы — её реплика.
   assert.equal(timeAtScroll(LONG, timeline, 10440, panels), 3.6);
   panels.push(band(1, 30, 60));
-  // Теперь у неё полоса 30..60: центр окна на 45% → её реплика, а на 10% — первая.
   assert.equal(timeAtScroll(LONG, timeline, 11520 * 0.45 - 540, panels), 3.6);
   assert.equal(timeAtScroll(LONG, timeline, 11520 * 0.10 - 540, panels), 0);
   assert.equal(buildStripScrollSpans(timeline, LONG, panels)[1].startPx, 3456, 'spans тоже видят новую панель');
+  // Длина та же, bbox другой (сценарий из ревью): старый кэш по длине отдал бы [30..60].
+  panels[1].bbox = { x: 0, y: 60, width: 100, height: 40 };
+  assert.equal(buildStripScrollSpans(timeline, LONG, panels)[1].startPx, 6912);
+  assert.equal(timeAtScroll(LONG, timeline, 11520 * 0.40 - 540, panels), 0, '40% теперь между полосами — ближе к первой');
+});
+
+test('StripScene: индекс строится один раз, scene.timeAtScroll = timeAtScroll', () => {
+  const scene = createStripScene({
+    sizes: [{ width: 1000, height: 6000 }],
+    images: [null],
+    timeline: BAND_TIMELINE,
+    panels: BANDS,
+    options: { ...FRAME, viewport: 1080, gap: 24 },
+  });
+  assert.equal(scene.index.ordered.length, 3);
+  assert.equal(scene.index.hasRanged, true);
+  for (const y of [0, 1000, 4000, 9000, 10440]) {
+    assert.equal(scene.timeAtScroll(y), timeAtScroll(LONG, BAND_TIMELINE, y, BANDS), `y=${y}`);
+  }
+});
+
+test('полоса из парсера и из vision с разницей < 0.1% — одна полоса и в spans, и в timeAtScroll', () => {
+  const timeline = [
+    { panelId: 0, imageIndex: 0, audioStart: 0, audioEnd: 3 },
+    { panelId: 1, imageIndex: 0, audioStart: 3.6, audioEnd: 6.6 },
+  ];
+  const panels = [band(0, 30, 60), band(1, 30.000001, 59.999999)];
+  const spans = buildStripScrollSpans(timeline, LONG, panels);
+  assert.equal(spans.length, 1, 'слились в один проезд');
+  assert.equal(spans[0].end, 6.6);
+  // Одна группа → реплики делят полосу по длительности: конец полосы — вторая.
+  assert.equal(timeAtScroll(LONG, timeline, 6912 - 1080, panels), 3.6);
+  assert.equal(timeAtScroll(LONG, timeline, 3456, panels), 0);
 });

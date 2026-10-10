@@ -3,12 +3,14 @@
  * импорта файлов по якорям (importPlan.ts).
  *
  * Модуль без побочных эффектов и без зависимостей от проекта/хранилища:
- * импорт не тянет applyScenarioToProject, db и rebuildSrt. Единственная
- * зависимость — panelYRange из mangaStrip (тоже чистый, без импортов),
- * чтобы кламп bbox в сценарии и в ленте был одной функцией.
+ * импорт не тянет applyScenarioToProject, db и rebuildSrt. Кламп bbox —
+ * yRange.yRangeFromBbox: то же правило, что у ленты, но без зависимости
+ * сценария от mangaStrip.
  */
 
-import { panelYRange } from './mangaStrip';
+import { isWholeRange, yRangeFromBbox, type YRange } from './yRange';
+
+export { isWholeRange, type YRange };
 
 /** Подпись изображения в сценарии: «Изображение N». */
 export const SCENARIO_IMAGE_LABEL = 'Изображение';
@@ -32,8 +34,6 @@ const IMAGE_LINE_BROKEN_RANGE_REGEX = new RegExp(
   `^${SCENARIO_IMAGE_LABEL}\\s*[:\\-]?\\s*(\\d+)\\s*\\[`,
   'i'
 );
-
-export type YRange = { from: number; to: number };
 
 /**
  * Результат разбора якоря:
@@ -93,11 +93,6 @@ export function formatRangeNum(n: number): string {
   return String(Object.is(rounded, -0) ? 0 : rounded);
 }
 
-/** Диапазон покрывает всю высоту картинки — это то же, что «без диапазона». */
-export function isWholeRange(range: YRange): boolean {
-  return range.from <= 0 && range.to >= 100;
-}
-
 /**
  * Y-диапазон панели в виде, который парсер гарантированно примет обратно.
  * Клампит bbox в 0..100 (vision может отдать y=90, height=20 → [90..110%]),
@@ -109,7 +104,7 @@ export function serializableYRange(panel: {
   bbox?: { x: number; y: number; width: number; height: number };
   fullFrame?: boolean;
 }): { from: string; to: string } | null {
-  const range = panelYRange({ id: 0, imageIndex: 0, bbox: panel.bbox, fullFrame: panel.fullFrame });
+  const range = yRangeFromBbox(panel.bbox, panel.fullFrame);
   if (!range) return null;
   let from = Number(formatRangeNum(range.from));
   let to = Number(formatRangeNum(range.to));

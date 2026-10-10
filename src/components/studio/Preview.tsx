@@ -5,7 +5,7 @@ import { PanelData } from '@/lib/pipeline/extractPanels';
 import { sameImageSpan } from '@/lib/pipeline/buildTimeline';
 import { drawContain } from '@/lib/pipeline/draw';
 import { SyncTimeline } from '@/lib/storage/db';
-import { STRIP_DEFAULTS, clampScroll, createStripSceneFromMedia, maxScrollY, pageIndexAtScroll, resolveStripViewport, timeAtScroll } from '@/lib/pipeline/mangaStrip';
+import { STRIP_DEFAULTS, clampScroll, createStripSceneFromMedia, maxScrollY, pageIndexAtScroll, resolveStripViewport } from '@/lib/pipeline/mangaStrip';
 
 interface PreviewProps {
   images: string[];
@@ -53,7 +53,7 @@ export function Preview({
   const dragRef = useRef<{ startY: number; startScroll: number } | null>(null);
   const wheelIdleTimer = useRef<number | undefined>(undefined);
   // Свежее состояние для нативного wheel-слушателя (привязывается один раз).
-  const stripStateRef = useRef({ stripScene: null as ReturnType<typeof createStripSceneFromMedia>, timeline: [] as SyncTimeline[], panels: [] as PanelData[], currentTime: 0, onSeek: undefined as ((t: number) => void) | undefined });
+  const stripStateRef = useRef({ stripScene: null as ReturnType<typeof createStripSceneFromMedia>, currentTime: 0, onSeek: undefined as ((t: number) => void) | undefined });
 
   useEffect(() => {
     const load = async () => {
@@ -99,7 +99,7 @@ export function Preview({
   // Свежие значения для нативного wheel-слушателя (эффект без deps — после
   // каждого рендера; события приходят уже после commit).
   useEffect(() => {
-    stripStateRef.current = { stripScene, timeline, panels, currentTime, onSeek };
+    stripStateRef.current = { stripScene, currentTime, onSeek };
   });
 
   /**
@@ -120,12 +120,8 @@ export function Preview({
       const scale = FRAME_H / Math.max(1, canvas.clientHeight);
       const current = state.stripScene.scrollAt(state.currentTime);
       const next = clampScroll(current + e.deltaY * scale, state.stripScene.layout);
-      const target = timeAtScroll(
-        state.stripScene.layout,
-        state.timeline,
-        next,
-        state.panels
-      );
+      // Индекс сцены собран один раз из тех же timeline/panels (useMemo выше).
+      const target = state.stripScene.timeAtScroll(next);
       if (target !== null && Math.abs(target - state.currentTime) > 0.01) state.onSeek(target);
       window.clearTimeout(wheelIdleTimer.current);
       wheelIdleTimer.current = window.setTimeout(() => { userScrollingRef.current = false; }, 150);
@@ -145,12 +141,7 @@ export function Preview({
     if (!drag || !stripScene || !onSeek) return;
     const scale = FRAME_H / Math.max(1, canvasRef.current?.clientHeight || 1);
     const next = clampScroll(drag.startScroll + (e.clientY - drag.startY) * scale, stripScene.layout);
-    const target = timeAtScroll(
-      stripScene.layout,
-      timeline,
-      next,
-      panels
-    );
+    const target = stripScene.timeAtScroll(next);
     if (target !== null) onSeek(target);
   };
   const handleStripPointerEnd = () => {
