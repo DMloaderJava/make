@@ -26,6 +26,7 @@
 
 import { PanelData } from './extractPanels';
 import { rebuildSrt } from './buildTimeline';
+import { panelYRange } from './mangaStrip';
 import type { Character, Project, SyncTimeline } from '../storage/db';
 
 export type ScenarioGender = 'female' | 'male';
@@ -93,6 +94,29 @@ function isWholeRange(range: { from: number; to: number }): boolean {
   return range.from <= 0 && range.to >= 100;
 }
 
+/**
+ * Y-диапазон панели в виде, который парсер гарантированно примет обратно.
+ * Клампит bbox в 0..100 (vision может отдать y=90, height=20 → [90..110%]),
+ * fullFrame / 0..100 / битые числа → null (пишется без скобок). Если после
+ * округления до 0.1 полоса схлопнулась ([50..50%]) — расширяет её до 0.1,
+ * а не теряет: иначе узкая полоса стала бы «всей картинкой».
+ */
+export function serializableYRange(panel: {
+  bbox?: { x: number; y: number; width: number; height: number };
+  fullFrame?: boolean;
+}): { from: string; to: string } | null {
+  const range = panelYRange({ id: 0, imageIndex: 0, bbox: panel.bbox, fullFrame: panel.fullFrame });
+  if (!range) return null;
+  let from = Number(formatRangeNum(range.from));
+  let to = Number(formatRangeNum(range.to));
+  if (to <= from) {
+    if (from + 0.1 <= 100) to = Math.round((from + 0.1) * 10) / 10;
+    else from = Math.round((to - 0.1) * 10) / 10;
+  }
+  if (isWholeRange({ from, to })) return null;
+  return { from: formatRangeNum(from), to: formatRangeNum(to) };
+}
+
 export function genderLabel(gender: ScenarioGender): string {
   return gender === 'female' ? 'Жен.' : 'Муж.';
 }
@@ -145,6 +169,11 @@ function parseGender(raw: string | undefined): { gender: ScenarioGender | null; 
 /**
  * Разбирает текст сценария. Пустые строки — допустимые разделители блоков.
  * Любая строка, которая не «Изображение N» и не «Имя (Пол): текст», — ошибка.
+ *
+ * Контракт: при errors.length > 0 lines НЕ применяются (ScenarioModal блокирует
+ * кнопку и обработчик). Поэтому после битого диапазона номер изображения
+ * сохраняется, а yRange = null — это лишь подавляет каскад вторичных ошибок
+ * («реплика до первого изображения»), а не превращает реплики в fullFrame.
  */
 export function parseScenario(text: string): ScenarioParseResult {
   const lines: ScenarioLine[] = [];
@@ -267,14 +296,12 @@ export function serializeScenario(
   };
 
   for (const panel of sorted) {
-    const bbox = panel.bbox;
-    // X пока не поддерживаем: в сценарий пишется только y-диапазон.
-    const isFullFrame = panel.fullFrame === true
-      || !bbox
-      || isWholeRange({ from: bbox.y, to: bbox.y + bbox.height });
-    const marker = isFullFrame
-      ? `${SCENARIO_IMAGE_LABEL} ${panel.imageIndex + 1}`
-      : `${SCENARIO_IMAGE_LABEL} ${panel.imageIndex + 1} [${formatRangeNum(bbox!.y)}..${formatRangeNum(bbox!.y + bbox!.height)}%]`;
+    // X пока не поддерживаем: в сценарий пишется только y-диапазон
+    // (клампленный в 0..100 — см. serializableYRange).
+    const range = serializableYRange(panel);
+    const marker = range
+      ? `${SCENARIO_IMAGE_LABEL} ${panel.imageIndex + 1} [${range.from}..${range.to}%]`
+      : `${SCENARIO_IMAGE_LABEL} ${panel.imageIndex + 1}`;
 
     if (panel.imageIndex !== lastImage || marker !== lastMarker) {
       flush();

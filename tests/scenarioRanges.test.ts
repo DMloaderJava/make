@@ -357,3 +357,126 @@ test('createStripScene: смешанный проект — страница б�
   assert.equal(spans[1].startPx, slot1.y);
   assert.equal(spans[2].startPx, slot1.y + slot1.height / 2);
 });
+
+// ---- Ревью v1.3.17: смешанные страницы, битый диапазон, кламп, общая полоса ----
+
+const MIXED_TIMELINE = [
+  { panelId: 0, imageIndex: 0, audioStart: 0, audioEnd: 3 },
+  { panelId: 1, imageIndex: 0, audioStart: 3.6, audioEnd: 6.6 },
+  { panelId: 2, imageIndex: 0, audioStart: 7.2, audioEnd: 10.2 },
+];
+const WHOLE = { x: 0, y: 0, width: 100, height: 100 };
+const MIXED_PANELS = [
+  { id: 0, imageIndex: 0, bbox: WHOLE, fullFrame: true },
+  band(1, 30, 60),
+  { id: 2, imageIndex: 0, bbox: WHOLE, fullFrame: true },
+];
+
+test('смешанная страница: интервалы не пересекаются, keyframes не откатываются', () => {
+  const spans = buildStripScrollSpans(MIXED_TIMELINE, LONG, MIXED_PANELS);
+  assert.equal(spans.length, 3, 'реплика на всю страницу — свой интервал, а не один «0..10.2»');
+  for (let i = 1; i < spans.length; i++) {
+    assert.ok(spans[i].start >= spans[i - 1].end, `интервалы ${i - 1} и ${i} пересекаются`);
+  }
+  assert.deepEqual(spans.map(s => [s.startPx, s.endPx]), [[undefined, undefined], [3456, 5832], [undefined, undefined]],
+    'реплика на всю страницу — старая постраничная логика (без явных px)');
+
+  const scene = createStripScene({
+    sizes: [{ width: 1000, height: 6000 }],
+    images: [null],
+    timeline: MIXED_TIMELINE,
+    panels: MIXED_PANELS,
+    options: { ...FRAME, viewport: 1080, gap: 24, transition: 0.8 },
+  });
+  for (let i = 1; i < scene.keyframes.length; i++) {
+    assert.ok(scene.keyframes[i].time > scene.keyframes[i - 1].time, 'время keyframes строго растёт');
+  }
+  const mid = scene.scrollAt(5.1);
+  assert.ok(mid >= 3456 && mid <= 5832, `во время реплики полосы окно на полосе: ${mid}`);
+  assert.equal(scene.scrollAt(10.2), 10440, 'в конце — у низа страницы, без отката к полосе');
+});
+
+test('несколько реплик под одним «[0..30%]» — один проезд полосы, а не «вниз-вверх-вниз»', () => {
+  const timeline = [
+    { panelId: 0, imageIndex: 0, audioStart: 0, audioEnd: 3 },
+    { panelId: 1, imageIndex: 0, audioStart: 3.6, audioEnd: 6.6 },
+    { panelId: 2, imageIndex: 0, audioStart: 7.2, audioEnd: 10.2 },
+  ];
+  const panels = [band(0, 0, 30), band(1, 0, 30), band(2, 30, 60)];
+  const spans = buildStripScrollSpans(timeline, LONG, panels);
+  assert.deepEqual(spans.map(s => [s.start, s.end, s.startPx, s.endPx]), [
+    [0, 6.6, 0, 2376],
+    [7.2, 10.2, 3456, 5832],
+  ]);
+  const scene = createStripScene({
+    sizes: [{ width: 1000, height: 6000 }],
+    images: [null],
+    timeline,
+    panels,
+    options: { ...FRAME, viewport: 1080, gap: 24, transition: 0.8 },
+  });
+  // Внутри общей полосы скролл не убывает (нет отката к её верху на второй реплике).
+  let prev = -1;
+  for (let t = 0; t <= 5.8; t += 0.1) {
+    const y = scene.scrollAt(t);
+    assert.ok(y >= prev - 1e-6, `откат на t=${t.toFixed(1)}: ${prev} → ${y}`);
+    prev = y;
+  }
+});
+
+test('timeAtScroll на смешанной странице: полоса точнее «всей страницы», вне полос — реплика на всю страницу', () => {
+  // Верх страницы (центр окна ~4.7%) — полоса 30..60 не покрывает → реплика 0.
+  assert.equal(timeAtScroll(LONG, MIXED_TIMELINE, 0, MIXED_PANELS), 0);
+  // Центр окна на 45% — внутри полосы → её реплика, хоть «вся страница» тоже содержит точку.
+  assert.equal(timeAtScroll(LONG, MIXED_TIMELINE, 11520 * 0.45 - 540, MIXED_PANELS), 3.6);
+  // Низ страницы — снова «вся страница»; две такие реплики делят её по длительности → вторая.
+  assert.equal(timeAtScroll(LONG, MIXED_TIMELINE, 10440, MIXED_PANELS), 7.2);
+});
+
+test('timeAtScroll: реплики с общей полосой делят её по длительности озвучки', () => {
+  const timeline = [
+    { panelId: 0, imageIndex: 0, audioStart: 0, audioEnd: 3 },
+    { panelId: 1, imageIndex: 0, audioStart: 3.6, audioEnd: 6.6 },
+  ];
+  const panels = [band(0, 0, 30), band(1, 0, 30)]; // диапазон скролла полосы 0..2376
+  assert.equal(timeAtScroll(LONG, timeline, 200, panels), 0, 'начало полосы → первая реплика');
+  assert.equal(timeAtScroll(LONG, timeline, 2200, panels), 3.6, 'конец полосы → вторая (раньше была недостижима)');
+});
+
+test('битый диапазон: ошибка есть, номер изображения сохранён, yRange = null (применение блокируется ошибкой)', () => {
+  const { lines, errors } = parseScenario('Изображение 2 [abc..20%]\nАня (Жен.): раз\nИзображение 1 [10..5%]\nБорис (Муж.): два');
+  assert.equal(errors.length, 2);
+  assert.deepEqual(lines.map(l => [l.imageIndex, l.yRange]), [[1, null], [0, null]]);
+});
+
+test('serializeScenario: bbox клампится в 0..100, узкая полоса не схлопывается — парсер принимает результат', () => {
+  const ser = (y: number, height: number) =>
+    serializeScenario([{ dialogue: 'a', character: 'A', imageIndex: 0, bbox: { x: 10, y, width: 50, height } }]).split('\n')[0];
+  assert.equal(ser(90, 20), 'Изображение 1 [90..100%]', 'vision: y=90, height=20');
+  assert.equal(ser(-10, 40), 'Изображение 1 [0..30%]');
+  assert.equal(ser(50, 0.02), 'Изображение 1 [50..50.1%]', 'не [50..50%]');
+  assert.equal(ser(99.98, 0.01), 'Изображение 1 [99.9..100%]');
+  assert.equal(ser(-5, 120), 'Изображение 1', 'больше всей картинки — без скобок');
+  assert.equal(ser(NaN, 20), 'Изображение 1', 'битые числа — без скобок');
+
+  const weird = [[90, 20], [-10, 40], [50, 0.02], [99.98, 0.01], [33.333, 33.333], [0.04, 99.97], [12.345, 0.049]];
+  const text = serializeScenario(weird.map(([y, height], i) => ({
+    dialogue: `реплика ${i}`, character: 'A', imageIndex: 0, order: i, bbox: { x: 0, y, width: 100, height },
+  })));
+  assert.deepEqual(parseScenario(text).errors, [], text);
+});
+
+test('индекс панелей кэшируется по массиву, но видит добавленную панель (смена длины)', () => {
+  const timeline = [
+    { panelId: 0, imageIndex: 0, audioStart: 0, audioEnd: 3 },
+    { panelId: 1, imageIndex: 0, audioStart: 3.6, audioEnd: 6.6 },
+  ];
+  const panels: Array<{ id: number; imageIndex: number; bbox?: { x: number; y: number; width: number; height: number } }> = [band(0, 0, 30)];
+  // Панели 1 в массиве нет → она «вся страница»; низ страницы — её реплика.
+  assert.equal(timeAtScroll(LONG, timeline, 10440, panels), 3.6);
+  panels.push(band(1, 30, 60));
+  // Теперь у неё полоса 30..60: центр окна на 45% → её реплика, а на 10% — первая.
+  assert.equal(timeAtScroll(LONG, timeline, 11520 * 0.45 - 540, panels), 3.6);
+  assert.equal(timeAtScroll(LONG, timeline, 11520 * 0.10 - 540, panels), 0);
+  assert.equal(buildStripScrollSpans(timeline, LONG, panels)[1].startPx, 3456, 'spans тоже видят новую панель');
+});
