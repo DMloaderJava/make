@@ -26,8 +26,24 @@
 
 import { PanelData } from './extractPanels';
 import { rebuildSrt } from './buildTimeline';
-import { panelYRange } from './mangaStrip';
+import {
+  SCENARIO_IMAGE_LABEL,
+  formatImageAnchor,
+  isWholeRange,
+  parseImageAnchor,
+  serializableYRange,
+} from './scenarioFormat';
 import type { Character, Project, SyncTimeline } from '../storage/db';
+
+// Формат якоря вынесен в scenarioFormat.ts (общий с импортом файлов);
+// реэкспорт — для существующих импортов из scenario.ts.
+export {
+  SCENARIO_IMAGE_LABEL,
+  formatRangeNum,
+  serializableYRange,
+  parseImageAnchor,
+  panelAnchor,
+} from './scenarioFormat';
 
 export type ScenarioGender = 'female' | 'male';
 
@@ -55,67 +71,6 @@ export interface ScenarioParseResult {
 
 /** Правило 3: пауза после реплики перед следующим изображением, сек. */
 export const SCENARIO_GAP_SECONDS = 0.6;
-
-/** Подпись изображения в сценарии: «Изображение N». */
-export const SCENARIO_IMAGE_LABEL = 'Изображение';
-
-/** Число процентов из сценария: «20», «20.5», «20,5», «-10». */
-const RANGE_NUM = '(-?\\d+(?:[.,]\\d+)?)';
-
-/**
- * «Изображение N» с опциональным y-диапазоном «[X..Y%]» (знак % опционален,
- * пробелы внутри скобок допустимы). Допускаем «:»/«-» после подписи и «.»/«:» в конце.
- */
-const IMAGE_LINE_REGEX = new RegExp(
-  `^${SCENARIO_IMAGE_LABEL}\\s*[:\\-]?\\s*(\\d+)\\s*` +
-  `(?:\\[\\s*${RANGE_NUM}\\s*%?\\s*\\.\\.\\s*${RANGE_NUM}\\s*%?\\s*\\])?` +
-  `\\s*[.:]?$`,
-  'i'
-);
-
-/** Строка начинается как «Изображение N [» — но диапазон не разобран. */
-const IMAGE_LINE_BROKEN_RANGE_REGEX = new RegExp(
-  `^${SCENARIO_IMAGE_LABEL}\\s*[:\\-]?\\s*(\\d+)\\s*\\[`,
-  'i'
-);
-
-function parseRangeNum(raw: string): number {
-  return parseFloat(raw.replace(',', '.'));
-}
-
-/** Число для записи диапазона: 1 знак после запятой, без «.0» (20, 20.5, 7.3). */
-export function formatRangeNum(n: number): string {
-  const rounded = Math.round(n * 10) / 10;
-  return String(Object.is(rounded, -0) ? 0 : rounded);
-}
-
-/** Диапазон покрывает всю высоту картинки — это то же, что «без диапазона». */
-function isWholeRange(range: { from: number; to: number }): boolean {
-  return range.from <= 0 && range.to >= 100;
-}
-
-/**
- * Y-диапазон панели в виде, который парсер гарантированно примет обратно.
- * Клампит bbox в 0..100 (vision может отдать y=90, height=20 → [90..110%]),
- * fullFrame / 0..100 / битые числа → null (пишется без скобок). Если после
- * округления до 0.1 полоса схлопнулась ([50..50%]) — расширяет её до 0.1,
- * а не теряет: иначе узкая полоса стала бы «всей картинкой».
- */
-export function serializableYRange(panel: {
-  bbox?: { x: number; y: number; width: number; height: number };
-  fullFrame?: boolean;
-}): { from: string; to: string } | null {
-  const range = panelYRange({ id: 0, imageIndex: 0, bbox: panel.bbox, fullFrame: panel.fullFrame });
-  if (!range) return null;
-  let from = Number(formatRangeNum(range.from));
-  let to = Number(formatRangeNum(range.to));
-  if (to <= from) {
-    if (from + 0.1 <= 100) to = Math.round((from + 0.1) * 10) / 10;
-    else from = Math.round((to - 0.1) * 10) / 10;
-  }
-  if (isWholeRange({ from, to })) return null;
-  return { from: formatRangeNum(from), to: formatRangeNum(to) };
-}
 
 export function genderLabel(gender: ScenarioGender): string {
   return gender === 'female' ? 'Жен.' : 'Муж.';
@@ -188,43 +143,19 @@ export function parseScenario(text: string): ScenarioParseResult {
     const line = raw.trim();
     if (!line) return;
 
-    // «Изображение N» или «Изображение N [X..Y%]»
-    const imageMatch = line.match(IMAGE_LINE_REGEX);
-    if (imageMatch) {
-      const n = parseInt(imageMatch[1], 10);
-      if (n < 1) {
-        errors.push(`Строка ${lineNo}: номер «${SCENARIO_IMAGE_LABEL}» должен быть ≥ 1`);
-        currentImage = null;
+    // «Изображение N» / «Изображение N [X..Y%]» — разбор общий с импортом.
+    // При ошибке диапазона номер сохраняется (если он верный): это лишь
+    // подавляет каскад «реплика до первого изображения», а не fullFrame.
+    const anchor = parseImageAnchor(line);
+    if (anchor) {
+      if (anchor.kind === 'error') {
+        errors.push(`Строка ${lineNo}: ${anchor.message}`);
+        currentImage = anchor.imageIndex;
         currentYRange = null;
-        return;
+      } else {
+        currentImage = anchor.imageIndex;
+        currentYRange = anchor.yRange;
       }
-      currentImage = n - 1;
-      currentYRange = null;
-      const fromRaw = imageMatch[2];
-      const toRaw = imageMatch[3];
-      if (fromRaw !== undefined && toRaw !== undefined) {
-        const from = parseRangeNum(fromRaw);
-        const to = parseRangeNum(toRaw);
-        if (from < 0 || to > 100) {
-          errors.push(`Строка ${lineNo}: диапазон [${from}..${to}%] вне 0..100`);
-        } else if (from >= to) {
-          errors.push(`Строка ${lineNo}: в [${from}..${to}%] начало должно быть меньше конца`);
-        } else {
-          currentYRange = { from, to };
-        }
-      }
-      return;
-    }
-
-    // «Изображение N [abc..20%]» — номер есть, диапазон битый. Отдельная
-    // ошибка (а не «не реплика»), номер изображения сохраняем, чтобы
-    // следующие реплики не сыпали каскадом «реплика до первого изображения».
-    const brokenRange = line.match(IMAGE_LINE_BROKEN_RANGE_REGEX);
-    if (brokenRange) {
-      const n = parseInt(brokenRange[1], 10);
-      errors.push(`Строка ${lineNo}: не разобран y-диапазон — формат «${SCENARIO_IMAGE_LABEL} ${Math.max(1, n)} [0..30%]» (числа от 0 до 100)`);
-      currentImage = n >= 1 ? n - 1 : null;
-      currentYRange = null;
       return;
     }
 
@@ -298,10 +229,7 @@ export function serializeScenario(
   for (const panel of sorted) {
     // X пока не поддерживаем: в сценарий пишется только y-диапазон
     // (клампленный в 0..100 — см. serializableYRange).
-    const range = serializableYRange(panel);
-    const marker = range
-      ? `${SCENARIO_IMAGE_LABEL} ${panel.imageIndex + 1} [${range.from}..${range.to}%]`
-      : `${SCENARIO_IMAGE_LABEL} ${panel.imageIndex + 1}`;
+    const marker = formatImageAnchor(panel.imageIndex, serializableYRange(panel));
 
     if (panel.imageIndex !== lastImage || marker !== lastMarker) {
       flush();
