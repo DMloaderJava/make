@@ -17,11 +17,33 @@
  *    через 0,6 секунды (SCENARIO_GAP_SECONDS, задаётся в buildTimeline).
  * 4. Пол персонажа указывается в скобках: (Жен.) или (Муж.).
  * 5. Никакого лишнего текста — только «Изображение N» и реплики.
+ * 6. (v1.3.17, опционально) Y-диапазон после номера: «Изображение 1 [0..30%]» —
+ *    панель занимает 0–30% высоты картинки (на всю ширину). Без диапазона —
+ *    вся картинка (fullFrame). Одна картинка может идти несколькими блоками
+ *    с разными диапазонами — так длинная webtoon-полоса режется на панели,
+ *    и лента прокручивается синхронно с озвучкой.
  */
 
 import { PanelData } from './extractPanels';
 import { rebuildSrt } from './buildTimeline';
+import {
+  SCENARIO_IMAGE_LABEL,
+  formatImageAnchor,
+  isWholeRange,
+  parseImageAnchor,
+  serializableYRange,
+} from './scenarioFormat';
 import type { Character, Project, SyncTimeline } from '../storage/db';
+
+// Формат якоря вынесен в scenarioFormat.ts (общий с импортом файлов);
+// реэкспорт — для существующих импортов из scenario.ts.
+export {
+  SCENARIO_IMAGE_LABEL,
+  formatRangeNum,
+  serializableYRange,
+  parseImageAnchor,
+  panelAnchor,
+} from './scenarioFormat';
 
 export type ScenarioGender = 'female' | 'male';
 
@@ -35,6 +57,8 @@ export interface ScenarioLine {
   gender: ScenarioGender | null;
   /** Текст реплики. */
   text: string;
+  /** Y-диапазон в процентах (0..100). null — вся картинка (fullFrame). */
+  yRange: { from: number; to: number } | null;
 }
 
 export interface ScenarioParseResult {
@@ -47,9 +71,6 @@ export interface ScenarioParseResult {
 
 /** Правило 3: пауза после реплики перед следующим изображением, сек. */
 export const SCENARIO_GAP_SECONDS = 0.6;
-
-/** Подпись изображения в сценарии: «Изображение N». */
-export const SCENARIO_IMAGE_LABEL = 'Изображение';
 
 export function genderLabel(gender: ScenarioGender): string {
   return gender === 'female' ? 'Жен.' : 'Муж.';
@@ -103,6 +124,11 @@ function parseGender(raw: string | undefined): { gender: ScenarioGender | null; 
 /**
  * Разбирает текст сценария. Пустые строки — допустимые разделители блоков.
  * Любая строка, которая не «Изображение N» и не «Имя (Пол): текст», — ошибка.
+ *
+ * Контракт: при errors.length > 0 lines НЕ применяются (ScenarioModal блокирует
+ * кнопку и обработчик). Поэтому после битого диапазона номер изображения
+ * сохраняется, а yRange = null — это лишь подавляет каскад вторичных ошибок
+ * («реплика до первого изображения»), а не превращает реплики в fullFrame.
  */
 export function parseScenario(text: string): ScenarioParseResult {
   const lines: ScenarioLine[] = [];
@@ -110,23 +136,25 @@ export function parseScenario(text: string): ScenarioParseResult {
   const warnings: string[] = [];
 
   let currentImage: number | null = null;
+  let currentYRange: { from: number; to: number } | null = null;
 
   (text || '').split(/\r?\n/).forEach((raw, idx) => {
     const lineNo = idx + 1;
     const line = raw.trim();
     if (!line) return;
 
-    // «Изображение N» (допускаем «:»/«-» и точку в конце)
-    const imageMatch = line.match(new RegExp(
-      `^${SCENARIO_IMAGE_LABEL}\\s*[:\\-]?\\s*(\\d+)\\s*[.:]?$`, 'i'
-    ));
-    if (imageMatch) {
-      const n = parseInt(imageMatch[1], 10);
-      if (n < 1) {
-        errors.push(`Строка ${lineNo}: номер «${SCENARIO_IMAGE_LABEL}» должен быть ≥ 1`);
-        currentImage = null;
+    // «Изображение N» / «Изображение N [X..Y%]» — разбор общий с импортом.
+    // При ошибке диапазона номер сохраняется (если он верный): это лишь
+    // подавляет каскад «реплика до первого изображения», а не fullFrame.
+    const anchor = parseImageAnchor(line);
+    if (anchor) {
+      if (anchor.kind === 'error') {
+        errors.push(`Строка ${lineNo}: ${anchor.message}`);
+        currentImage = anchor.imageIndex;
+        currentYRange = null;
       } else {
-        currentImage = n - 1;
+        currentImage = anchor.imageIndex;
+        currentYRange = anchor.yRange;
       }
       return;
     }
@@ -163,7 +191,7 @@ export function parseScenario(text: string): ScenarioParseResult {
       warnings.push(`Строка ${lineNo}: пол не указан — формат «${character} (Жен.)» или «${character} (Муж.)»`);
     }
 
-    lines.push({ imageIndex: currentImage, character, gender, text: right });
+    lines.push({ imageIndex: currentImage, character, gender, text: right, yRange: currentYRange });
   });
 
   return { lines, errors, warnings };
@@ -171,15 +199,24 @@ export function parseScenario(text: string): ScenarioParseResult {
 
 /**
  * Собирает текст сценария из панелей проекта — ровно в том же формате,
- * что и парсер: «Изображение N», пустая строка, реплики. Лишнего текста нет.
+ * что и парсер: «Изображение N» (с «[X..Y%]», если у панели реальный bbox),
+ * пустая строка, реплики. Лишнего текста нет.
  */
 export function serializeScenario(
-  panels: Array<{ dialogue: string; character: string; imageIndex: number; order?: number }>,
+  panels: Array<{
+    dialogue: string;
+    character: string;
+    imageIndex: number;
+    order?: number;
+    bbox?: { x: number; y: number; width: number; height: number };
+    fullFrame?: boolean;
+  }>,
   genders: Record<string, ScenarioGender> = {}
 ): string {
   const sorted = [...panels].sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.imageIndex - b.imageIndex);
   const blocks: string[] = [];
   let lastImage = -1;
+  let lastMarker = '';
   let currentBlock: string[] = [];
 
   const flush = () => {
@@ -190,10 +227,15 @@ export function serializeScenario(
   };
 
   for (const panel of sorted) {
-    if (panel.imageIndex !== lastImage) {
+    // X пока не поддерживаем: в сценарий пишется только y-диапазон
+    // (клампленный в 0..100 — см. serializableYRange).
+    const marker = formatImageAnchor(panel.imageIndex, serializableYRange(panel));
+
+    if (panel.imageIndex !== lastImage || marker !== lastMarker) {
       flush();
-      currentBlock.push(`${SCENARIO_IMAGE_LABEL} ${panel.imageIndex + 1}`, '');
+      currentBlock.push(marker, '');
       lastImage = panel.imageIndex;
+      lastMarker = marker;
     }
     const gender = genders[panel.character];
     const name = gender ? `${panel.character} (${genderLabel(gender)})` : panel.character;
@@ -205,7 +247,10 @@ export function serializeScenario(
 }
 
 /**
- * Панели из сценария: одна реплика — одна панель на всё изображение.
+ * Панели из сценария: одна реплика — одна панель.
+ * - без y-диапазона (или [0..100%]) — панель на всё изображение, fullFrame;
+ * - с диапазоном [X..Y%] — bbox {0, X, 100, Y-X}, fullFrame не ставится:
+ *   лента прокручивается по bbox панелей (см. mangaStrip.buildStripScrollSpans).
  * Если изображение не загружено — клампим в последнее и говорим об этом.
  */
 export function scenarioToPanels(lines: ScenarioLine[], imageCount: number): {
@@ -223,18 +268,22 @@ export function scenarioToPanels(lines: ScenarioLine[], imageCount: number): {
         `«${SCENARIO_IMAGE_LABEL} ${line.imageIndex + 1}» не загружено (изображений: ${imageCount}) — реплика «${line.character}» привязана к изображению ${imageCount}`
       );
     }
+    const range = line.yRange && !isWholeRange(line.yRange) ? line.yRange : null;
     panels.push({
       id: i,
-      bbox: { x: 0, y: 0, width: 100, height: 100 },
+      bbox: range
+        ? { x: 0, y: range.from, width: 100, height: range.to - range.from }
+        : { x: 0, y: 0, width: 100, height: 100 },
       dialogue: line.text,
       character: line.character,
       emotion: 'neutral',
       type: 'speech',
       order: i,
       imageIndex,
-      // Сценарий: одно изображение = один кадр. Preview/экспорт рисуют
+      // Без диапазона: одно изображение = один кадр. Preview/экспорт рисуют
       // contain (letterbox) без зума/панорамы — иначе портрет кропится.
-      fullFrame: true,
+      // С диапазоном — НЕ fullFrame: лента едет по bbox панели.
+      fullFrame: range ? undefined : true,
     });
   });
 
@@ -327,3 +376,24 @@ export const SCENARIO_EXAMPLE = `Изображение 1
 Изображение 3
 
 Персонаж 1 (Жен.): Договорились. Встречаемся у ворот на закате.`;
+
+/**
+ * Пример для длинной webtoon-полосы: одна картинка на три панели с
+ * y-диапазонами + картинка целиком. Отдельно от базового примера: три раза
+ * «Изображение 1» без контекста выглядят как опечатка.
+ */
+export const SCENARIO_EXAMPLE_STRIP = `Изображение 1 [0..30%]
+
+Персонаж 1 (Жен.): Привет! Ты готов к сегодняшней вылазке?
+
+Изображение 1 [30..60%]
+
+Персонаж 2 (Муж.): Как никогда. Главное — не отставать от группы.
+
+Изображение 1 [60..100%]
+
+Персонаж 1 (Жен.): Договорились. Встречаемся у ворот на закате.
+
+Изображение 2
+
+Персонаж 2 (Муж.): Тогда до вечера.`;

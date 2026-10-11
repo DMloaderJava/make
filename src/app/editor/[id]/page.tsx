@@ -11,15 +11,18 @@ import { VoicesModal } from '@/components/studio/modals/VoicesModal';
 import { ExportModal } from '@/components/studio/modals/ExportModal';
 import { ScenarioModal } from '@/components/studio/modals/ScenarioModal';
 import { IntroOutroModal } from '@/components/studio/modals/IntroOutroModal';
+import { AudioImportModal, type AudioImportApplyControls } from '@/components/studio/modals/AudioImportModal';
 import { Input } from '@/components/ui/input';
 import { getAllKeys, getSettings } from '@/lib/storage/local';
 import { getLLMProvider, resolveLLMVisionModel } from '@/lib/providers/llm';
-import { buildTimeline, DEFAULT_PANEL_GAP, estimateDuration, calculateTotalDuration, rebuildSrt } from '@/lib/pipeline/buildTimeline';
+import { buildTimeline, DEFAULT_PANEL_GAP, calculateTotalDuration, rebuildSrt } from '@/lib/pipeline/buildTimeline';
 import { applyScenarioToProject, serializeScenario, SCENARIO_GAP_SECONDS, type ScenarioLine } from '@/lib/pipeline/scenario';
 import { translateScenarioLines, isTranslatableLanguage } from '@/lib/pipeline/translateScenario';
 import { generateIntro, generateOutro, generateFallbackIntro, generateFallbackOutro, resolveChannelName } from '@/lib/pipeline/generateIntro';
 import { formatSEOPackage, generateSEO, generateFallbackSEO } from '@/lib/pipeline/generateSEO';
 import { generateAllAudio } from '@/lib/pipeline/generateAudio';
+import { applyAudioImport, createImportPersister, mergeAppliedAudio, settleImportRegeneration, type AudioImportPlan } from '@/lib/pipeline/audioImport';
+import { loadPanelAudios } from '@/lib/pipeline/loadPanelAudio';
 import { resolveTTSProviderId } from '@/lib/pipeline/projectSettings';
 import { getTTSProvider } from '@/lib/providers/tts/catalog';
 import { concatenateAudioBlobs } from '@/lib/pipeline/assembleVideo';
@@ -105,6 +108,7 @@ export default function EditorPage() {
   const [showExport, setShowExport] = useState(false);
   const [showScenario, setShowScenario] = useState(false);
   const [showIntroOutro, setShowIntroOutro] = useState(false);
+  const [showAudioImport, setShowAudioImport] = useState(false);
   const [voicingIntroOutro, setVoicingIntroOutro] = useState(false);
   const [backendCaps, setBackendCaps] = useState<BackendCapabilities | null>(null);
   const [preferredBackend, setPreferredBackend] = useState<'auto' | 'webcodecs' | 'canvas'>('auto');
@@ -186,26 +190,16 @@ export default function EditorPage() {
         const loadedProject = safeVisionModel === storedProject.settings.visionModel
           ? storedProject
           : { ...storedProject, settings: { ...storedProject.settings, visionModel: safeVisionModel } };
-        const durations = new Map<number, number>();
-        const blobs = new Map<number, Blob>();
-        const full = new Map<number, { blob: Blob; duration: number }>();
-
-        for (const panel of loadedProject.panels) {
-          if (cancelled) return;
-          try {
-            const blob = await loadProjectAudio(loadedProject.id, panel.id);
-            if (blob) {
-              const duration = await getAudioDuration(blob);
-              durations.set(panel.id, duration);
-              blobs.set(panel.id, blob);
-              full.set(panel.id, { blob, duration });
-            } else {
-              durations.set(panel.id, loadedProject.audioDurations?.[panel.id] || estimateDuration(panel.dialogue));
-            }
-          } catch {
-            durations.set(panel.id, loadedProject.audioDurations?.[panel.id] || estimateDuration(panel.dialogue));
-          }
-        }
+        // Аудио панелей — по наличию файла, без фильтра по .sig (импорт без подписи).
+        const loadedAudio = await loadPanelAudios({
+          projectId: loadedProject.id,
+          panels: loadedProject.panels,
+          storedDurations: loadedProject.audioDurations,
+          decode: getAudioDuration,
+          isCancelled: () => cancelled,
+        });
+        if (!loadedAudio) return;
+        const { durations, blobs, full } = loadedAudio;
 
         let loadedIntroAudio: Blob | null = null;
         let loadedOutroAudio: Blob | null = null;
@@ -653,10 +647,29 @@ export default function EditorPage() {
       // которые остались в кэше) — это база для следующей мягкой миграции.
       const audioTexts: Record<number, string> = { ...(project.audioTexts || {}) };
       for (const panel of project.panels) audioTexts[panel.id] = panel.dialogue;
-      updateProject({ timeline: tl, srt, audioDurations: obj, audioTexts });
+      // Явная переозвучка (forceRegenerate): отметка «импорт» снимается только
+      // там, где TTS записал новый файл. Импортированный файл заранее не
+      // удаляется (см. handleRegeneratePanel), так что при упавшем синтезе он
+      // цел — и сообщение об ошибке это говорит. Панели, до которых синтез не
+      // дошёл, и упавшие неотличимы для отметки: обе остаются «импортом».
+      const regeneratedIds = options?.forceRegenerate ? (onlyPanelIds ?? project.panels.map(p => p.id)) : [];
+      const settled = settleImportRegeneration({
+        panels: project.panels,
+        regeneratedIds,
+        succeededIds: result.panelAudios.keys(),
+        errors: result.errors,
+      });
+      const panelsAfter = settled.panels;
+      updateProject({
+        timeline: tl,
+        srt,
+        audioDurations: obj,
+        audioTexts,
+        ...(panelsAfter !== project.panels ? { panels: panelsAfter } : {}),
+      });
 
-      if (result.errors.length > 0) {
-        const [firstError, ...otherErrors] = result.errors;
+      if (settled.errors.length > 0) {
+        const [firstError, ...otherErrors] = settled.errors;
         setAudioError(otherErrors.length > 0
           ? `${firstError}\nЕщё ошибок: ${otherErrors.length}.`
           : firstError);
@@ -677,12 +690,19 @@ export default function EditorPage() {
       setAudioError('Не выбран TTS-провайдер. Откройте «Голоса» и выберите его.');
       return;
     }
-    const cost = estimateTotalCost(project.panels, project.intro, project.outro, ttsId);
+    // Импортированные панели TTS не трогает (generateAllAudio их пропускает) —
+    // и в стоимость они не входят.
+    const ttsPanels = project.panels.filter(p => p.audioSource !== 'import');
+    const importedCount = project.panels.length - ttsPanels.length;
+    const cost = estimateTotalCost(ttsPanels, project.intro, project.outro, ttsId);
     const providerName = getTTSProvider(ttsId)?.name || ttsId;
     // Первая строка диалога — та же, что на кнопке: «Озвучить все N панелей»,
     // «Озвучить оставшиеся N» или «Переозвучить всё».
+    const importedNote = importedCount > 0
+      ? `\nИмпортированное аудио (${importedCount}) не трогается — переозвучить его можно кнопкой «↻» у панели.`
+      : '';
     const confirmed = confirm(
-      `${voiceButton.label}?\nПровайдер: ${providerName} (${ttsId})\nСимволов: ${cost.characters}\nСтоимость: ${cost.estimatedCost}\n\nOPFS кэш — повтор бесплатно. Изменённый текст/голос озвучивается заново.`
+      `${voiceButton.label}?\nПровайдер: ${providerName} (${ttsId})\nСимволов: ${cost.characters}\nСтоимость: ${cost.estimatedCost}${importedNote}\n\nOPFS кэш — повтор бесплатно. Изменённый текст/голос озвучивается заново.`
     );
     if (!confirmed) return;
 
@@ -730,18 +750,89 @@ export default function EditorPage() {
     }
   };
 
-  /** Точечная переозвучка одной панели: чистим OPFS-аудио и синтезируем заново. */
-  const handleRegeneratePanel = async (panelId: number) => {
-    if (!project || isGeneratingAudio) return;
-    try {
-      const { deleteProjectAudio } = await import('@/lib/storage/opfs');
-      await deleteProjectAudio(project.id, panelId);
-    } catch {}
-    setAudioBlobs(prev => {
-      const next = new Map(prev);
-      next.delete(panelId);
-      return next;
+  /** id панелей, у которых сейчас есть аудио — «уже есть» для плана импорта. */
+  const existingAudioIds = useMemo(() => [...audioBlobs.keys()], [audioBlobs]);
+
+  /**
+   * Импорт аудио (v1.3.18): applyAudioImport пишет файлы в OPFS по ключам
+   * панелей; после КАЖДОГО записанного файла отметка «импорт» сразу уходит в
+   * IDB (падение вкладки на 4-м файле оставит 3 видимых импорта, а не файлы без
+   * отметки, которые «Озвучить всё» приняло бы за устаревший TTS). Состояние
+   * редактора, таймлайн и SRT — один раз в конце.
+   */
+  const handleImportAudio = async (
+    plan: AudioImportPlan,
+    files: Map<string, File>,
+    controls: AudioImportApplyControls
+  ) => {
+    if (!project) throw new Error('Проект не загружен');
+    const snapshot = project;
+    const persister = createImportPersister({
+      snapshot,
+      save: saveProject,
+      onSaveError: (e) => console.warn('Не удалось сохранить отметку импорта', e),
     });
+
+    const report = await applyAudioImport(plan, files, {
+      projectId: snapshot.id,
+      currentPanelIds: snapshot.panels.map(p => p.id),
+      signal: controls.signal,
+      onProgress: controls.onProgress,
+      onApplied: persister.onApplied,
+    });
+    await persister.flush();
+    if (report.applied.length === 0) return report;
+
+    const merged = mergeAppliedAudio({
+      panels: snapshot.panels,
+      applied: report.applied,
+      files,
+      blobs: audioBlobs,
+      full: audioFull,
+      durations: audioDurations,
+    });
+    setAudioBlobs(merged.blobs);
+    setAudioFull(merged.full);
+    setAudioDurations(merged.durations);
+
+    const rebuilt = rebuildSrt({
+      panels: merged.panels,
+      audioDurations: merged.durations,
+      voiceAssignments: snapshot.voiceAssignments,
+      intro: snapshot.intro,
+      outro: snapshot.outro,
+      introDuration: snapshot.introDuration,
+      outroDuration: snapshot.outroDuration,
+      panelGap,
+      realDurations: merged.realDurations,
+    });
+    updateProject({ panels: merged.panels, timeline: rebuilt.timeline, srt: rebuilt.srt, audioDurations: merged.durationsObj });
+    return report;
+  };
+
+  /**
+   * Точечная переозвучка одной панели: чистим OPFS-аудио и синтезируем заново.
+   * Импортированное аудио — только с подтверждением из карточки панели
+   * (двойной клик по кнопке, не confirm(): в iframe-превью он молча false).
+   */
+  const handleRegeneratePanel = async (panelId: number, opts?: { confirmedImportOverwrite?: boolean }) => {
+    if (!project || isGeneratingAudio) return;
+    const panel = project.panels.find(p => p.id === panelId);
+    const imported = panel?.audioSource === 'import';
+    if (imported && !opts?.confirmedImportOverwrite) return;
+    // Импортированный файл заранее не удаляем: forceRegenerate его не читает,
+    // успешный синтез перезапишет, а упавший оставит запись пользователя целой.
+    if (!imported) {
+      try {
+        const { deleteProjectAudio } = await import('@/lib/storage/opfs');
+        await deleteProjectAudio(project.id, panelId);
+      } catch {}
+      setAudioBlobs(prev => {
+        const next = new Map(prev);
+        next.delete(panelId);
+        return next;
+      });
+    }
     // forceRegenerate: без него при неизменном тексте и голосе генерация
     // возвращала тот же файл из общего TTS-кэша — кнопка «Переозвучить» врала.
     await runAudioGeneration([panelId], { forceRegenerate: true });
@@ -937,7 +1028,7 @@ export default function EditorPage() {
           renderMode: renderSettings.renderMode,
           stripViewport: renderSettings.stripViewport,
           stripGap: renderSettings.stripGap,
-          panels: project.panels.map(p => ({ id: p.id, imageIndex: p.imageIndex, fullFrame: p.fullFrame })),
+          panels: project.panels.map(p => ({ id: p.id, imageIndex: p.imageIndex, bbox: p.bbox, fullFrame: p.fullFrame })),
           onAudioTrimmed: (messages) => setAudioWarnings(messages),
           preferredBackend: preferredBackend === 'auto' ? undefined : preferredBackend
         });
@@ -1085,8 +1176,16 @@ export default function EditorPage() {
         </div>
 
         <div className="flex items-center gap-2">
-          <button onClick={() => setShowScenario(true)} className="h-8 px-3 rounded-[6px] bg-[#16161A] border border-[#26262C] text-xs hover:bg-[#1E1E23] transition-colors">
+          <button onClick={() => setShowScenario(true)} className="h-8 px-3 rounded-[6px] bg-[#16161A] border border-[#26262C] text-xs hover:bg-[#1E1E23] transition-colors whitespace-nowrap">
             Сценарий
+          </button>
+          <button
+            onClick={() => setShowAudioImport(true)}
+            disabled={isGeneratingAudio || project.panels.length === 0}
+            title={project.panels.length === 0 ? 'Сначала создайте панели (сценарий или анализ изображений)' : 'Свои аудиофайлы на панели — по манифесту, якорю в имени, номеру или порядку'}
+            className="h-8 px-3 rounded-[6px] bg-[#16161A] border border-[#26262C] text-xs hover:bg-[#1E1E23] transition-colors whitespace-nowrap disabled:opacity-40 disabled:hover:bg-[#16161A]"
+          >
+            Импорт аудио
           </button>
           <button onClick={() => setShowIntroOutro(true)} className="h-8 px-3 rounded-[6px] bg-[#16161A] border border-[#26262C] text-xs hover:bg-[#1E1E23] transition-colors">
             Интро/Аутро
@@ -1266,6 +1365,14 @@ export default function EditorPage() {
         onApply={handleApplyScenario}
         onTranslate={handleTranslateScenario}
       />
+
+      {showAudioImport && <AudioImportModal
+        open
+        onClose={() => setShowAudioImport(false)}
+        panels={project.panels}
+        existingAudio={existingAudioIds}
+        onApply={handleImportAudio}
+      />}
 
       <IntroOutroModal
         open={showIntroOutro}

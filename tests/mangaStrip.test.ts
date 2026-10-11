@@ -2,7 +2,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { STRIP_SCENARIOS } from './fixtures/stripScenarios';
 import {
-  buildPanelScrollSpans,
   buildScrollKeyframes,
   buildScrollSpans,
   clampScroll,
@@ -413,27 +412,6 @@ test('короткие страницы с совпадающей позицие
 });
 
 // ---- Задача 1: маппинг panelId ⇄ пиксели скролла и обратный seek ----
-
-test('buildPanelScrollSpans: длинная страница — полный диапазон, короткая — одна точка (центр)', () => {
-  // PAGES: 1000×1000 → 1920 px, 1000×2000 → 3840 px (обе выше кадра 1080).
-  const layout = computeStripLayout(PAGES, { ...FRAME, viewport: 1080, gap: 24 });
-  const spans = buildPanelScrollSpans(
-    [
-      { panelId: 0, imageIndex: 0, audioStart: 0, audioEnd: 3 },
-      { panelId: 1, imageIndex: 0, audioStart: 3.6, audioEnd: 6 },
-      { panelId: 2, imageIndex: 1, audioStart: 6.6, audioEnd: 10 },
-    ],
-    layout
-  );
-  assert.equal(spans.length, 3);
-  assert.deepEqual([spans[0].startPx, spans[0].endPx], [0, 840], 'слот 0: [0, 1920-1080]');
-  assert.deepEqual([spans[1].startPx, spans[1].endPx], [0, 840], 'вторая панель той же страницы — тот же диапазон');
-  assert.deepEqual([spans[2].startPx, spans[2].endPx], [1944, 4704], 'слот 1: [1944, 1944+3840-1080]');
-
-  const layout2 = computeStripLayout([{ width: 1000, height: 200 }], { ...FRAME, viewport: 1080, gap: 24 });
-  const spans2 = buildPanelScrollSpans([{ panelId: 0, imageIndex: 0, audioStart: 0, audioEnd: 3 }], layout2);
-  assert.equal(spans2[0].startPx, spans2[0].endPx, 'короткая страница: startPx === endPx (центр)');
-});
 
 test('timeAtScroll: верх страницы — первая панель, низ — вторая; края — null/смысл', () => {
   const layout = computeStripLayout(PAGES, { ...FRAME, viewport: 1080, gap: 24 });

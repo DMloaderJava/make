@@ -3,9 +3,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import {
+  formatRangeNum,
   genderLabel,
   parseScenario,
   SCENARIO_EXAMPLE,
+  SCENARIO_EXAMPLE_STRIP,
   SCENARIO_GAP_SECONDS,
   SCENARIO_IMAGE_LABEL,
   type ScenarioLine,
@@ -132,15 +134,25 @@ export function ScenarioModal({ open, onClose, imagesCount, existingPanels, ttsL
             <summary className="cursor-pointer text-[12px] text-[#A1A1AA] select-none">Формат и правила</summary>
             <div className="mt-3 space-y-3">
               <pre className="text-[11px] leading-5 font-mono text-[#F5F5F7] whitespace-pre-wrap">{SCENARIO_EXAMPLE}</pre>
+              <p className="text-[11px] leading-5 text-[#8A8A93]">
+                Длинная webtoon-полоса — одна картинка, несколько панелей с y-диапазонами:
+              </p>
+              <pre className="text-[11px] leading-5 font-mono text-[#F5F5F7] whitespace-pre-wrap">{SCENARIO_EXAMPLE_STRIP}</pre>
               <ol className="text-[11px] leading-5 text-[#8A8A93] list-decimal list-inside space-y-0.5">
                 <li>Сначала загружается изображение, затем озвучивается диалог.</li>
                 <li>Каждая реплика переводится на язык озвучки: <span className="text-[#E8B44C]">{languageName}</span>.</li>
                 <li>После завершения чтения реплики — переход к следующему изображению через {String(SCENARIO_GAP_SECONDS).replace('.', ',')} секунды.</li>
                 <li>Пол персонажа указывается в скобках: (Жен.) или (Муж.).</li>
                 <li>Никакого лишнего текста — только «{SCENARIO_IMAGE_LABEL} N» и реплики.</li>
+                <li>
+                  <span className="text-[#F5F5F7]">Y-диапазон (опционально).</span>{' '}
+                  <span className="font-mono text-[#E8B44C]">{SCENARIO_IMAGE_LABEL} 1 [0..30%]</span> — панель занимает верхние 30% картинки.
+                  Если не указан — вся картинка = одна панель (лента не скроллится). Для длинных webtoon-полос указывайте
+                  диапазоны — тогда лента едет по панелям и совпадает с озвучкой.
+                </li>
               </ol>
               <p className="text-[11px] leading-5 text-[#8A8A93]">
-                При применении: интро и аутро очищаются, пол используется для автоподбора голоса
+                При применении: интро и аутро сохраняются, пол используется для автоподбора голоса
                 {imagesCount > 0 ? `; изображений в проекте: ${imagesCount}` : ''}.
               </p>
             </div>
@@ -150,7 +162,7 @@ export function ScenarioModal({ open, onClose, imagesCount, existingPanels, ttsL
             value={text}
             onChange={(e) => setText(e.target.value)}
             spellCheck={false}
-            placeholder={`Вставьте сценарий в формате:\n\n${SCENARIO_EXAMPLE.slice(0, SCENARIO_EXAMPLE.indexOf('\n\n\n'))}...`}
+            placeholder={`Вставьте сценарий в формате:\n\n${SCENARIO_EXAMPLE.split('\n\n').slice(0, 2).join('\n\n')}\n\n...`}
             className="w-full min-h-[180px] max-h-[300px] rounded-[10px] bg-[#0B0B0C] border border-[#26262C] px-3 py-2.5 font-mono text-[12px] leading-5 text-[#F5F5F7] placeholder:text-[#8A8A93]/50 resize-y"
           />
 
@@ -198,6 +210,9 @@ export function ScenarioModal({ open, onClose, imagesCount, existingPanels, ttsL
             <Button variant="outline" size="sm" onClick={() => setText(SCENARIO_EXAMPLE)} className="h-8 text-xs bg-[#0B0B0C] border-[#26262C] hover:bg-[#1E1E23]">
               Пример
             </Button>
+            <Button variant="outline" size="sm" onClick={() => setText(SCENARIO_EXAMPLE_STRIP)} title="Одна длинная картинка, панели по y-диапазонам" className="h-8 text-xs bg-[#0B0B0C] border-[#26262C] hover:bg-[#1E1E23]">
+              Пример: webtoon-полосы
+            </Button>
             <Button variant="outline" size="sm" onClick={() => setText(currentScenario)} disabled={!currentScenario} title="Собрать текст заново из панелей проекта" className="h-8 text-xs bg-[#0B0B0C] border-[#26262C] hover:bg-[#1E1E23] disabled:opacity-40">
               ← Из проекта
             </Button>
@@ -240,7 +255,10 @@ export function ScenarioModal({ open, onClose, imagesCount, existingPanels, ttsL
                   {parsed.lines.map((line, i) => (
                     <div key={i} className="flex items-baseline gap-2 text-[11px] leading-5">
                       <span className="font-mono text-[#8A8A93] shrink-0">{String(i + 1).padStart(2, '0')}</span>
-                      <span className="font-mono text-[#E8B44C] shrink-0">{SCENARIO_IMAGE_LABEL} {line.imageIndex + 1}</span>
+                      <span className="font-mono text-[#E8B44C] shrink-0">
+                        {SCENARIO_IMAGE_LABEL} {line.imageIndex + 1}
+                        {line.yRange && <span className="text-[#8A8A93]"> [{formatRangeNum(line.yRange.from)}..{formatRangeNum(line.yRange.to)}%]</span>}
+                      </span>
                       <span className="truncate">
                         <span className="text-[#F5F5F7]">{line.character}</span>
                         {line.gender && <span className="text-[#8A8A93]"> ({genderLabel(line.gender)})</span>}

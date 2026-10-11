@@ -37,7 +37,7 @@ export interface AssembleOptions {
   /** Отступ между страницами ленты, px. */
   stripGap?: number;
   /** Панели проекта: нужны ленте, если в таймлайне нет imageIndex. */
-  panels?: Array<{ id: number; imageIndex: number; fullFrame?: boolean }>;
+  panels?: Array<{ id: number; imageIndex: number; fullFrame?: boolean; bbox?: { x: number; y: number; width: number; height: number } }>;
 }
 
 // Honest implementation using Canvas + MediaRecorder - fixed Promise antipattern

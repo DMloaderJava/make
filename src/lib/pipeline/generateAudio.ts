@@ -20,6 +20,7 @@ import {
   saveTTSCache,
   loadTTSCache,
   saveProjectAudio,
+  loadProjectAudio,
   saveProjectIntroAudio,
   saveProjectOutroAudio,
   loadProjectIntroAudio,
@@ -33,7 +34,7 @@ import { estimateTotalCost } from '../validators';
 
 export interface AudioGenerationOptions {
   projectId: string;
-  panels: Array<{ id: number; dialogue: string; character: string }>;
+  panels: Array<{ id: number; dialogue: string; character: string; audioSource?: 'tts' | 'import'; audioFileName?: string }>;
   voiceAssignments: Record<string, string>;
   intro?: string;
   outro?: string;
@@ -50,6 +51,8 @@ export interface AudioGenerationOptions {
   regenerateIntroOutro?: boolean;
   /**
    * Игнорировать кэши (OPFS-файл панели и общий TTS-кэш) и синтезировать заново.
+   * Единственный способ перезаписать импортированное аудио (audioSource:
+   * 'import') — редактор спрашивает подтверждение перед таким вызовом.
    * Нужно кнопке «↻ Переозвучить»: без флага при неизменном тексте она возвращала
    * ровно тот же файл из TTS-кэша, то есть кнопка врала.
    */
@@ -70,6 +73,12 @@ export interface AudioGenerationResult {
   totalCost: { characters: number; cost: string };
   /** Ошибки отдельных задач не прерывают очередь; отдаём их редактору вместо console-only. */
   errors: string[];
+  /**
+   * Импортированные панели, оставленные как есть (без TTS): их аудио — в
+   * panelAudios. Остальные панели из panelAudios озвучены TTS в этом прогоне
+   * или взяты из TTS-кэша.
+   */
+  keptImported: number[];
 }
 
 // Singleton AudioContext to avoid leak (Chrome limit ~6 contexts)
@@ -158,9 +167,16 @@ export async function generateAllAudio(options: AudioGenerationOptions): Promise
   // определяется по сигнатуре через resolveAudioMime (таблица — лишь фолбэк).
 
   // Панели, которые реально надо переозвучить
-  const targetPanels = options.onlyPanelIds
+  const selectedPanels = options.onlyPanelIds
     ? options.panels.filter(p => options.onlyPanelIds!.includes(p.id))
     : options.panels;
+  // Импортированное аудио (v1.3.18) TTS не трогает: его подпись никогда не
+  // совпадёт с TTS-подписью, и без этого пропуска «Озвучить всё» молча
+  // перезаписало бы файл пользователя. Только явный forceRegenerate.
+  const importedPanels = options.forceRegenerate ? [] : selectedPanels.filter(p => p.audioSource === 'import');
+  const targetPanels = importedPanels.length > 0
+    ? selectedPanels.filter(p => p.audioSource !== 'import')
+    : selectedPanels;
 
   const costEstimate = estimateTotalCost(targetPanels, options.intro || '', options.outro || '', options.ttsProviderId);
   options.onCostEstimate?.({ characters: costEstimate.characters, cost: costEstimate.estimatedCost });
@@ -171,6 +187,24 @@ export async function generateAllAudio(options: AudioGenerationOptions): Promise
 
   let introAudio: Blob | null = null;
   let outroAudio: Blob | null = null;
+
+  // Импортированные — как есть, по ключу панели, без проверки TTS-подписи.
+  const keptImported: number[] = [];
+  for (const panel of importedPanels) {
+    const blob = await loadProjectAudio(options.projectId, panel.id);
+    if (blob) {
+      const duration = await getAudioDuration(blob);
+      panelAudios.set(panel.id, { blob, duration });
+      durations.set(panel.id, duration);
+      keptImported.push(panel.id);
+    } else {
+      // Файл пропал из хранилища: молча озвучить TTS — значит подменить выбор
+      // пользователя. Сообщаем; переозвучка — явной кнопкой.
+      const name = panel.audioFileName ? ` «${panel.audioFileName}»` : '';
+      errors.push(`Панель ${panel.id}: импортированный файл${name} не найден в хранилище — импортируйте заново или переозвучьте панель`);
+      durations.set(panel.id, Math.max(1.5, panel.dialogue.length / 14));
+    }
+  }
 
   // Резолв голоса — один раз на прогон (иначе для 50 панелей будет 50 запросов
   // getVoices() к провайдеру, а это ещё и биллинг у части API).
@@ -480,6 +514,7 @@ export async function generateAllAudio(options: AudioGenerationOptions): Promise
     durations,
     totalCost: { characters: costEstimate.characters, cost: costEstimate.estimatedCost },
     errors,
+    keptImported,
   };
 }
 
