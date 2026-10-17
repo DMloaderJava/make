@@ -1,5 +1,7 @@
 # Manga Voice Studio — Self-hosted озвучка манги с AI (v1.3.17)
 
+Подробный гайд по Supabase, TTL 24 часа и деплою на Vercel: [DEPLOYMENT_GUIDE_RU.md](./DEPLOYMENT_GUIDE_RU.md).
+
 Self-hosted веб-инструмент для автоматической генерации озвученных видео из изображений (манга/комикс) с BYOK, 25+ LLM и 15+ TTS провайдерами, OPFS кэшем, WebCodecs MP4 и SEO-пакетом.
 
 ## 🎨 v1.3 — Студия без хлама
