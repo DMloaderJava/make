@@ -452,7 +452,7 @@ export function ProviderList() {
       </div>
 
       <div className="rounded-[10px] bg-[#16161A] border border-[#26262C] p-4 text-[12px] text-[#8A8A93] space-y-2 leading-[1.5]">
-        <p>🔒 <span className="text-[#F5F5F7] font-medium">Приватность:</span> Все ключи только в localStorage, никакого Supabase.</p>
+        <p>🔒 <span className="text-[#F5F5F7] font-medium">Приватность:</span> Ключи провайдеров остаются в localStorage и не отправляются в Supabase. Облачная копия проекта временная и удаляется через 24 часа.</p>
         <p>💡 <span className="text-[#F5F5F7] font-medium">Старт:</span> OpenRouter (Gemma 4 31B :free для vision) или Gemini AI Studio + Azure TTS (500k/мес F0) — бесплатные тарифы зависят от лимитов провайдера.</p>
         <p>📚 Больше free: <a href="https://github.com/open-free-llm-api/awesome-freellm-apis" target="_blank" className="text-[#E8B44C] hover:underline">awesome-freellm-apis</a> · <a href="https://github.com/nejib1/Free-LLM" target="_blank" className="text-[#E8B44C] hover:underline">Free-LLM</a> · <a href="https://free-llm.com" target="_blank" className="text-[#E8B44C] hover:underline">free-llm.com</a></p>
       </div>

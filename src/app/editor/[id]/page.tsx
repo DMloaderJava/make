@@ -32,6 +32,7 @@ import { loadProjectAudio, loadProjectIntroAudio, loadProjectOutroAudio, deleteP
 import { estimateTotalCost } from '@/lib/validators';
 import { getVoiceButtonState } from '@/lib/pipeline/voiceButtonState';
 import { downloadBlob, formatTime } from '@/lib/utils';
+import { syncProjectSnapshot } from '@/lib/cloud/projectSync';
 import { ArrowLeft, Loader2 } from 'lucide-react';
 import Link from 'next/link';
 
@@ -373,7 +374,10 @@ export default function EditorPage() {
     setSaveStatus('saving');
     const obj: Record<number, number> = {};
     audioDurations.forEach((v, k) => obj[k] = v);
-    await saveProject({ ...project, audioDurations: obj });
+    const snapshot = { ...project, audioDurations: obj, updatedAt: Date.now() };
+    await saveProject(snapshot);
+    // Облако временное (TTL 24 ч); ошибка сети не ломает локальный режим.
+    void syncProjectSnapshot(snapshot);
     setSaveStatus('saved');
   };
 

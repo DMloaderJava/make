@@ -5,6 +5,7 @@ import { getSettings } from './local';
 
 const DB_NAME = INFO_IDB_NAME;
 const DB_VERSION = 3;
+export const PROJECT_TTL_MS = 24 * 60 * 60 * 1000;
 
 export interface PanelData {
   id: number;
@@ -171,6 +172,11 @@ export async function getProject(id: string): Promise<Project | undefined> {
   const db = await getDB();
   const project = await db.get('projects', id);
   if (!project) return undefined;
+  const lastChanged = Number(project.updatedAt) || Number(project.createdAt) || 0;
+  if (lastChanged + PROJECT_TTL_MS <= Date.now()) {
+    await deleteProject(id);
+    return undefined;
+  }
   // OPFS images are loaded on demand via getProjectWithImages, not here to save memory
   return project;
 }
@@ -202,7 +208,14 @@ export async function getProjectWithImages(id: string): Promise<{ project: Proje
 export async function getAllProjects(): Promise<Project[]> {
   const db = await getDB();
   const all = await db.getAll('projects');
-  return all.sort((a, b) => b.updatedAt - a.updatedAt);
+  const cutoff = Date.now() - PROJECT_TTL_MS;
+  const expired = all.filter(project => (Number(project.updatedAt) || Number(project.createdAt) || 0) <= cutoff);
+  for (const project of expired) {
+    await deleteProject(project.id);
+  }
+  return all
+    .filter(project => (Number(project.updatedAt) || Number(project.createdAt) || 0) > cutoff)
+    .sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
 export async function deleteProject(id: string): Promise<void> {
