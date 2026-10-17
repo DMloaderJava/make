@@ -227,7 +227,7 @@ export default function HomePage() {
             ) : (
               <div className="space-y-3">
                 <div className="rounded-[16px] border border-dashed border-[#26262C] bg-[#16161A] p-2">
-                  <ImageUploader onUpload={handleUpload} multiple maxFiles={20} />
+                  <ImageUploader onUpload={handleUpload} multiple />
                 </div>
                 <div className="flex flex-wrap justify-center gap-x-4 gap-y-1">
                   <button onClick={handleScenarioDemo} className="text-xs text-[#E8B44C] hover:text-[#F5F5F7] transition-colors">Тест сценария (демо-изображения) →</button>

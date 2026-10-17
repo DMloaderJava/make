@@ -28,7 +28,7 @@ import { getTTSProvider } from '@/lib/providers/tts/catalog';
 import { concatenateAudioBlobs } from '@/lib/pipeline/assembleVideo';
 import { renderVideo, checkCapabilities, BackendCapabilities } from '@/lib/pipeline/videoEncoder';
 import type { AudioPlacement } from '@/lib/pipeline/audioMix';
-import { loadProjectAudio, loadProjectIntroAudio, loadProjectOutroAudio, deleteProjectAudio, isOPFSSupported } from '@/lib/storage/opfs';
+import { loadProjectAudio, loadProjectIntroAudio, loadProjectOutroAudio, deleteProjectAudio, isOPFSSupported, saveProjectImage } from '@/lib/storage/opfs';
 import { estimateTotalCost } from '@/lib/validators';
 import { getVoiceButtonState } from '@/lib/pipeline/voiceButtonState';
 import { downloadBlob, formatTime } from '@/lib/utils';
@@ -110,6 +110,8 @@ export default function EditorPage() {
   const [showScenario, setShowScenario] = useState(false);
   const [showIntroOutro, setShowIntroOutro] = useState(false);
   const [showAudioImport, setShowAudioImport] = useState(false);
+  const [isUploadingImages, setIsUploadingImages] = useState(false);
+  const editorImageInputRef = useRef<HTMLInputElement | null>(null);
   const [voicingIntroOutro, setVoicingIntroOutro] = useState(false);
   const [backendCaps, setBackendCaps] = useState<BackendCapabilities | null>(null);
   const [preferredBackend, setPreferredBackend] = useState<'auto' | 'webcodecs' | 'canvas'>('auto');
@@ -390,6 +392,45 @@ export default function EditorPage() {
   const updateProject = (updates: Partial<Project>) => {
     if (!project) return;
     setProject({ ...project, ...updates, updatedAt: Date.now() });
+  };
+  const handleAddImages = async (fileList: FileList | File[]) => {
+    if (!project) return;
+    const files = Array.from(fileList).filter(file => file.type.startsWith('image/'));
+    if (files.length === 0) {
+      setNotice('Выберите файлы изображений.');
+      return;
+    }
+    setIsUploadingImages(true);
+    try {
+      const nextImages: string[] = [];
+      const nextFiles = [...(project.imageFiles || [])];
+      const useOPFS = project.useOPFS && await isOPFSSupported();
+      for (const [offset, file] of files.entries()) {
+        const index = images.length + offset;
+        if (useOPFS) {
+          nextFiles.push(await saveProjectImage(project.id, index, file));
+        } else {
+          nextImages.push(await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result));
+            reader.onerror = () => reject(reader.error || new Error(`Не удалось прочитать ${file.name}`));
+            reader.readAsDataURL(file);
+          }));
+        }
+      }
+      const combinedImages = useOPFS ? images : [...images, ...nextImages];
+      setImages(combinedImages);
+      updateProject({
+        images: useOPFS ? project.images : [...project.images, ...nextImages],
+        imageFiles: useOPFS ? nextFiles : project.imageFiles,
+        useOPFS,
+      });
+      setNotice(`Добавлено изображений: ${files.length}. Всего в проекте: ${combinedImages.length}.`);
+    } catch (error) {
+      setNotice(`Не удалось добавить изображения: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setIsUploadingImages(false);
+    }
   };
 
   const resolveLLMConfig = () => {
@@ -1183,6 +1224,24 @@ export default function EditorPage() {
           <button onClick={() => setShowScenario(true)} className="h-8 px-3 rounded-[6px] bg-[#16161A] border border-[#26262C] text-xs hover:bg-[#1E1E23] transition-colors whitespace-nowrap">
             Сценарий
           </button>
+          <button
+            onClick={() => editorImageInputRef.current?.click()}
+            disabled={isUploadingImages || isGeneratingAudio}
+            className="h-8 px-3 rounded-[6px] bg-[#16161A] border border-[#26262C] text-xs hover:bg-[#1E1E23] transition-colors whitespace-nowrap disabled:opacity-40"
+          >
+            {isUploadingImages ? 'Загрузка...' : 'Добавить изображения'}
+          </button>
+          <input
+            ref={editorImageInputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            className="hidden"
+            onChange={(event) => {
+              if (event.target.files?.length) void handleAddImages(event.target.files);
+              event.target.value = '';
+            }}
+          />
           <button
             onClick={() => setShowAudioImport(true)}
             disabled={isGeneratingAudio || project.panels.length === 0}
