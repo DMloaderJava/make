@@ -15,7 +15,7 @@ e8aea9e Add expiring Supabase snapshots and audio import hardening
 - Supabase snapshots проектов через `/api/cloud/project`;
 - автоматический TTL: 24 часа с последнего сохранения;
 - очистка просроченных snapshots перед запросами;
-- Vercel Cron каждый час через `/api/cleanup`;
+- ежедневный Vercel Cron через `/api/cleanup`, совместимый с Hobby-планом;
 - очистка локальных IndexedDB/OPFS-проектов старше 24 часов;
 - импорт внешних аудиофайлов на панели по манифесту, якорю, номеру или порядку;
 - серверные переменные не попадают в клиентский JavaScript;
@@ -104,11 +104,17 @@ Node.js Version: 22.x
   "crons": [
     {
       "path": "/api/cleanup",
-      "schedule": "0 * * * *"
+      "schedule": "0 3 * * *"
     }
   ]
 }
 ```
+
+На Vercel Hobby разрешён только один запуск Cron в сутки, поэтому используется
+расписание `0 3 * * *` — ежедневно в 03:00 UTC. Для TTL это не критично:
+очистка также выполняется перед каждым чтением и сохранением snapshot через
+`/api/cloud/project`, поэтому просроченная запись не будет возвращена даже до
+ночного cron-запуска.
 
 Проверить cron можно в Vercel в разделе **Settings → Cron Jobs**.
 
@@ -233,7 +239,7 @@ PY
 expires_at <= now()
 ```
 
-Дополнительно Vercel Cron запускает `/api/cleanup` каждый час и вызывает:
+Дополнительно ежедневный Vercel Cron запускает `/api/cleanup` и вызывает:
 
 ```sql
 select public.mvs_delete_expired_snapshots();
