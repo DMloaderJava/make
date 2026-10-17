@@ -28,7 +28,7 @@ import { getTTSProvider } from '@/lib/providers/tts/catalog';
 import { concatenateAudioBlobs } from '@/lib/pipeline/assembleVideo';
 import { renderVideo, checkCapabilities, BackendCapabilities } from '@/lib/pipeline/videoEncoder';
 import type { AudioPlacement } from '@/lib/pipeline/audioMix';
-import { loadProjectAudio, loadProjectIntroAudio, loadProjectOutroAudio, deleteProjectAudio, isOPFSSupported, saveProjectImage } from '@/lib/storage/opfs';
+import { loadProjectAudio, loadProjectIntroAudio, loadProjectOutroAudio, deleteProjectAudio, isOPFSSupported, saveProjectImage, saveProjectIntroAudio, saveProjectOutroAudio } from '@/lib/storage/opfs';
 import { estimateTotalCost } from '@/lib/validators';
 import { getVoiceButtonState } from '@/lib/pipeline/voiceButtonState';
 import { downloadBlob, formatTime } from '@/lib/utils';
@@ -53,6 +53,23 @@ async function getAudioDuration(blob: Blob): Promise<number> {
     return 2;
   } catch {
     return 2;
+  }
+}
+
+async function getImportedAudioDuration(blob: Blob): Promise<number> {
+  const url = URL.createObjectURL(blob);
+  try {
+    const audio = new Audio();
+    audio.preload = 'metadata';
+    const duration = await new Promise<number>((resolve, reject) => {
+      audio.onloadedmetadata = () => resolve(audio.duration);
+      audio.onerror = () => reject(new Error('Формат аудио не поддержан браузером или файл повреждён'));
+      audio.src = url;
+    });
+    if (!Number.isFinite(duration) || duration <= 0) throw new Error('Не удалось определить длительность аудио');
+    return duration;
+  } finally {
+    URL.revokeObjectURL(url);
   }
 }
 
@@ -104,6 +121,10 @@ export default function EditorPage() {
   const [generatingSEO, setGeneratingSEO] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [playbackStep, setPlaybackStep] = useState(0);
+  const playbackAudioRef = useRef<HTMLAudioElement | null>(null);
+  const playbackUrlRef = useRef<string | null>(null);
+  const playbackKeyRef = useRef<string | null>(null);
   const [selectedId, setSelectedId] = useState<number | 'intro' | 'outro' | null>(null);
   const [showVoices, setShowVoices] = useState(false);
   const [showExport, setShowExport] = useState(false);
@@ -303,17 +324,75 @@ export default function EditorPage() {
     project?.settings?.musicVolume,
   ]);
 
-  // Playback timer.
-  // Дельта-тик: каждый кадр прибавляем время с прошлого кадра, а смещение
-  // читаем из ref на КАЖДОМ тике. Раньше startOffset захватывался один раз при
-  // старте эффекта — и перемотка во время проигрывания (таймлайн, колесо ленты,
-  // стрелки) откатывалась на следующем кадре: лента и часы «резали» seek.
+  // Превью воспроизводится по фактическому аудио: следующий сегмент стартует
+  // только из onended текущего HTMLAudioElement. Если у сегмента аудио нет,
+  // используется аккуратный wall-clock fallback по расчётному таймлайну.
   useEffect(() => {
     if (!isPlaying) return;
     if (!duration || duration <= 0 || !isFinite(duration)) {
       setIsPlaying(false);
       return;
     }
+    const stopAudio = () => {
+      playbackAudioRef.current?.pause();
+      if (playbackUrlRef.current) URL.revokeObjectURL(playbackUrlRef.current);
+      playbackAudioRef.current = null;
+      playbackUrlRef.current = null;
+      playbackKeyRef.current = null;
+    };
+    const start = currentTimeRef.current;
+    const panelSegment = tl.find(seg => start >= seg.audioStart && start < seg.audioEnd);
+    const slot = start < project!.introDuration
+      ? (introAudio ? { key: 'intro', start: 0, blob: introAudio } : null)
+      : panelSegment && audioBlobs.get(panelSegment.panelId)
+        ? { key: `panel:${panelSegment.panelId}`, start: panelSegment.audioStart, blob: audioBlobs.get(panelSegment.panelId)! }
+        : start >= (tl[tl.length - 1]?.audioEnd ?? project!.introDuration) && outroAudio
+          ? { key: 'outro', start: tl[tl.length - 1]?.audioEnd ?? project!.introDuration, blob: outroAudio }
+          : null;
+
+    if (slot) {
+      stopAudio();
+      const audio = new Audio();
+      const url = URL.createObjectURL(slot.blob);
+      playbackAudioRef.current = audio;
+      playbackUrlRef.current = url;
+      playbackKeyRef.current = slot.key;
+      audio.src = url;
+      audio.preload = 'auto';
+      audio.onloadedmetadata = () => {
+        const offset = Math.max(0, currentTimeRef.current - slot.start);
+        if (Number.isFinite(offset) && offset > 0) audio.currentTime = offset;
+      };
+      audio.ontimeupdate = () => {
+        if (playbackAudioRef.current !== audio) return;
+        const next = slot.start + audio.currentTime;
+        currentTimeRef.current = Math.min(duration, next);
+        setCurrentTime(currentTimeRef.current);
+      };
+      audio.onended = () => {
+        if (playbackAudioRef.current !== audio) return;
+        stopAudio();
+        const panelIndex = panelSegment ? tl.findIndex(seg => seg.panelId === panelSegment.panelId) : -1;
+        const nextStart = slot.key === 'intro'
+          ? (tl[0]?.audioStart ?? duration - project!.outroDuration)
+          : panelIndex >= 0 && tl[panelIndex + 1]
+            ? tl[panelIndex + 1].audioStart
+            : slot.key.startsWith('panel:') && outroAudio
+              ? (tl[tl.length - 1]?.audioEnd ?? duration - project!.outroDuration)
+              : duration;
+        currentTimeRef.current = Math.min(duration, Math.max(0, nextStart));
+        setCurrentTime(currentTimeRef.current);
+        if (nextStart >= duration) setIsPlaying(false);
+        else setPlaybackStep(step => step + 1);
+      };
+      void audio.play().catch(() => {
+        stopAudio();
+        setNotice('Браузер не разрешил воспроизведение аудио. Нажмите Play ещё раз.');
+        setIsPlaying(false);
+      });
+      return stopAudio;
+    }
+
     let lastWall = performance.now();
     let raf = 0;
     const tick = () => {
@@ -333,7 +412,7 @@ export default function EditorPage() {
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [isPlaying, duration]);
+  }, [isPlaying, duration, tl, introAudio, outroAudio, audioBlobs, project, playbackStep]);
 
   // Актуальный handleSave для хоткеев: эффект ниже намеренно без deps,
   // поэтому состояние берём из ref. Ref объявлен до эффекта — читать его
@@ -587,6 +666,34 @@ export default function EditorPage() {
   /** Модалка «Интро/Аутро» → «Очистить»: тексты в ноль, длительности — дефолт. */
   const handleClearIntroOutro = () => {
     applyIntroOutroChange({ intro: '', outro: '', introDuration: 8, outroDuration: 5 });
+  };
+  const handleImportIntroAudio = async (file: File) => {
+    if (!project) return;
+    const duration = await getImportedAudioDuration(file);
+    await saveProjectIntroAudio(project.id, file);
+    setIntroAudio(file);
+    applyIntroOutroChange({ introDuration: duration });
+    setNotice(`Аудио интро загружено: ${duration.toFixed(2)} с.`);
+  };
+  const handleImportOutroAudio = async (file: File) => {
+    if (!project) return;
+    const duration = await getImportedAudioDuration(file);
+    await saveProjectOutroAudio(project.id, file);
+    setOutroAudio(file);
+    applyIntroOutroChange({ outroDuration: duration });
+    setNotice(`Аудио аутро загружено: ${duration.toFixed(2)} с.`);
+  };
+  const handleClearIntroAudio = async () => {
+    if (!project) return;
+    await deleteProjectAudio(project.id, 'intro');
+    setIntroAudio(null);
+    setNotice('Аудио интро удалено.');
+  };
+  const handleClearOutroAudio = async () => {
+    if (!project) return;
+    await deleteProjectAudio(project.id, 'outro');
+    setOutroAudio(null);
+    setNotice('Аудио аутро удалено.');
   };
 
   /**
@@ -1147,6 +1254,8 @@ export default function EditorPage() {
 
   const handleSeek = useCallback((t: number) => {
     if (!isFinite(t)) return;
+    playbackAudioRef.current?.pause();
+    setIsPlaying(false);
     setCurrentTime(t);
     if (!project) return;
     const seg = tl.find(s => t >= s.audioStart && t < s.audioEnd);
@@ -1444,6 +1553,12 @@ export default function EditorPage() {
         outro={project.outro}
         introDuration={project.introDuration}
         outroDuration={project.outroDuration}
+        introAudio={introAudio}
+        outroAudio={outroAudio}
+        onIntroAudioUpload={handleImportIntroAudio}
+        onOutroAudioUpload={handleImportOutroAudio}
+        onClearIntroAudio={handleClearIntroAudio}
+        onClearOutroAudio={handleClearOutroAudio}
         onApply={(patch) => { applyIntroOutroChange(patch); setShowIntroOutro(false); }}
         onGenerateAI={() => void handleIntroOutroAI()}
         onVoice={() => void handleVoiceIntroOutro()}
