@@ -21,6 +21,7 @@ interface TimelineProps {
 }
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+const TRACK_OFFSET = 72;
 
 function formatTime(s: number): string {
   if (!isFinite(s) || s <= 0) return '00:00';
@@ -56,9 +57,11 @@ export function Timeline({
   const [zoom, setZoom] = useState(1);
   const [dragging, setDragging] = useState(false);
   const scrollerRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const audioSet = useMemo(() => new Set(audioPanelIds), [audioPanelIds]);
   const safeDuration = isFinite(duration) && duration > 0 ? duration : 1;
   const contentWidth = Math.max(760, Math.round(960 * zoom));
+  const trackWidth = Math.max(1, contentWidth - TRACK_OFFSET);
 
   useEffect(() => setLocalGap(panelGap), [panelGap]);
 
@@ -67,10 +70,12 @@ export function Timeline({
   };
 
   const seekFromClientX = (clientX: number) => {
-    const rect = scrollerRef.current?.getBoundingClientRect();
+    const rect = contentRef.current?.getBoundingClientRect();
     if (!rect) return;
-    const x = clamp(clientX - rect.left + (scrollerRef.current?.scrollLeft ?? 0), 0, contentWidth);
-    onSeek((x / contentWidth) * safeDuration);
+    // contentRect уже учитывает горизонтальный scroll. Считаем от начала
+    // track-area, а не от общего контейнера с лейблами «Видео/Аудио».
+    const x = clamp(clientX - rect.left - TRACK_OFFSET, 0, trackWidth);
+    onSeek((x / trackWidth) * safeDuration);
   };
 
   const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -85,7 +90,6 @@ export function Timeline({
   };
 
   const handlePointerUp = () => setDragging(false);
-  const playheadLeft = `${(clamp(currentTime, 0, safeDuration) / safeDuration) * 100}%`;
 
   return (
     <section className="w-full rounded-[12px] border border-[#26262C] bg-[#111114] overflow-hidden">
@@ -109,8 +113,8 @@ export function Timeline({
       </div>
 
       <div ref={scrollerRef} data-scroll-area className="overflow-x-auto overflow-y-hidden px-3 pb-3">
-        <div className="relative min-w-0 pt-7" style={{ width: contentWidth }} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerCancel={handlePointerUp}>
-          <div className="pointer-events-none absolute inset-x-0 top-0 h-6 border-b border-[#26262C]">
+        <div ref={contentRef} className="relative min-w-0 pt-7" style={{ width: contentWidth }} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerCancel={handlePointerUp}>
+          <div className="pointer-events-none absolute top-0 h-6 border-b border-[#26262C]" style={{ left: TRACK_OFFSET, right: 0 }}>
             {Array.from({ length: Math.max(2, Math.ceil(safeDuration / 5) + 1) }).map((_, i) => (
               <span key={i} className="absolute top-1 -translate-x-1/2 font-mono text-[9px] text-[#666672]" style={{ left: `${(Math.min(i * 5, safeDuration) / safeDuration) * 100}%` }}>{formatTime(Math.min(i * 5, safeDuration))}</span>
             ))}
@@ -160,7 +164,7 @@ export function Timeline({
             </div>
           </div>
 
-          <div className="pointer-events-none absolute bottom-0 top-0 z-20 w-px bg-[#F5D27A] shadow-[0_0_8px_rgba(232,180,76,0.8)]" style={{ left: playheadLeft }}>
+          <div className="pointer-events-none absolute bottom-0 top-0 z-20 w-px bg-[#F5D27A] shadow-[0_0_8px_rgba(232,180,76,0.8)]" style={{ left: `${TRACK_OFFSET + (clamp(currentTime, 0, safeDuration) / safeDuration) * trackWidth}px` }}>
             <span className="absolute -left-1.5 -top-1 h-3 w-3 rotate-45 rounded-[2px] bg-[#F5D27A]" />
           </div>
         </div>
