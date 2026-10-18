@@ -92,7 +92,7 @@ export function Timeline({
   const handlePointerUp = () => setDragging(false);
 
   return (
-    <section className="w-full rounded-[12px] border border-[#26262C] bg-[#111114] overflow-hidden">
+    <section className="w-full min-h-[300px] rounded-[12px] border border-[#26262C] bg-[#111114] overflow-hidden">
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#26262C] px-3 py-2.5">
         <div className="flex items-center gap-2">
           <h3 className="text-[13px] font-medium text-[#F5F5F7]">Монтажная лента</h3>
@@ -120,9 +120,9 @@ export function Timeline({
             ))}
           </div>
 
-          <div className="grid grid-cols-[64px_1fr] gap-2 border-b border-[#26262C] py-2">
-            <div className="flex items-center text-[10px] uppercase tracking-wider text-[#666672]">Видео</div>
-            <div className="relative h-14 rounded-md bg-[#0B0B0C]">
+          <div className="grid grid-cols-[72px_1fr] gap-2 border-b border-[#26262C] py-3">
+            <div className="flex items-center text-[10px] uppercase tracking-wider text-[#8A8A93]">Видео</div>
+            <div className="relative h-24 rounded-md bg-[#0B0B0C]">
               <button type="button" onClick={() => { onSelectIntro(); onSeek(0); }} className={`absolute top-1 bottom-1 overflow-hidden rounded border text-left ${selectedId === 'intro' ? 'border-[#F5D27A] bg-[#594615]' : 'border-[#3A321F] bg-[#2A2416]'}`} style={{ left: 0, width: `${Math.max(1.5, (introDuration / safeDuration) * 100)}%` }} title="Интро">
                 <span className="block px-1.5 pt-1 text-[10px] text-[#E8B44C]">Интро</span>
               </button>
@@ -143,9 +143,9 @@ export function Timeline({
             </div>
           </div>
 
-          <div className="grid grid-cols-[64px_1fr] gap-2 py-2">
-            <div className="flex items-center text-[10px] uppercase tracking-wider text-[#666672]">Аудио</div>
-            <div className="relative h-16 rounded-md bg-[#0B0B0C]">
+          <div className="grid grid-cols-[72px_1fr] gap-2 py-3">
+            <div className="flex items-center text-[10px] uppercase tracking-wider text-[#E8B44C]">Аудио</div>
+            <div className="relative h-24 rounded-md border border-[#3A321F] bg-[#0B0B0C]">
               {timeline.map((seg) => {
                 const left = (seg.audioStart / safeDuration) * 100;
                 const width = Math.max(1.2, ((seg.audioEnd - seg.audioStart) / safeDuration) * 100);
@@ -154,7 +154,7 @@ export function Timeline({
                 return (
                   <button key={seg.panelId} type="button" onClick={() => { onSelectPanel(seg.panelId); onSeek(seg.audioStart); }} className={`absolute top-1 bottom-1 overflow-hidden rounded border px-1 text-left ${selected ? 'border-[#F5D27A] bg-[#57451B]' : hasAudio ? 'border-[#806522] bg-[#332915] hover:bg-[#463719]' : 'border-[#34343C] bg-[#202025] hover:border-[#77736A]'}`} style={{ left: `${left}%`, width: `${width}%` }} title={hasAudio ? `Аудио панели ${seg.panelId}` : `Нет аудио панели ${seg.panelId}`}>
                     <div className="flex h-full items-center gap-px px-1 opacity-90">
-                      {waveform(seg.panelId).map((height, i) => <i key={i} className={`w-px flex-1 rounded-full ${hasAudio ? 'bg-[#E8B44C]' : 'bg-[#666672]'}`} style={{ height: `${height * 70}%` }} />)}
+                      {waveform(seg.panelId, 48).map((height, i) => <i key={i} className={`min-w-[2px] flex-1 rounded-full ${hasAudio ? 'bg-[#E8B44C]' : 'bg-[#666672]'}`} style={{ height: `${height * 76}%` }} />)}
                     </div>
                     {!hasAudio && <span className="absolute inset-x-1 bottom-0 truncate bg-black/45 text-[8px] text-[#A1A1AA]">нет файла</span>}
                   </button>
