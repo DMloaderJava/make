@@ -84,6 +84,8 @@ export interface PlanImportOptions<TTarget> {
   allowNameAnchor?: boolean;
   /** Номер/порядок для оставшихся файлов (по умолчанию true). */
   useOrder?: boolean;
+  /** Лишние нумерованные файлы становятся предупреждениями, а не ошибками. */
+  ignoreUnmatchedNumbers?: boolean;
   nouns?: ImportNouns;
 }
 
@@ -412,12 +414,16 @@ export function planImport<TTarget>(opts: PlanImportOptions<TTarget>): ImportPla
         rest.forEach((file, i) => {
           const n = numbers[i]!;
           if (n < 1 || n > total) {
-            errors.push(`Файл «${file}»: номер ${n} вне 1..${total} (${nouns.genitivePlural} в проекте: ${total}) — переименуйте файл или сопоставьте вручную`);
+            const message = `Файл «${file}»: номер ${n} вне 1..${total} (${nouns.genitivePlural} в проекте: ${total})`;
+            if (opts.ignoreUnmatchedNumbers) warnings.push(`${message} — файл исключён из импорта`);
+            else errors.push(`${message} — переименуйте файл или сопоставьте вручную`);
             return;
           }
           const target = numberedTargets.find(entry => entry.number === n && !targetTaken.has(idOf.get(entry.target)!))?.target;
           if (!target) {
-            errors.push(`Файл «${file}»: номер ${n} уже сопоставлен или не имеет свободной цели — сопоставьте вручную`);
+            const message = `Файл «${file}»: номер ${n} уже сопоставлен или не имеет свободной цели`;
+            if (opts.ignoreUnmatchedNumbers) warnings.push(`${message} — файл исключён из импорта`);
+            else errors.push(`${message} — сопоставьте вручную`);
             return;
           }
           claim(file, target, 'number');

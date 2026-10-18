@@ -580,6 +580,20 @@ test('модалка: «Перезаписать» выключен → пане
   assert.deepEqual(over.skipped, []);
 });
 
+test('модалка: лишние нумерованные файлы автоматически исключаются, но валидные импортируются', () => {
+  const imagePanels = [PANELS[0], PANELS[3]];
+  const plan = planAudioImport(
+    files('01.mp3', 'copy_01.mp3', '02.mp3', '58.mp3'),
+    imagePanels,
+    autoImportOptions({ manifest: '', overwrite: false, existingAudio: [] }),
+  );
+  assert.deepEqual(plan.errors, []);
+  assert.deepEqual(pairs(plan), [[1, '01.mp3'], [4, '02.mp3']]);
+  assert.deepEqual(plan.unmatchedFiles, ['58.mp3', 'copy_01.mp3']);
+  assert.ok(plan.warnings.some(w => w.includes('copy_01.mp3') && w.includes('исключён из импорта')));
+  assert.ok(plan.warnings.some(w => w.includes('58.mp3') && w.includes('исключён из импорта')));
+});
+
 // ---------- Подпись .sig при импорте (OPFS бросает NotFoundError) ----------
 
 test('apply: у панели нет .sig — импорт проходит, подпись не появляется', async () => {

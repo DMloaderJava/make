@@ -46,6 +46,8 @@ export interface PlanAudioImportOptions {
   overwrite?: boolean;
   /** id панелей, у которых уже есть аудио. */
   existingAudio?: Iterable<number>;
+  /** Не блокировать импорт из-за лишних файлов с повторным/вне диапазона номером. */
+  ignoreUnmatchedNumbers?: boolean;
 }
 
 export interface AudioImportPlan extends ImportPlan<PanelData> {
@@ -82,6 +84,7 @@ export function planAudioImport(
     manualOverrides: opts.manualOverrides,
     allowNameAnchor: opts.allowNameAnchor,
     useOrder: opts.useOrder,
+    ignoreUnmatchedNumbers: opts.ignoreUnmatchedNumbers,
     nouns: { genitivePlural: 'панелей', genitiveSingular: 'панели' },
   });
 
@@ -328,6 +331,9 @@ export function autoImportOptions(state: {
     manifest: manifest || undefined,
     allowNameAnchor: true,
     useOrder: !manifest,
+    // В папке с экспортом часто остаются дубли или файлы следующей главы.
+    // Их безопаснее исключить из текущего импорта, чем блокировать всю пачку.
+    ignoreUnmatchedNumbers: !manifest,
     overwrite: state.overwrite,
     existingAudio: state.existingAudio,
   };

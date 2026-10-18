@@ -226,6 +226,7 @@ export function AudioImportModal({ open, onClose, panels, existingAudio, onApply
                     {sortedFiles.map((file, i) => {
                       const match = matchByFile.get(file.name);
                       const skipped = skippedFiles.has(file.name);
+                      const excluded = !match && plan.unmatchedFiles.includes(file.name);
                       return (
                         <div key={file.name + i} className="flex items-baseline gap-2 text-[11px] leading-5">
                           <span className="font-mono text-[#8A8A93] shrink-0">{String(i + 1).padStart(2, '0')}</span>
@@ -235,6 +236,8 @@ export function AudioImportModal({ open, onClose, panels, existingAudio, onApply
                             <span className={`truncate font-mono ${skipped ? 'text-[#8A8A93] line-through' : 'text-[#E8B44C]'}`} title={importViaLabel(match.via)}>
                               {match.label}
                             </span>
+                          ) : excluded ? (
+                            <span className="text-[#8A8A93] line-through" title="Файл исключён из текущего импорта и не будет записан в проект">исключён из импорта</span>
                           ) : (
                             <span className="text-[#C97A66]">не сопоставлен</span>
                           )}
