@@ -313,6 +313,22 @@ test('createStripScene: лента едет по полосам синхронн
   }
 });
 
+test('createStripScene: процентная полоса проходит весь диапазон за длительность аудио', () => {
+  const scene = createStripScene({
+    sizes: [{ width: 1000, height: 6000 }],
+    images: [null],
+    timeline: [{ panelId: 0, imageIndex: 0, audioStart: 0, audioEnd: 10 }],
+    panels: [band(0, 0, 100)],
+    options: { ...FRAME, viewport: 1080, gap: 24, transition: 0.8 },
+  });
+  const top = scene.scrollAt(0);
+  const middle = scene.scrollAt(5);
+  const bottom = scene.scrollAt(10);
+  assert.equal(top, 0);
+  assert.ok(middle > top && middle < bottom, `середина аудио должна быть в середине диапазона: ${middle}`);
+  assert.equal(bottom, 10440);
+});
+
 test('createStripScene: fullFrame-панели — keyframes как раньше (по странице)', () => {
   const panels = BANDS.map(p => ({ id: p.id, imageIndex: 0, bbox: { x: 0, y: 0, width: 100, height: 100 }, fullFrame: true }));
   const scene = createStripScene({
