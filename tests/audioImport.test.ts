@@ -227,12 +227,13 @@ test('naturalCompare: без Intl — кириллица, «ё» = «е», дл�
   assert.equal(naturalCompare('a.mp3', 'a.mp3'), 0);
 });
 
-test('leadingNumber: только номер в начале, за которым разделитель', () => {
+test('leadingNumber: первый числовой фрагмент в имени файла', () => {
   assert.equal(leadingNumber('003.mp3'), 3);
   assert.equal(leadingNumber('01 - Аня.wav'), 1);
   assert.equal(leadingNumber('7_take.mp3'), 7);
-  assert.equal(leadingNumber('3d-voice.mp3'), null);
-  assert.equal(leadingNumber('take3.mp3'), null);
+  assert.equal(leadingNumber('3d-voice.mp3'), 3);
+  assert.equal(leadingNumber('take3.mp3'), 3);
+  assert.equal(leadingNumber('voice_02_take.mp3'), 2);
 });
 
 // ---------- Якорь в имени ----------
