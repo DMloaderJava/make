@@ -77,9 +77,13 @@ export function planAudioImport(
     targetAnchor: p => panelAnchor(p),
     targetLabel: p => audioTargetLabel(p),
     targetOrder: p => [p.order ?? 0, p.imageIndex, p.id],
-    // «2.mp3» должен воспроизводиться под изображением 2, а не под второй
-    // репликой, если в сценарии у одного изображения несколько реплик.
-    targetNumber: p => p.imageIndex + 1,
+    // Обычная нумерация должна идти по репликам, а не по изображениям:
+    // у одного изображения может быть несколько панелей.
+    // Обычное имя `1.mp3` означает первую реплику/панель. Привязка к
+    // изображению выполняется только явно: `Изображение 2.mp3` или якорем
+    // `[30..60%]`. Иначе несколько реплик одного изображения получают один
+    // и тот же номер и дорожки начинают попадать не в ту панель.
+    targetNumber: (_p, index) => (index ?? 0) + 1,
     manifest: opts.manifest,
     manualOverrides: opts.manualOverrides,
     allowNameAnchor: opts.allowNameAnchor,

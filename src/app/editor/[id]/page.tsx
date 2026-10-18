@@ -359,6 +359,14 @@ export default function EditorPage() {
       playbackKeyRef.current = slot.key;
       audio.src = url;
       audio.preload = 'auto';
+      audio.onerror = () => {
+        if (playbackAudioRef.current !== audio) return;
+        const label = slot.key === 'intro' ? 'интро' : slot.key === 'outro' ? 'аутро' : `панель ${panelSegment?.panelId ?? '?'}`;
+        const mime = slot.blob.type || 'неизвестный MIME';
+        stopAudio();
+        setNotice(`Аудио для ${label} не воспроизводится в этом браузере. Формат: ${mime}. Перекодируйте файл в MP3/WAV или выберите другой браузер.`);
+        setIsPlaying(false);
+      };
       audio.onloadedmetadata = () => {
         const offset = Math.max(0, currentTimeRef.current - slot.start);
         if (Number.isFinite(offset) && offset > 0) audio.currentTime = offset;
@@ -387,7 +395,7 @@ export default function EditorPage() {
       };
       void audio.play().catch(() => {
         stopAudio();
-        setNotice('Браузер не разрешил воспроизведение аудио. Нажмите Play ещё раз.');
+        setNotice(`Браузер не разрешил воспроизведение ${slot.key.startsWith('panel:') ? 'аудио панели' : 'аудио'}. Нажмите Play ещё раз или проверьте разрешения автовоспроизведения.`);
         setIsPlaying(false);
       });
       return stopAudio;
@@ -1434,8 +1442,10 @@ export default function EditorPage() {
         </div>
       )}
 
-      <div className="flex-1 overflow-y-auto">
-        <div className="max-w-[960px] mx-auto p-4 md:p-6 space-y-5">
+      <div className="flex-1 overflow-y-auto" data-scroll-area>
+        <div className="max-w-[1180px] mx-auto p-4 md:p-6">
+          <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_320px] items-start">
+            <div className="min-w-0 space-y-5">
           <Preview
             images={images}
             panels={project.panels}
@@ -1471,23 +1481,6 @@ export default function EditorPage() {
             onGapChange={handleGapChange}
           />
 
-          <ContextPanel
-            selected={contextValue as any}
-            onUpdatePanel={(id, updates) => {
-              const newPanels = project.panels.map(p => p.id === id ? { ...p, ...updates } : p);
-              updateProject({ panels: newPanels });
-            }}
-            onUpdateIntro={(text, dur) => applyIntroOutroChange({ intro: text, introDuration: dur })}
-            onUpdateOutro={(text, dur) => applyIntroOutroChange({ outro: text, outroDuration: dur })}
-            voiceAssignments={project.voiceAssignments}
-            onVoiceChange={(char, voiceId) => updateProject({ voiceAssignments: { ...project.voiceAssignments, [char]: voiceId } })}
-            onGenerateIntro={handleGenerateIntro}
-            onGenerateOutro={handleGenerateOutro}
-            generating={isGeneratingIntro}
-            onRegeneratePanel={handleRegeneratePanel}
-            regenerating={isGeneratingAudio}
-          />
-
           <div className="pt-2">
             {/* needsAttention: панели появились или аудио удалено/устарело —
                 подсвечиваем кнопку, пока всё не озвучено (связка с остальным UI) */}
@@ -1510,6 +1503,31 @@ export default function EditorPage() {
                 <p className="text-xs text-[#8A8A93] mt-1">Добавь изображения на главной или нажми «Озвучить» чтобы услышать интро/аутро</p>
               </div>
             )}
+          </div>
+            </div>
+
+            <aside className="min-w-0 lg:sticky lg:top-20">
+              <div className="mb-2 flex items-center justify-between">
+                <h2 className="text-[12px] uppercase tracking-[0.14em] text-[#8A8A93]">Инспектор панели</h2>
+                <span className="text-[10px] text-[#8A8A93]">выберите сегмент</span>
+              </div>
+              <ContextPanel
+                selected={contextValue as any}
+                onUpdatePanel={(id, updates) => {
+                  const newPanels = project.panels.map(p => p.id === id ? { ...p, ...updates } : p);
+                  updateProject({ panels: newPanels });
+                }}
+                onUpdateIntro={(text, dur) => applyIntroOutroChange({ intro: text, introDuration: dur })}
+                onUpdateOutro={(text, dur) => applyIntroOutroChange({ outro: text, outroDuration: dur })}
+                voiceAssignments={project.voiceAssignments}
+                onVoiceChange={(char, voiceId) => updateProject({ voiceAssignments: { ...project.voiceAssignments, [char]: voiceId } })}
+                onGenerateIntro={handleGenerateIntro}
+                onGenerateOutro={handleGenerateOutro}
+                generating={isGeneratingIntro}
+                onRegeneratePanel={handleRegeneratePanel}
+                regenerating={isGeneratingAudio}
+              />
+            </aside>
           </div>
 
           <div className="pt-8 pb-4 flex items-center justify-between text-[11px] font-mono text-[#8A8A93]/60">

@@ -405,7 +405,17 @@ export function planImport<TTarget>(opts: PlanImportOptions<TTarget>): ImportPla
     }
     if (rest.length > 0) {
       const numbers = rest.map(leadingNumber);
-      if (numbers.every(n => n !== null)) {
+      const free = sortedTargets.filter(t => !targetTaken.has(idOf.get(t)!));
+      // Числовой режим включаем только если номера выглядят как номера
+      // панелей. Имена take1/take2/take10 при полном наборе файлов — это
+      // обычный natural sort, а не ошибка «номер 10 вне диапазона».
+      const numericValues = numbers.filter((n): n is number => n !== null);
+      const uniqueNumbers = new Set(numericValues).size === numericValues.length;
+      const looksLikePanelNumbers = numbers.every(n => n !== null)
+        && (rest.length !== free.length
+          || !uniqueNumbers
+          || numericValues.every(n => n >= 1 && n <= free.length));
+      if (looksLikePanelNumbers) {
         // По умолчанию номер = позиция цели. Аудио переопределяет это правило
         // и использует imageIndex + 1, поэтому «2.mp3» означает изображение 2.
         const numberOf = opts.targetNumber ?? ((_target: TTarget, index: number) => index + 1);
@@ -419,7 +429,15 @@ export function planImport<TTarget>(opts: PlanImportOptions<TTarget>): ImportPla
             else errors.push(`${message} — переименуйте файл или сопоставьте вручную`);
             return;
           }
-          const target = numberedTargets.find(entry => entry.number === n && !targetTaken.has(idOf.get(entry.target)!))?.target;
+          const numberedEntry = numberedTargets.find(entry => entry.number === n);
+          const occupied = numberedEntry && targetTaken.get(idOf.get(numberedEntry.target)!);
+          if (occupied) {
+            const message = `Дубль: «${occupied.file}» и «${file}» претендуют на «${labelOf(numberedEntry!.target)}»`;
+            if (opts.ignoreUnmatchedNumbers) warnings.push(`${message} — файл исключён из импорта`);
+            else errors.push(message);
+            return;
+          }
+          const target = numberedEntry?.target;
           if (!target) {
             const message = `Файл «${file}»: номер ${n} уже сопоставлен или не имеет свободной цели`;
             if (opts.ignoreUnmatchedNumbers) warnings.push(`${message} — файл исключён из импорта`);
@@ -429,7 +447,6 @@ export function planImport<TTarget>(opts: PlanImportOptions<TTarget>): ImportPla
           claim(file, target, 'number');
         });
       } else {
-        const free = sortedTargets.filter(t => !targetTaken.has(idOf.get(t)!));
         if (free.length !== rest.length) {
           const partial = matches.length > 0;
           errors.push(partial

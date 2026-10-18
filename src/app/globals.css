@@ -40,6 +40,15 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+html {
+  scroll-behavior: smooth;
+  scrollbar-gutter: stable;
+}
+
+body {
+  overscroll-behavior-y: none;
+}
+
 /* Custom scrollbar — тихий */
 ::-webkit-scrollbar {
   width: 6px;
@@ -61,6 +70,13 @@ body {
 
 * {
   border-color: var(--border);
+}
+
+/* Внутренние рабочие области не перехватывают инерцию страницы на границах. */
+[data-scroll-area] {
+  overscroll-behavior: contain;
+  scroll-behavior: smooth;
+  scrollbar-gutter: stable;
 }
 
 /* Animations — 150ms hover, 220ms panels */

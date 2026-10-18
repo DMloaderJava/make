@@ -52,6 +52,8 @@ export function Preview({
   const userScrollingRef = useRef(false);
   const dragRef = useRef<{ startY: number; startScroll: number } | null>(null);
   const wheelIdleTimer = useRef<number | undefined>(undefined);
+  const wheelTargetRef = useRef<number | null>(null);
+  const wheelFrameRef = useRef<number | null>(null);
   // Свежее состояние для нативного wheel-слушателя (привязывается один раз).
   const stripStateRef = useRef({ stripScene: null as ReturnType<typeof createStripSceneFromMedia>, currentTime: 0, onSeek: undefined as ((t: number) => void) | undefined });
 
@@ -118,16 +120,42 @@ export function Preview({
       e.preventDefault();
       userScrollingRef.current = true;
       const scale = FRAME_H / Math.max(1, canvas.clientHeight);
-      const current = state.stripScene.scrollAt(state.currentTime);
-      const next = clampScroll(current + e.deltaY * scale, state.stripScene.layout);
-      // Индекс сцены собран один раз из тех же timeline/panels (useMemo выше).
-      const target = state.stripScene.timeAtScroll(next);
-      if (target !== null && Math.abs(target - state.currentTime) > 0.01) state.onSeek(target);
+      const current = wheelTargetRef.current ?? state.stripScene.scrollAt(state.currentTime);
+      wheelTargetRef.current = clampScroll(current + e.deltaY * scale, state.stripScene.layout);
+
+      // Колесо браузера приходит пачками. Интерполируем позицию в RAF, чтобы
+      // лента и время двигались непрерывно, а не перескакивали между панелями.
+      if (wheelFrameRef.current === null) {
+        const animate = () => {
+          const latest = stripStateRef.current;
+          if (!latest.stripScene || !latest.onSeek || wheelTargetRef.current === null) {
+            wheelFrameRef.current = null;
+            return;
+          }
+          const actual = latest.stripScene.scrollAt(latest.currentTime);
+          const targetScroll = wheelTargetRef.current;
+          const nextScroll = actual + (targetScroll - actual) * 0.24;
+          const targetTime = latest.stripScene.timeAtScroll(nextScroll);
+          if (targetTime !== null) latest.onSeek(targetTime);
+          if (Math.abs(targetScroll - nextScroll) > 1) {
+            wheelFrameRef.current = window.requestAnimationFrame(animate);
+          } else {
+            wheelTargetRef.current = null;
+            wheelFrameRef.current = null;
+          }
+        };
+        wheelFrameRef.current = window.requestAnimationFrame(animate);
+      }
       window.clearTimeout(wheelIdleTimer.current);
       wheelIdleTimer.current = window.setTimeout(() => { userScrollingRef.current = false; }, 150);
     };
     canvas.addEventListener('wheel', onWheel, { passive: false });
-    return () => canvas.removeEventListener('wheel', onWheel);
+    return () => {
+      canvas.removeEventListener('wheel', onWheel);
+      if (wheelFrameRef.current !== null) window.cancelAnimationFrame(wheelFrameRef.current);
+      wheelFrameRef.current = null;
+      wheelTargetRef.current = null;
+    };
   }, [renderMode]);
 
   const handleStripPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
