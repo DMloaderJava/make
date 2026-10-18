@@ -63,7 +63,7 @@ function formatSize(bytes: number): string {
 }
 
 /**
- * «Импорт аудио»: файлы → план «файл → панель» → применение.
+ * «Импорт аудио»: файлы → план «файл → изображение/реплика» → применение.
  * Сопоставление автоматическое (манифест → якорь в имени → номер/порядок),
  * ошибки плана блокируют «Применить» (как в ScenarioModal). Подтверждение
  * перезаписи — чекбокс, а не confirm(): во встроенном превью (iframe без
@@ -167,7 +167,7 @@ export function AudioImportModal({ open, onClose, panels, existingAudio, onApply
           <div>
             <h2 className="text-[15px] font-medium">Импорт аудио</h2>
             <p className="text-[11px] text-[#8A8A93] mt-0.5">
-              Свои записи на панели · по манифесту, якорю в имени («Изображение 1 [0..30%].mp3»), номеру или порядку
+              Свои записи для изображений · по манифесту, якорю в имени («Изображение 1 [0..30%].mp3»), номеру изображения или порядку
             </p>
           </div>
           <button onClick={close} disabled={phase === 'applying'} className="w-8 h-8 rounded-[6px] bg-[#1E1E23] hover:bg-[#26262C] flex items-center justify-center text-[#8A8A93] disabled:opacity-40">×</button>
@@ -252,7 +252,7 @@ export function AudioImportModal({ open, onClose, panels, existingAudio, onApply
               <label className="flex items-start gap-2 cursor-pointer">
                 <input type="checkbox" checked={overwrite} onChange={(e) => setOverwrite(e.target.checked)} className="mt-0.5 accent-[#E8B44C]" />
                 <span className="text-[11px] leading-4 text-[#A1A1AA]">
-                  Перезаписать существующее аудио панелей (TTS и прошлый импорт) — иначе такие строки выше зачёркнуты как «аудио есть»
+                  Перезаписать существующее аудио изображений (TTS и прошлый импорт) — иначе такие строки выше зачёркнуты как «аудио есть»
                   {existingAudio.length > 0 && <span className="text-[#8A8A93]"> · сейчас с аудио: {existingAudio.length}</span>}
                 </span>
               </label>

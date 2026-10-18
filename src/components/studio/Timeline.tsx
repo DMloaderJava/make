@@ -88,19 +88,23 @@ export function Timeline({ timeline, currentTime, duration, onSeek, onSelectPane
           ))}
         </div>
 
-        <div className="absolute top-6 bottom-2 left-1 right-1 flex gap-1">
+        {/* Сегменты стоят на своих временных координатах. Flex раньше
+            сжимал паузы между репликами, поэтому картинка таймлайна не
+            совпадала с реальным воспроизведением и seek попадал не туда. */}
+        <div className="absolute top-6 bottom-2 left-1 right-1">
           <button
             onClick={(e) => { e.stopPropagation(); onSelectIntro(); onSeek(0); }}
             className={`relative h-full rounded-[6px] flex items-center justify-center px-2 text-[11px] font-medium transition-colors duration-[150ms] ${
               selectedId === 'intro' ? 'bg-[#E8B44C] text-[#0B0B0C]' : 'bg-[#1E1E23] text-[#8A8A93] hover:bg-[#26262C] hover:text-[#F5F5F7]'
             }`}
-            style={{ width: `${Math.max(6, (introDuration / safeDuration) * 100)}%` }}
+            style={{ left: '0%', width: `${Math.max(1.5, (introDuration / safeDuration) * 100)}%`, position: 'absolute' }}
           >
             Интро
           </button>
 
           {timeline.map((seg) => {
             const widthPct = ((seg.audioEnd - seg.audioStart) / safeDuration) * 100;
+            const leftPct = (seg.audioStart / safeDuration) * 100;
             const isSelected = selectedId === seg.panelId;
             const isActive = currentTime >= seg.audioStart && currentTime < seg.audioEnd;
             
@@ -111,10 +115,10 @@ export function Timeline({ timeline, currentTime, duration, onSeek, onSelectPane
                 className={`relative h-full rounded-[6px] px-2 text-left overflow-hidden transition-colors duration-[150ms] flex flex-col justify-center ${
                   isSelected ? 'bg-[#E8B44C] text-[#0B0B0C]' : isActive ? 'bg-[#1E1E23] text-[#F5F5F7] ring-1 ring-[#E8B44C]/50' : 'bg-[#1E1E23] text-[#8A8A93] hover:bg-[#26262C]'
                 }`}
-                style={{ width: `${Math.max(widthPct, 3)}%` }}
-                title={`${seg.character}: ${seg.text.slice(0,80)}`}
+                style={{ left: `${leftPct}%`, width: `${Math.max(widthPct, 1.5)}%`, position: 'absolute' }}
+                title={`Изображение ${seg.imageIndex + 1} · ${seg.character}: ${seg.text.slice(0,80)}`}
               >
-                <span className="text-[11px] font-medium truncate">{seg.character}</span>
+                <span className="text-[11px] font-medium truncate">Изобр. {seg.imageIndex + 1} · {seg.character}</span>
                 <span className="text-[10px] opacity-70 truncate hidden md:block">{seg.text.slice(0,20)}</span>
               </button>
             );
@@ -125,7 +129,7 @@ export function Timeline({ timeline, currentTime, duration, onSeek, onSelectPane
             className={`relative h-full rounded-[6px] flex items-center justify-center px-2 text-[11px] font-medium transition-colors duration-[150ms] ${
               selectedId === 'outro' ? 'bg-[#E8B44C] text-[#0B0B0C]' : 'bg-[#1E1E23] text-[#8A8A93] hover:bg-[#26262C] hover:text-[#F5F5F7]'
             }`}
-            style={{ width: `${Math.max(6, (outroDuration / safeDuration) * 100)}%` }}
+            style={{ left: `${Math.max(0, ((timeline[timeline.length - 1]?.audioEnd ?? introDuration) / safeDuration) * 100)}%`, width: `${Math.max(1.5, (outroDuration / safeDuration) * 100)}%`, position: 'absolute' }}
           >
             Аутро
           </button>

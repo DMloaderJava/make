@@ -75,6 +75,8 @@ export interface PlanImportOptions<TTarget> {
   targetLabel: (t: TTarget) => string;
   /** Ключ сортировки целей; позиция N для «003.mp3» — N-я цель в этом порядке. */
   targetOrder: (t: TTarget) => readonly number[];
+  /** Номер файла может означать логический номер цели, а не её позицию. */
+  targetNumber?: (t: TTarget, index?: number) => number;
   manifest?: string;
   /** Имя файла → id цели (ручной выбор в таблице). */
   manualOverrides?: ReadonlyMap<string, string>;
@@ -399,15 +401,23 @@ export function planImport<TTarget>(opts: PlanImportOptions<TTarget>): ImportPla
     if (rest.length > 0) {
       const numbers = rest.map(leadingNumber);
       if (numbers.every(n => n !== null)) {
-        // Номер = позиция цели (1-based) в общем порядке: пропуски безопасны.
-        const total = sortedTargets.length;
+        // По умолчанию номер = позиция цели. Аудио переопределяет это правило
+        // и использует imageIndex + 1, поэтому «2.mp3» означает изображение 2.
+        const numberOf = opts.targetNumber ?? ((_target: TTarget, index: number) => index + 1);
+        const numberedTargets = sortedTargets.map((target, index) => ({ target, number: numberOf(target, index) }));
+        const total = numberedTargets.reduce((max, entry) => Math.max(max, entry.number), 0);
         rest.forEach((file, i) => {
           const n = numbers[i]!;
           if (n < 1 || n > total) {
             errors.push(`Файл «${file}»: номер ${n} вне 1..${total} (${nouns.genitivePlural} в проекте: ${total}) — переименуйте файл или сопоставьте вручную`);
             return;
           }
-          claim(file, sortedTargets[n - 1], 'number');
+          const target = numberedTargets.find(entry => entry.number === n && !targetTaken.has(idOf.get(entry.target)!))?.target;
+          if (!target) {
+            errors.push(`Файл «${file}»: номер ${n} уже сопоставлен или не имеет свободной цели — сопоставьте вручную`);
+            return;
+          }
+          claim(file, target, 'number');
         });
       } else {
         const free = sortedTargets.filter(t => !targetTaken.has(idOf.get(t)!));

@@ -320,7 +320,7 @@ export function Preview({
             <span className="font-mono text-[12px] text-[#8A8A93]">{formatTime(currentTime)} / {formatTime(duration)}</span>
           </div>
           <span className="font-mono text-[11px] text-[#8A8A93]">
-            {renderMode === 'strip' ? 'Лента' : `Панель ${currentPanelIndex + 1} из ${panels.length}`}
+            {renderMode === 'strip' ? 'Лента' : panels[currentPanelIndex] ? `Изображение ${panels[currentPanelIndex].imageIndex + 1}` : 'Нет изображения'}
           </span>
         </div>
       </div>

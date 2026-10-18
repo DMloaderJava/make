@@ -1,7 +1,8 @@
 /**
- * Импорт внешних аудиофайлов на панели по якорям (v1.3.18).
+ * Импорт внешних аудиофайлов на изображения по якорям (v1.3.18).
  *
- * Этот модуль — доменная обёртка над planImport: цели = панели, якорь =
+ * Этот модуль — доменная обёртка над planImport: цели = реплики панелей,
+ * но номер файла означает номер изображения, якорь =
  * заголовок serializeScenario («Изображение 1 [0..30%]»), порядок = тот же,
  * что в «Скопировать с якорями» ((order, imageIndex), затем id).
  *
@@ -74,6 +75,9 @@ export function planAudioImport(
     targetAnchor: p => panelAnchor(p),
     targetLabel: p => audioTargetLabel(p),
     targetOrder: p => [p.order ?? 0, p.imageIndex, p.id],
+    // «2.mp3» должен воспроизводиться под изображением 2, а не под второй
+    // репликой, если в сценарии у одного изображения несколько реплик.
+    targetNumber: p => p.imageIndex + 1,
     manifest: opts.manifest,
     manualOverrides: opts.manualOverrides,
     allowNameAnchor: opts.allowNameAnchor,
