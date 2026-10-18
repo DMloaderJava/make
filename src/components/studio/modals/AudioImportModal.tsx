@@ -167,7 +167,7 @@ export function AudioImportModal({ open, onClose, panels, existingAudio, onApply
           <div>
             <h2 className="text-[15px] font-medium">Импорт аудио</h2>
             <p className="text-[11px] text-[#8A8A93] mt-0.5">
-              Свои записи для изображений · по манифесту, якорю в имени («Изображение 1 [0..30%].mp3»), номеру изображения или порядку
+              Свои записи для реплик · по манифесту, точному якорю, номеру панели или порядку файлов
             </p>
           </div>
           <button onClick={close} disabled={phase === 'applying'} className="w-8 h-8 rounded-[6px] bg-[#1E1E23] hover:bg-[#26262C] flex items-center justify-center text-[#8A8A93] disabled:opacity-40">×</button>
@@ -197,6 +197,18 @@ export function AudioImportModal({ open, onClose, panels, existingAudio, onApply
                   onChange={(e) => { if (e.target.files) void addFiles(e.target.files); e.target.value = ''; }}
                 />
               </div>
+
+              <details className="rounded-[10px] bg-[#0B0B0C] border border-[#26262C] px-4 py-3">
+                <summary className="cursor-pointer text-[12px] text-[#A1A1AA] select-none">Правила сопоставления аудио</summary>
+                <div className="mt-3 space-y-2 text-[11px] leading-5 text-[#8A8A93]">
+                  <p><span className="text-[#E8B44C]">1. Простая нумерация — по репликам:</span> <span className="font-mono text-[#F5F5F7]">1.mp3 → первая панель, 2.mp3 → вторая панель</span>. Это не номера изображений.</p>
+                  <p><span className="text-[#E8B44C]">2. Точная привязка — по якорю:</span> <span className="font-mono text-[#F5F5F7]">Изображение 1 [30..60%].mp3</span>. Проценты считаются внутри этого изображения.</p>
+                  <p><span className="text-[#E8B44C]">3. Несколько реплик на одном изображении:</span> используйте диапазоны <span className="font-mono text-[#F5F5F7]">[0..30%]</span>, <span className="font-mono text-[#F5F5F7]">[30..60%]</span>, <span className="font-mono text-[#F5F5F7]">[60..100%]</span>.</p>
+                  <p><span className="text-[#E8B44C]">4. Самый надёжный способ — манифест:</span></p>
+                  <pre className="rounded-[6px] bg-[#16161A] px-3 py-2 font-mono text-[11px] leading-5 text-[#F5F5F7] whitespace-pre-wrap">{'Изображение 1 [0..30%] = voice-01.mp3\nИзображение 1 [30..60%] = voice-02.mp3\nИзображение 2 [0..100%] = voice-03.wav'}</pre>
+                  <p className="text-[#C9B27A]">Перед применением проверьте таблицу ниже: в ней видно, к какой панели будет привязан каждый файл. Если файл уже импортирован, включите «Перезаписать».</p>
+                </div>
+              </details>
 
               <details open={manifestOpen} onToggle={(e) => setManifestOpen((e.target as HTMLDetailsElement).open)} className="rounded-[10px] bg-[#0B0B0C] border border-[#26262C] px-4 py-3">
                 <summary className="cursor-pointer text-[12px] text-[#A1A1AA] select-none">

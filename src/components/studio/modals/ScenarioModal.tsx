@@ -151,6 +151,11 @@ export function ScenarioModal({ open, onClose, imagesCount, existingPanels, ttsL
                   диапазоны — тогда лента едет по панелям и совпадает с озвучкой.
                 </li>
               </ol>
+              <div className="rounded-[8px] border border-[#3A2E14] bg-[#1E1A10] px-3 py-2 text-[11px] leading-5 text-[#C9B27A]">
+                <strong className="text-[#E8B44C]">Важно про проценты:</strong> они считаются внутри одного изображения, а не по общей ленте.
+                Для нового изображения отсчёт начинается заново с 0%. Например: «{SCENARIO_IMAGE_LABEL} 1 [0..50%]»,
+                «{SCENARIO_IMAGE_LABEL} 1 [50..100%]», затем «{SCENARIO_IMAGE_LABEL} 2 [0..100%]».
+              </div>
               <p className="text-[11px] leading-5 text-[#8A8A93]">
                 При применении: интро и аутро сохраняются, пол используется для автоподбора голоса
                 {imagesCount > 0 ? `; изображений в проекте: ${imagesCount}` : ''}.
