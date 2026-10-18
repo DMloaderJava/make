@@ -1467,6 +1467,7 @@ export default function EditorPage() {
           />
 
           <Timeline
+            images={images}
             timeline={tl}
             currentTime={currentTime}
             duration={duration}
@@ -1479,6 +1480,7 @@ export default function EditorPage() {
             outroDuration={project.outroDuration}
             panelGap={panelGap}
             onGapChange={handleGapChange}
+            audioPanelIds={[...audioBlobs.keys()]}
           />
 
           <div className="pt-2">
