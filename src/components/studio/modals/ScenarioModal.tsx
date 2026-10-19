@@ -164,6 +164,7 @@ export function ScenarioModal({ open, onClose, imagesCount, existingPanels, ttsL
           </details>
 
           <textarea
+            data-testid="scenario-textarea"
             value={text}
             onChange={(e) => setText(e.target.value)}
             spellCheck={false}
@@ -227,6 +228,7 @@ export function ScenarioModal({ open, onClose, imagesCount, existingPanels, ttsL
               </Button>
             )}
             <Button
+              data-testid="scenario-apply-btn"
               size="sm"
               onClick={() => void handleApply()}
               disabled={!canApply || applying || translating || needsReplaceConfirm || imagesCount === 0}

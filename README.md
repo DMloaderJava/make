@@ -4,6 +4,72 @@
 
 Self-hosted веб-инструмент для автоматической генерации озвученных видео из изображений (манга/комикс) с BYOK, 25+ LLM и 15+ TTS провайдерами, OPFS кэшем, WebCodecs MP4 и SEO-пакетом.
 
+## 🏁 Release Candidate (v1.3.17 RC)
+
+- **Дата RC:** `2026-10-19`
+- **Базовый commit SHA ветки RC:** `7673921a9b8556f71cf99e0992da14fabbca1085` (`arena/9dac4f74-make`)
+
+### 1. Что работает (функциональное ядро RC)
+- **Создание проекта и импорт изображений:** загрузка страниц манги и длинных webtoon-полос (PNG/JPEG/WebP) в локальное хранилище OPFS + IndexedDB (`DB_VERSION = 3`) без дублирования base64 в памяти.
+- **Сценарий и Vision-разметка:** парсер и сериализатор сценариев (`Изображение N [X..Y%]`, пол персонажа, валидация Y-диапазонов `validateYRange`), авто-перевод реплик на целевой язык озвучки.
+- **Импорт аудио v2 и TTS:** пакетный импорт `.mp3`/`.wav`/`.ogg`/`.opus`/`.m4a`/`.aac`/`.flac` (по манифесту, якорю в имени, номеру или порядку) с проверкой сигнатур, SHA-256 дедупликацией, проверкой квоты хранилища и откатом последнего импорта; генерация озвучки через 15+ TTS-провайдеров с OPFS-кэшированием.
+- **Единый таймлайн и NLE-операции:** канонический расчёт `SyncTimeline` и `SRT` (`invalidateAndRebuildTimeline`) с монотонным `timelineVersion`, единый источник времени `ProjectClock`, перетаскивание клипов (`drag-and-drop` с магнитной привязкой `snapTimeToTargets`), визуальные ручки обрезки `trimIn`/`trimOut`, `split`, `mute`/`solo`, `gain`/`fadeIn`/`fadeOut` и стек `Undo/Redo` (`HistoryManager`).
+- **Синхронное превью (`panels` и `strip`):** единое ядро камеры `sampleCameraFrame` для постраничного режима (`panels`) и вертикальной ленты (`strip`, `gapMode: 'hold'`), двусторонняя подсветка связанных видео- и аудиоклипов (`selected`), селектор шапки через `useSyncExternalStore`.
+- **Экспорт:** рендер видео 1920×1080 в MP4 (`WebCodecs` + `mediabunny` H.264/AAC) или WebM (`Canvas` + `MediaRecorder` VP8/VP9 + Opus) с побитовым совпадением команд отрисовки с `Preview`, предпрослушивание финального аудиомикса (`renderExportAudioMixPreviewWav`), выгрузка `.wav`/`.mp3`, `.srt` и SEO-пакета.
+- **Хранение и диагностика:** атомарная запись в OPFS через `.tmp`, оптимистическая блокировка `revision` (`StaleProjectRevisionError`), сверка и ремонт SHA-256 манифеста (`verifyAndRepairResourceManifest`), журнал восстановления прерванного импорта (`ImportJournal`), экспорт/импорт проекта в `.zip` и модалка диагностики `Проверка` (`ProjectHealthModal`, 6 категорий).
+
+### 2. Что не работает (известные ограничения)
+Все платформенные, браузерные, инфраструктурные и архитектурные ограничения RC (L-1..L-14) с причинами и обходными путями задокументированы в [**`known-limits.md`**](./known-limits.md).
+- В частности, чистая математика и конечный автомат pointer-событий для drag-and-drop клипов (п. 51) и ручек обрезки `trimIn`/`trimOut` (п. 52) вынесены в `src/lib/pipeline/timelineDrag.ts` и покрыты unit-тестами `npm test`, а реальная браузерная симуляция `page.mouse` на DOM-элементах `[data-trim-handle="in"]` и `[data-video-clip-id]` с проверкой роста `timelineVersion` в `EditorPage`, снятием кадров Preview/Export и экспортом короткого клипа (≤ 3 с) выполняется в `npm run smoke:editor` (см. `L-11`, `L-13`, `L-14`).
+
+### 3. Поддерживаемые браузеры
+| Браузер | Статус | Примечание |
+| :--- | :--- | :--- |
+| **Chromium / Chrome / Edge ≥ 120** (и десктопный Electron) | **Primary (полная поддержка)** | Полная поддержка OPFS (`createWritable`), WebCodecs (H.264 + AAC MP4) и `MediaRecorder` WebM |
+| **Firefox ≥ 128** | **Secondary (с ограничениями)** | Работает редактор, OPFS и экспорт WebM через `MediaRecorder`; аппаратный MP4 через WebCodecs и большие буферы `OfflineAudioContext` ограничены (см. `L-2` в [`known-limits.md`](./known-limits.md)) |
+| **Safari (macOS / iOS)** | **Не поддерживается** | Нестабильная работа `OfflineAudioContext` на длинных дорожках и ограничения OPFS/MediaRecorder (см. `L-2`, `L-11` в [`known-limits.md`](./known-limits.md)) |
+
+### 4. Как проверить локально
+> Для запуска `npm run smoke:editor` через `@sparticuz/chromium` на Linux рекомендуется **Node.js ≥ 22.17** (или **24+**, как в `.github/workflows/ci.yml`), либо установленный системный Chromium с переменной `CHROMIUM_PATH` (см. `L-13` в [`known-limits.md`](./known-limits.md)).
+
+```bash
+# 1. Установка зависимостей (с пропуском скачивания бинарника Electron при работе в веб-режиме)
+ELECTRON_SKIP_BINARY_DOWNLOAD=1 npm install
+
+# 2. Полная проверка репозитория (check:versions + check:launchers + typecheck + test + lint + build + smoke:server)
+npm run verify
+
+# 3. Автоматический E2E браузерный smoke-тест редактора в headless Chromium
+# (проверяет загрузку 100×2000 PNG, сценарий, импорт WAV, pointer drag-and-drop и trim-ручки,
+#  seek/Play/Pause, сохраняет кадры Preview/Export в artifacts/smoke-editor/ и экспортирует WebM ≤ 3 с)
+npm run smoke:editor
+
+# 4. Опциональный автономный smoke-тест микширования WebAudio OfflineAudioContext -> WAV
+npm run smoke:audio
+```
+
+### 5. Как сообщить о проблеме (шаблон Issue)
+При создании задачи в GitHub Issues приложите следующие данные:
+```markdown
+**Версия приложения и commit SHA:** v1.3.17 RC (<commit SHA>)
+**Браузер и ОС:** например, Chrome 130.0 / Windows 11 (или Electron)
+**Режим рендера:** panels | strip
+
+**Шаги воспроизведения:**
+1. ...
+2. ...
+3. ...
+
+**Ожидаемое поведение:**
+...
+
+**Фактическое поведение (и текст ошибки):**
+...
+
+**Диагностический отчёт (`diagnostic JSON`):**
+Откройте в редакторе кнопку «Проверка» (`ProjectHealthModal`) -> «Скачать диагностический JSON» (или «Экспорт» -> «Скачать диагностический JSON-отчёт проекта») и приложите содержимое файла `*-diagnostics.json`.
+```
+
 ## 🎨 v1.3 — Студия без хлама
 
 - Палитра warm graphite `#0B0B0C #16161A #1E1E23 #26262C` + amber accent `#E8B44C`

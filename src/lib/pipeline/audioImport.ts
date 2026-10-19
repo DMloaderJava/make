@@ -10,12 +10,31 @@
  * модалки). applyAudioImport — применение: декод (проверка + длительность),
  * запись в OPFS по ключу TTS, отчёт. markPanelsImported — чистая отметка
  * панелей по отчёту (её зовёт редактор, в т.ч. после каждого файла).
+ *
+ * Дополнено по ТЗ (Этап 2 п. 11–20, Этап 3 п. 21, 23, 24):
+ * - разделение `panelNumber` (номер реплики) и `imageNumber` (номер изображения);
+ * - предварительная диагностическая таблица плана импорта (`buildAudioImportPreviewRows`);
+ * - пред-декод и SHA-256 проверка файлов (`inspectFilesBeforeAudioImport`);
+ * - выборочный повторный импорт отмеченных файлов (`selectedFiles`);
+ * - откат последнего импорта (`createAudioImportUndoSnapshot`, `undoLastAudioImport`);
+ * - определение MIME по magic bytes и сохранение `audioOriginalMime` / `audioNormalizedMime`.
  */
 
 import type { PanelData } from './extractPanels';
-import { deleteProjectAudioSignature, getOPFSUsage, saveProjectAudio } from '../storage/opfs';
-import { fileExtension, planImport, type ImportFileRef, type ImportPlan } from './importPlan';
+import type { SyncTimeline } from '../storage/db';
+import {
+  deleteProjectAudio,
+  deleteProjectAudioSignature,
+  getOPFSUsage,
+  loadProjectAudio,
+  readFile,
+  saveProjectAudio,
+  writeFile,
+} from '../storage/opfs';
+import { fileExtension, planImport, type ImportFileRef, type ImportPlan, type ImportVia } from './importPlan';
 import { panelAnchor } from './scenarioFormat';
+import { computeBlobSha256 } from '../storage/resourceIntegrity';
+import { normalizeAudioBlobMime } from '../providers/tts/mime';
 
 /**
  * Расширения, которые пускаем в план. Это не обещание, что браузер их
@@ -37,6 +56,40 @@ export function audioTargetLabel(panel: Pick<PanelData, 'imageIndex' | 'bbox' | 
   return who ? `${anchor} · ${who}` : anchor;
 }
 
+export interface PanelAudioTargetInfo {
+  panelId: number;
+  /** 1-based порядковый номер панели (реплики) в сценарии (Этап 2 п. 12). */
+  panelNumber: number;
+  /** 1-based номер исходного изображения (`panel.imageIndex + 1`) (Этап 2 п. 12). */
+  imageNumber: number;
+  anchor: string;
+  label: string;
+  /** Подпись с явным разделением номера панели и номера изображения для UI. */
+  detailedLabel: string;
+}
+
+/**
+ * Возвращает сведения о целевой панели с явным разделением
+ * «номера панели» (`panelNumber`) и «номера изображения» (`imageNumber`) (Этап 2 п. 12).
+ */
+export function getPanelAudioTargetInfo(
+  panel: PanelData,
+  indexInOrder: number
+): PanelAudioTargetInfo {
+  const panelNumber = indexInOrder + 1;
+  const imageNumber = panel.imageIndex + 1;
+  const anchor = panelAnchor(panel);
+  const label = audioTargetLabel(panel);
+  return {
+    panelId: panel.id,
+    panelNumber,
+    imageNumber,
+    anchor,
+    label,
+    detailedLabel: `Панель №${panelNumber} · ${label}`,
+  };
+}
+
 export interface PlanAudioImportOptions {
   manifest?: string;
   manualOverrides?: ReadonlyMap<string, string>;
@@ -48,6 +101,10 @@ export interface PlanAudioImportOptions {
   existingAudio?: Iterable<number>;
   /** Не блокировать импорт из-за лишних файлов с повторным/вне диапазона номером. */
   ignoreUnmatchedNumbers?: boolean;
+  /**
+   * Повторный импорт только выбранных файлов без сброса остальных (Этап 2 п. 19).
+   */
+  selectedFiles?: Iterable<string>;
 }
 
 export interface AudioImportPlan extends ImportPlan<PanelData> {
@@ -64,8 +121,15 @@ export function planAudioImport(
   opts: PlanAudioImportOptions = {},
 ): AudioImportPlan {
   const errors: string[] = [];
+  const selectedSet = opts.selectedFiles
+    ? new Set(Array.from(opts.selectedFiles, s => s.normalize('NFC').trim().toLowerCase()))
+    : null;
+  const candidateFiles = selectedSet
+    ? files.filter(f => selectedSet.has(f.name.normalize('NFC').trim().toLowerCase()))
+    : files;
+
   const audioFiles: ImportFileRef[] = [];
-  for (const f of files) {
+  for (const f of candidateFiles) {
     if (isAudioFileName(f.name)) audioFiles.push(f);
     else errors.push(`Файл «${f.name}»: не аудиофайл (mp3, wav, ogg/opus, m4a/aac, flac, webm)`);
   }
@@ -117,6 +181,176 @@ export function planAudioImport(
 }
 
 // ---------------------------------------------------------------------------
+// Предварительный план импорта (Этап 2 п. 11, 12, 16–18)
+// ---------------------------------------------------------------------------
+
+export interface AudioImportPreviewRow {
+  file: string;
+  status: 'matched' | 'skipped' | 'excluded' | 'error';
+  via?: ImportVia;
+  panelId?: number;
+  panelNumber?: number;
+  imageNumber?: number;
+  targetLabel?: string;
+  duration?: number;
+  sha256?: string;
+  reason?: string;
+}
+
+/**
+ * Формирует предварительный план импорта (файл → целевая панель → способ сопоставления → причина исключения)
+ * до записи файлов в OPFS (Этап 2 п. 11, 12).
+ */
+export function buildAudioImportPreviewRows(
+  files: readonly ImportFileRef[],
+  panels: readonly PanelData[],
+  plan: AudioImportPlan
+): AudioImportPreviewRow[] {
+  const sortedPanels = [...panels].sort(
+    (a, b) => (a.order ?? 0) - (b.order ?? 0) || a.imageIndex - b.imageIndex || a.id - b.id
+  );
+  const infoById = new Map<number, PanelAudioTargetInfo>();
+  sortedPanels.forEach((p, idx) => {
+    infoById.set(p.id, getPanelAudioTargetInfo(p, idx));
+  });
+
+  const fileMetaByKey = new Map<string, ImportFileRef>();
+  for (const f of files) {
+    const k = f.name.normalize('NFC').trim().toLowerCase();
+    if (!fileMetaByKey.has(k)) fileMetaByKey.set(k, f);
+  }
+
+  const rows: AudioImportPreviewRow[] = [];
+  const handled = new Set<string>();
+
+  for (const m of plan.matches) {
+    const k = m.file.normalize('NFC').trim().toLowerCase();
+    handled.add(k);
+    const meta = fileMetaByKey.get(k);
+    const info = infoById.get(m.target.id);
+    rows.push({
+      file: m.file,
+      status: 'matched',
+      via: m.via,
+      panelId: m.target.id,
+      panelNumber: info?.panelNumber,
+      imageNumber: info?.imageNumber ?? (m.target.imageIndex + 1),
+      targetLabel: info?.detailedLabel ?? m.label,
+      duration: meta?.duration,
+      sha256: meta?.sha256,
+    });
+  }
+
+  for (const s of plan.skipped) {
+    const k = s.file.normalize('NFC').trim().toLowerCase();
+    handled.add(k);
+    const meta = fileMetaByKey.get(k);
+    const info = infoById.get(s.target.id);
+    rows.push({
+      file: s.file,
+      status: 'skipped',
+      via: s.via,
+      panelId: s.target.id,
+      panelNumber: info?.panelNumber,
+      imageNumber: info?.imageNumber ?? (s.target.imageIndex + 1),
+      targetLabel: info?.detailedLabel ?? s.label,
+      duration: meta?.duration,
+      sha256: meta?.sha256,
+      reason: 'У панели уже есть аудио (включите «Перезаписать»)',
+    });
+  }
+
+  for (const u of plan.unmatchedFiles) {
+    const k = u.normalize('NFC').trim().toLowerCase();
+    handled.add(k);
+    const meta = fileMetaByKey.get(k);
+    const specificErr = plan.errors.find(e => e.includes(`«${u}»`));
+    const specificWarn = plan.warnings.find(w => w.includes(`«${u}»`));
+    rows.push({
+      file: u,
+      status: specificErr ? 'error' : 'excluded',
+      duration: meta?.duration,
+      sha256: meta?.sha256,
+      reason: specificErr || specificWarn || 'Файл не сопоставлен ни с одной панелью',
+    });
+  }
+
+  for (const f of files) {
+    const k = f.name.normalize('NFC').trim().toLowerCase();
+    if (handled.has(k)) continue;
+    handled.add(k);
+    const specificErr = plan.errors.find(e => e.includes(`«${f.name}»`));
+    rows.push({
+      file: f.name,
+      status: 'error',
+      duration: f.duration,
+      sha256: f.sha256,
+      reason: f.decodeError
+        ? `Ошибка декодирования: ${f.decodeError}`
+        : specificErr || 'Файл отклонён при проверке',
+    });
+  }
+
+  return rows;
+}
+
+/**
+ * Предварительно декодирует выбранные файлы и считает SHA-256 до применения плана
+ * (Этап 2 п. 16, 17, 18):
+ * - заполняет `duration` каждого файла для отображения в таблице плана;
+ * - помечает недекодируемые файлы (`decodeError`) ДО нажатия «Применить»;
+ * - заполняет `sha256` для обнаружения дубликатов содержимого.
+ */
+export async function inspectFilesBeforeAudioImport(
+  files: ReadonlyMap<string, Blob> | ReadonlyArray<{ name: string; blob: Blob }>,
+  options?: {
+    decode?: (data: ArrayBuffer) => Promise<number>;
+    computeHash?: boolean;
+  }
+): Promise<ImportFileRef[]> {
+  const decodeFn = options?.decode ?? decodeAudioDuration;
+  const computeHash = options?.computeHash ?? true;
+  const entries: Array<{ name: string; blob: Blob }> = Array.isArray(files)
+    ? files
+    : Array.from((files as ReadonlyMap<string, Blob>).entries(), ([name, blob]) => ({ name, blob }));
+
+  const refs: ImportFileRef[] = [];
+  for (const { name, blob } of entries) {
+    if (!blob || blob.size === 0) {
+      refs.push({ name, size: 0, decodeError: 'файл пуст (0 байт)' });
+      continue;
+    }
+    try {
+      const ab = await blob.arrayBuffer();
+      const sha256 = computeHash ? await computeBlobSha256(ab) : undefined;
+      const duration = await decodeFn(ab.slice(0));
+      if (!Number.isFinite(duration) || duration <= 0) {
+        refs.push({
+          name,
+          size: blob.size,
+          sha256,
+          decodeError: 'не удалось определить длительность',
+        });
+      } else {
+        refs.push({
+          name,
+          size: blob.size,
+          sha256,
+          duration,
+        });
+      }
+    } catch (e) {
+      refs.push({
+        name,
+        size: blob.size,
+        decodeError: e instanceof Error && e.message ? e.message : 'формат не поддержан браузером',
+      });
+    }
+  }
+  return refs;
+}
+
+// ---------------------------------------------------------------------------
 // Применение
 // ---------------------------------------------------------------------------
 
@@ -139,6 +373,10 @@ export interface ApplyAudioImportOptions {
   decode?: (data: ArrayBuffer) => Promise<number>;
   /** Оценка места в хранилище; по умолчанию navigator.storage.estimate. Для тестов. */
   estimateStorage?: () => Promise<{ usage: number; quota: number } | null>;
+  /** Сохранять резервную копию старого аудио в OPFS для `undoLastAudioImport` (Этап 2 п. 20). */
+  enableUndoBackup?: boolean;
+  /** Включать ли `originalMime` и `normalizedMime` в `AppliedAudio` (Этап 3 п. 24). */
+  includeMimeMetadata?: boolean;
 }
 
 export interface AppliedAudio {
@@ -147,6 +385,9 @@ export interface AppliedAudio {
   /** Длительность после декода, сек (как есть, без округления). */
   duration: number;
   size: number;
+  originalMime?: string;
+  normalizedMime?: string;
+  sha256?: string;
 }
 
 export interface ApplyAudioImportReport {
@@ -233,28 +474,46 @@ export async function applyAudioImport(
   }
 
   const decode = opts.decode ?? decodeAudioDuration;
-  const total = jobs.length + report.failed.length;
-  let done = report.failed.length;
+  const total = jobs.length;
   let next = 0;
+  let done = 0;
 
-  const runOne = async (job: { panelId: number; file: string; blob: Blob }) => {
+  const runOne = async (job: typeof jobs[number]) => {
     if (job.blob.size === 0) {
       report.failed.push({ file: job.file, panelId: job.panelId, reason: 'пустой файл (0 байт)' });
       return;
     }
     let duration: number;
+    let originalMime: string | undefined;
+    let normalizedMime: string | undefined;
     try {
-      duration = await decode(await job.blob.arrayBuffer());
+      const buf = await job.blob.arrayBuffer();
+      if (opts.includeMimeMetadata) {
+        const mimeInfo = await normalizeAudioBlobMime(job.blob, buf);
+        originalMime = mimeInfo.originalMime;
+        normalizedMime = mimeInfo.normalizedMime;
+      }
+      duration = await decode(buf);
     } catch {
       report.failed.push({ file: job.file, panelId: job.panelId, reason: 'формат не поддержан браузером или файл повреждён' });
       return;
     }
     if (!Number.isFinite(duration) || duration <= 0) {
-      report.failed.push({ file: job.file, panelId: job.panelId, reason: 'не удалось определить длительность — файл повреждён?' });
+      report.failed.push({ file: job.file, panelId: job.panelId, reason: 'не удалось определить длительность' });
       return;
     }
     try {
-      // Сначала подпись: файл без .sig никогда не примут за TTS с совпавшими
+      if (opts.enableUndoBackup) {
+        try {
+          const prevAudio = await loadProjectAudio(opts.projectId, job.panelId);
+          if (prevAudio) {
+            await writeFile(['projects', opts.projectId, 'audio-undo'], `${job.panelId}.mp3`, prevAudio);
+          }
+        } catch {}
+      }
+      // Сначала убираем старую .sig, потом пишем аудио: если .sig не удаляется
+      // (не NotFoundError), новый файл НЕ пишем — иначе за импортированным
+      // аудио останется чужая подпись и его примут за TTS с совпавшими
       // параметрами, даже если вкладка упадёт между двумя записями.
       await deleteProjectAudioSignature(opts.projectId, job.panelId);
       await saveProjectAudio(opts.projectId, job.panelId, job.blob);
@@ -262,7 +521,9 @@ export async function applyAudioImport(
       report.failed.push({ file: job.file, panelId: job.panelId, reason: `не удалось записать в хранилище: ${e instanceof Error ? e.message : String(e)}` });
       return;
     }
-    const entry: AppliedAudio = { panelId: job.panelId, file: job.file, duration, size: job.blob.size };
+    const entry: AppliedAudio = opts.includeMimeMetadata
+      ? { panelId: job.panelId, file: job.file, duration, size: job.blob.size, originalMime, normalizedMime }
+      : { panelId: job.panelId, file: job.file, duration, size: job.blob.size };
     report.applied.push(entry);
     opts.onApplied?.(entry);
   };
@@ -290,17 +551,49 @@ export async function applyAudioImport(
 }
 
 /** Панели с отметкой «импорт» по применённым файлам (чистая функция). */
-export function markPanelsImported<P extends { id: number; audioSource?: 'tts' | 'import'; audioFileName?: string }>(
+export function markPanelsImported<
+  P extends {
+    id: number;
+    audioSource?: 'tts' | 'import';
+    audioFileName?: string;
+    audioOriginalMime?: string;
+    audioNormalizedMime?: string;
+    audioSha256?: string;
+  }
+>(
   panels: P[],
-  applied: ReadonlyArray<Pick<AppliedAudio, 'panelId' | 'file'>>,
+  applied: ReadonlyArray<
+    Pick<AppliedAudio, 'panelId' | 'file'> & {
+      originalMime?: string;
+      normalizedMime?: string;
+      sha256?: string;
+    }
+  >,
 ): P[] {
   if (applied.length === 0) return panels;
-  const byPanel = new Map(applied.map(a => [a.panelId, a.file]));
-  return panels.map(p => (byPanel.has(p.id) ? { ...p, audioSource: 'import' as const, audioFileName: byPanel.get(p.id) } : p));
+  const byPanel = new Map(applied.map(a => [a.panelId, a]));
+  return panels.map(p => {
+    const hit = byPanel.get(p.id);
+    if (!hit) return p;
+    const next: P = { ...p, audioSource: 'import' as const, audioFileName: hit.file };
+    if (hit.originalMime !== undefined) next.audioOriginalMime = hit.originalMime;
+    if (hit.normalizedMime !== undefined) next.audioNormalizedMime = hit.normalizedMime;
+    if (hit.sha256 !== undefined) next.audioSha256 = hit.sha256;
+    return next;
+  });
 }
 
 /** Снимает отметку «импорт» (панель переозвучена TTS). Чистая функция. */
-export function clearImportMark<P extends { id: number; audioSource?: 'tts' | 'import'; audioFileName?: string }>(
+export function clearImportMark<
+  P extends {
+    id: number;
+    audioSource?: 'tts' | 'import';
+    audioFileName?: string;
+    audioOriginalMime?: string;
+    audioNormalizedMime?: string;
+    audioSha256?: string;
+  }
+>(
   panels: P[],
   panelIds: Iterable<number>,
 ): P[] {
@@ -311,6 +604,9 @@ export function clearImportMark<P extends { id: number; audioSource?: 'tts' | 'i
     const rest = { ...p };
     delete rest.audioSource;
     delete rest.audioFileName;
+    delete rest.audioOriginalMime;
+    delete rest.audioNormalizedMime;
+    delete rest.audioSha256;
     return rest;
   });
 }
@@ -329,6 +625,8 @@ export function autoImportOptions(state: {
   manifest: string;
   overwrite: boolean;
   existingAudio: Iterable<number>;
+  manualOverrides?: ReadonlyMap<string, string>;
+  selectedFiles?: Iterable<string>;
 }): PlanAudioImportOptions {
   const manifest = state.manifest.trim();
   return {
@@ -340,6 +638,8 @@ export function autoImportOptions(state: {
     ignoreUnmatchedNumbers: !manifest,
     overwrite: state.overwrite,
     existingAudio: state.existingAudio,
+    manualOverrides: state.manualOverrides,
+    selectedFiles: state.selectedFiles,
   };
 }
 
@@ -397,7 +697,7 @@ type ImportableProject = { panels: PanelData[]; audioDurations?: Record<number, 
  */
 export function createImportPersister<T extends ImportableProject>(opts: {
   snapshot: T;
-  save: (project: T) => Promise<void>;
+  save: (project: T) => Promise<unknown>;
   onSaveError?: (error: unknown) => void;
 }) {
   const applied: AppliedAudio[] = [];
@@ -414,7 +714,7 @@ export function createImportPersister<T extends ImportableProject>(opts: {
     onApplied(entry: AppliedAudio) {
       applied.push(entry);
       const next = projectWith([...applied]);
-      chain = chain.then(() => opts.save(next)).catch((e) => opts.onSaveError?.(e));
+      chain = chain.then(() => opts.save(next)).then(() => undefined).catch((e) => opts.onSaveError?.(e));
     },
     /** Дождаться последнего сохранения. Никогда не отклоняется. */
     flush(): Promise<void> {
@@ -491,3 +791,160 @@ export function settleImportRegeneration(params: {
     errors,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Отмена последнего импорта аудио (Этап 2 п. 20)
+// ---------------------------------------------------------------------------
+
+export interface LastAudioImportSnapshot {
+  projectId: string;
+  createdAt: number;
+  previousPanels: PanelData[];
+  previousAudioDurations: Record<number, number>;
+  previousTimeline: SyncTimeline[];
+  previousSrt: string;
+  previouslyVoicedPanelIds: number[];
+  importedPanelIds: number[];
+  previousBlobs: Map<number, Blob>;
+}
+
+/**
+ * Создаёт снимок состояния перед импортом аудио, чтобы кнопка «Отменить последний импорт»
+ * могла вернуть предыдущие метаданные и аудио-блобы один в один (Этап 2 п. 20).
+ */
+export async function createAudioImportUndoSnapshot(params: {
+  projectId: string;
+  panels: readonly PanelData[];
+  audioDurations?: Record<number, number>;
+  timeline?: readonly SyncTimeline[];
+  srt?: string;
+  existingBlobs?: ReadonlyMap<number, Blob>;
+  targetPanelIds?: Iterable<number>;
+}): Promise<LastAudioImportSnapshot> {
+  const {
+    projectId,
+    panels,
+    audioDurations = {},
+    timeline = [],
+    srt = '',
+    existingBlobs,
+    targetPanelIds,
+  } = params;
+
+  const previousBlobs = new Map<number, Blob>();
+  const previouslyVoicedPanelIds: number[] = [];
+
+  if (existingBlobs) {
+    for (const [id, blob] of existingBlobs.entries()) {
+      previouslyVoicedPanelIds.push(id);
+      previousBlobs.set(id, blob);
+    }
+  } else if (targetPanelIds) {
+    for (const id of targetPanelIds) {
+      const b = await loadProjectAudio(projectId, id);
+      if (b) {
+        previouslyVoicedPanelIds.push(id);
+        previousBlobs.set(id, b);
+      }
+    }
+  }
+
+  return {
+    projectId,
+    createdAt: Date.now(),
+    previousPanels: panels.map(p => ({ ...p, bbox: { ...p.bbox } })),
+    previousAudioDurations: { ...audioDurations },
+    previousTimeline: timeline.map(s => ({ ...s })),
+    previousSrt: srt,
+    previouslyVoicedPanelIds,
+    importedPanelIds: targetPanelIds ? Array.from(targetPanelIds) : [],
+    previousBlobs,
+  };
+}
+
+/**
+ * Восстанавливает состояние проекта и OPFS-файлы до последнего импорта аудио (Этап 2 п. 20).
+ */
+export async function undoLastAudioImport(
+  snapshot: LastAudioImportSnapshot,
+  appliedPanelIds?: Iterable<number>
+): Promise<{
+  panels: PanelData[];
+  audioDurations: Record<number, number>;
+  timeline: SyncTimeline[];
+  srt: string;
+  restoredBlobs: Map<number, Blob>;
+}> {
+  const idsToRevert = new Set<number>(appliedPanelIds ?? snapshot.importedPanelIds);
+  const hadAudioBefore = new Set<number>(snapshot.previouslyVoicedPanelIds);
+
+  for (const panelId of idsToRevert) {
+    const memBackup = snapshot.previousBlobs.get(panelId);
+    if (memBackup) {
+      await saveProjectAudio(snapshot.projectId, panelId, memBackup);
+      continue;
+    }
+    let opfsBackup: Blob | null = null;
+    try {
+      opfsBackup = await readFile(['projects', snapshot.projectId, 'audio-undo'], `${panelId}.mp3`);
+    } catch {
+      opfsBackup = null;
+    }
+    if (opfsBackup) {
+      await saveProjectAudio(snapshot.projectId, panelId, opfsBackup);
+      snapshot.previousBlobs.set(panelId, opfsBackup);
+      continue;
+    }
+    if (!hadAudioBefore.has(panelId)) {
+      await deleteProjectAudio(snapshot.projectId, panelId);
+    }
+  }
+
+  return {
+    panels: snapshot.previousPanels.map(p => ({ ...p, bbox: { ...p.bbox } })),
+    audioDurations: { ...snapshot.previousAudioDurations },
+    timeline: snapshot.previousTimeline.map(s => ({ ...s })),
+    srt: snapshot.previousSrt,
+    restoredBlobs: new Map(snapshot.previousBlobs),
+  };
+}
+
+/**
+ * Явное правило выбора файлов при добавлении новой пачки в модальное окно импорта
+ * (Итерация 2.1, P1 п. 10):
+ * - каждый новый добавленный файл автоматически помечается выбранным;
+ * - если до добавления стоял `selectAll = true`, все прежние + новые файлы остаются выбранными (`selectAll = true`);
+ * - если пользователь ранее снимал выбор с отдельных файлов (`selectAll = false`), прежние отметки сохраняются,
+ *   новые файлы добавляются в `selectedFileNames`, а `selectAll` пересчитывается по полному совпадению.
+ */
+export function mergeAddedAudioImportSelection<T extends { name: string }>(params: {
+  prevFiles: readonly T[];
+  prevSelected: ReadonlySet<string>;
+  prevSelectAll: boolean;
+  incomingAudio: readonly T[];
+}): {
+  mergedFiles: T[];
+  selectedFileNames: Set<string>;
+  selectAll: boolean;
+} {
+  const { prevFiles, prevSelected, prevSelectAll, incomingAudio } = params;
+  const incomingNames = new Set(incomingAudio.map(f => f.name.normalize('NFC')));
+  const mergedFiles = [
+    ...prevFiles.filter(f => !incomingNames.has(f.name.normalize('NFC'))),
+    ...incomingAudio,
+  ];
+  const selectedFileNames = new Set<string>(
+    prevSelectAll ? prevFiles.map(f => f.name) : prevSelected
+  );
+  for (const f of incomingAudio) {
+    selectedFileNames.add(f.name);
+  }
+  const selectAll =
+    mergedFiles.length > 0 && mergedFiles.every(f => selectedFileNames.has(f.name));
+  return {
+    mergedFiles,
+    selectedFileNames,
+    selectAll,
+  };
+}
+

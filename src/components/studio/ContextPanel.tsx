@@ -21,13 +21,16 @@ interface ContextPanelProps {
   generating?: boolean;
   onRegeneratePanel?: (panelId: number, opts?: { confirmedImportOverwrite?: boolean }) => void;
   regenerating?: boolean;
+  onReorderPanel?: (panelId: number, direction: 'up' | 'down') => void;
+  totalPanels?: number;
 }
 
-export function ContextPanel({ selected, onUpdatePanel, onUpdateIntro, onUpdateOutro, voiceAssignments, onVoiceChange, onGenerateIntro, onGenerateOutro, generating, onRegeneratePanel, regenerating }: ContextPanelProps) {
+export function ContextPanel({ selected, onUpdatePanel, onUpdateIntro, onUpdateOutro, voiceAssignments, onVoiceChange, onGenerateIntro, onGenerateOutro, generating, onRegeneratePanel, regenerating, onReorderPanel, totalPanels = 0 }: ContextPanelProps) {
   const [voices, setVoices] = useState<Voice[]>([]);
   // Переозвучка импортированного файла — в два клика (первый вооружает кнопку).
   // Не confirm(): во встроенном превью (iframe без allow-modals) он молча false.
   const [armedPanelId, setArmedPanelId] = useState<number | null>(null);
+  const [armedReorder, setArmedReorder] = useState<'up' | 'down' | null>(null);
   // Привязано к id панели и снимается по blur — смена панели снимает его сама.
 
   useEffect(() => {
@@ -220,6 +223,147 @@ export function ContextPanel({ selected, onUpdatePanel, onUpdateIntro, onUpdateO
             ))}
           </select>
         </div>
+      </div>
+
+      {/* NLE-параметры клипа: Trim, Громкость, Fade, Длительность кадра, Порядок (Этап 6 п. 51, 52, 54, 57, 58) */}
+      <div className="pt-2 border-t border-[#26262C] grid grid-cols-2 sm:grid-cols-6 gap-2 items-end">
+        <div className="space-y-1">
+          <Label className="text-[10px] text-[#8A8A93]" title="Обрезка начала аудиоклипа (сек)">
+            Trim In (с)
+          </Label>
+          <Input
+            type="number"
+            min="0"
+            step="0.1"
+            value={panel.trimIn ?? 0}
+            onChange={(e) => onUpdatePanel(panel.id, { trimIn: Math.max(0, Number(e.target.value) || 0) })}
+            className="h-7 bg-[#0B0B0C] border-[#26262C] text-xs font-mono"
+          />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-[10px] text-[#8A8A93]" title="Обрезка конца аудиоклипа (сек)">
+            Trim Out (с)
+          </Label>
+          <Input
+            type="number"
+            min="0"
+            step="0.1"
+            value={panel.trimOut ?? 0}
+            onChange={(e) => onUpdatePanel(panel.id, { trimOut: Math.max(0, Number(e.target.value) || 0) })}
+            className="h-7 bg-[#0B0B0C] border-[#26262C] text-xs font-mono"
+          />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-[10px] text-[#8A8A93]" title="Фиксированная длительность показа кадра (0 = по длительности аудио)">
+            Длит. кадра (с)
+          </Label>
+          <Input
+            type="number"
+            min="0"
+            step="0.1"
+            placeholder="авто"
+            value={panel.durationOverride ?? ''}
+            onChange={(e) => {
+              const raw = e.target.value;
+              onUpdatePanel(panel.id, {
+                durationOverride: raw === '' || Number(raw) <= 0 ? undefined : Number(raw),
+              });
+            }}
+            className="h-7 bg-[#0B0B0C] border-[#26262C] text-xs font-mono"
+          />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-[10px] text-[#8A8A93]" title="Громкость клипа (0..2, 1.0 = 100%)">
+            Громкость
+          </Label>
+          <Input
+            type="number"
+            min="0"
+            max="2"
+            step="0.1"
+            value={panel.gain ?? 1}
+            onChange={(e) => onUpdatePanel(panel.id, { gain: Math.max(0, Math.min(2, Number(e.target.value))) })}
+            className="h-7 bg-[#0B0B0C] border-[#26262C] text-xs font-mono"
+          />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-[10px] text-[#8A8A93]" title="Плавное нарастание / затухание звука (сек)">
+            Fade In / Out
+          </Label>
+          <div className="flex gap-1">
+            <Input
+              type="number"
+              min="0"
+              step="0.05"
+              value={panel.fadeIn ?? 0}
+              onChange={(e) => onUpdatePanel(panel.id, { fadeIn: Math.max(0, Number(e.target.value) || 0) })}
+              className="h-7 bg-[#0B0B0C] border-[#26262C] text-xs font-mono px-1.5"
+              title="Fade In (с)"
+            />
+            <Input
+              type="number"
+              min="0"
+              step="0.05"
+              value={panel.fadeOut ?? 0}
+              onChange={(e) => onUpdatePanel(panel.id, { fadeOut: Math.max(0, Number(e.target.value) || 0) })}
+              className="h-7 bg-[#0B0B0C] border-[#26262C] text-xs font-mono px-1.5"
+              title="Fade Out (с)"
+            />
+          </div>
+        </div>
+        {onReorderPanel && (
+          <div className="space-y-1">
+            <Label className="text-[10px] text-[#8A8A93]">Порядок реплик</Label>
+            <div className="flex gap-1">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={selected.index <= 0}
+                onClick={() => {
+                  if (armedReorder !== 'up') {
+                    setArmedReorder('up');
+                    return;
+                  }
+                  setArmedReorder(null);
+                  onReorderPanel(panel.id, 'up');
+                }}
+                onBlur={() => { if (armedReorder === 'up') setArmedReorder(null); }}
+                className={`h-7 px-2 text-[11px] flex-1 ${
+                  armedReorder === 'up'
+                    ? 'bg-[#1E1A10] border-[#3A2E14] text-[#C9B27A]'
+                    : 'bg-[#0B0B0C] border-[#26262C]'
+                }`}
+                title="Переместить реплику раньше (второй клик подтверждает)"
+              >
+                {armedReorder === 'up' ? 'Точно ↑?' : '↑ Раньше'}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={totalPanels > 0 && selected.index >= totalPanels - 1}
+                onClick={() => {
+                  if (armedReorder !== 'down') {
+                    setArmedReorder('down');
+                    return;
+                  }
+                  setArmedReorder(null);
+                  onReorderPanel(panel.id, 'down');
+                }}
+                onBlur={() => { if (armedReorder === 'down') setArmedReorder(null); }}
+                className={`h-7 px-2 text-[11px] flex-1 ${
+                  armedReorder === 'down'
+                    ? 'bg-[#1E1A10] border-[#3A2E14] text-[#C9B27A]'
+                    : 'bg-[#0B0B0C] border-[#26262C]'
+                }`}
+                title="Переместить реплику позже (второй клик подтверждает)"
+              >
+                {armedReorder === 'down' ? 'Точно ↓?' : '↓ Позже'}
+              </Button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

@@ -6,10 +6,9 @@
  */
 
 import { SyncTimeline } from '../storage/db';
-import { getKenBurnsParams, sameImageSpan } from './buildTimeline';
-import { drawContain } from './draw';
 import { appendPlacements, measureBlobDurations, stackBlobsBackToBack, type AudioPlacement } from './audioMix';
 import { createStripSceneFromMedia, type StripScene } from './mangaStrip';
+import { renderExportFrameToCanvas } from './assembleVideo';
 
 export interface RenderOptions {
   images: string[]; // data URLs
@@ -21,6 +20,10 @@ export interface RenderOptions {
   outroText: string;
   introDuration: number;
   outroDuration: number;
+  /** Реальная длительность интро-аудио (сек), если есть (Задачи 11, 12). */
+  introAudioDuration?: number | null;
+  /** Реальная длительность аутро-аудио (сек), если есть (Задачи 11, 12). */
+  outroAudioDuration?: number | null;
   srtContent: string;
   width: number;
   height: number;
@@ -150,6 +153,8 @@ export class CanvasMediaRecorderBackend implements RenderBackend {
       outroText: options.outroText,
       introDuration: options.introDuration,
       outroDuration: options.outroDuration,
+      introAudioDuration: options.introAudioDuration,
+      outroAudioDuration: options.outroAudioDuration,
       srtContent: options.srtContent,
       width: options.width,
       height: options.height,
@@ -224,10 +229,6 @@ export class WebCodecsBackend implements RenderBackend {
     let timelineDuration = options.timeline.length > 0
       ? options.timeline[options.timeline.length - 1].audioEnd + options.outroDuration
       : options.introDuration + options.outroDuration;
-
-    const panelsEnd = options.timeline.length > 0
-      ? options.timeline[options.timeline.length - 1].audioEnd
-      : options.introDuration;
 
     // Режим ленты: сцена строится один раз и рендерит каждый кадр по своему времени.
     const stripScene: StripScene | null = options.renderMode === 'strip'
@@ -308,26 +309,16 @@ export class WebCodecsBackend implements RenderBackend {
 
     for (let frame = 0; frame < totalFrames; frame++) {
       const time = frame / fps;
-      
-      // Render frame to canvas
-      ctx.fillStyle = '#000';
-      ctx.fillRect(0, 0, options.width, options.height);
 
-      // Determine phase and render
-      if (time < options.introDuration) {
-        this.renderIntroFrame(ctx, options, loadedImages);
-      } else if (stripScene && time < panelsEnd) {
-        // Лента: окно скроллится по склеенным страницам синхронно с озвучкой.
-        stripScene.render(ctx, time);
-      } else if (options.timeline.length > 0 && time < panelsEnd) {
-        this.renderPanelFrame(ctx, options, time, loadedImages);
-      } else {
-        this.renderOutroFrame(ctx, options, loadedImages);
-      }
-
-      if (options.srtContent) {
-        this.renderSubtitleFrame(ctx, options, time);
-      }
+      renderExportFrameToCanvas({
+        ctx,
+        width: options.width,
+        height: options.height,
+        time,
+        options,
+        loadedImages,
+        stripScene,
+      });
 
       // Add frame to video track.
       // ВАЖНО: mediabunny принимает timestamp/duration в СЕКУНДАХ, а не в микросекундах —
@@ -351,239 +342,6 @@ export class WebCodecsBackend implements RenderBackend {
     await output.finalize();
     const buffer = target.buffer;
     return new Blob([buffer!], { type: 'video/mp4' });
-  }
-
-  private renderIntroFrame(ctx: CanvasRenderingContext2D, options: RenderOptions, loadedImages: Map<string, HTMLImageElement>) {
-    const w = options.width;
-    const h = options.height;
-    const gradient = ctx.createLinearGradient(0, 0, w, h);
-    gradient.addColorStop(0, '#1e1b4b');
-    gradient.addColorStop(1, '#312e81');
-    ctx.fillStyle = gradient;
-    ctx.fillRect(0, 0, w, h);
-
-    if (options.images[0]) {
-      const img = loadedImages.get(options.images[0]);
-      if (img) {
-        this.drawCover(ctx, img, w, h, 0.3);
-      }
-    }
-
-    ctx.fillStyle = 'rgba(0,0,0,0.6)';
-    ctx.fillRect(0, h * 0.6, w, h * 0.4);
-    ctx.fillStyle = '#fff';
-    ctx.font = `bold ${Math.floor(w * 0.035)}px system-ui`;
-    ctx.textAlign = 'center';
-    const lines = this.wrapText(ctx, options.introText || 'Добро пожаловать...', w * 0.8);
-    let y = h * 0.7;
-    for (const line of lines.slice(0, 3)) {
-      ctx.fillText(line, w / 2, y);
-      y += Math.floor(w * 0.04);
-    }
-  }
-
-  private renderPanelFrame(ctx: CanvasRenderingContext2D, options: RenderOptions, time: number, loadedImages: Map<string, HTMLImageElement>) {
-    const w = options.width;
-    const h = options.height;
-    const currentPanel = options.timeline.find(t => time >= t.audioStart && time < t.audioEnd) || options.timeline[options.timeline.length - 1];
-    if (!currentPanel) return;
-
-    // «Весь кадр» (сценарий): contain + letterbox, камера выключена,
-    // bbox-обводку и бейдж персонажа не рисуем.
-    const isFullFrame = options.panels?.find(p => p.id === currentPanel.panelId)?.fullFrame === true;
-
-    const img = options.images[currentPanel.imageIndex] ? loadedImages.get(options.images[currentPanel.imageIndex]) : null;
-    if (img) {
-      if (isFullFrame) {
-        drawContain(ctx, img, w, h);
-      } else {
-        // Прогресс камеры — по группе соседних панелей одного изображения,
-        // направление — с начала группы: зум не «скачет» между панелями.
-        const span = sameImageSpan(options.timeline, currentPanel.panelId);
-        const idx = span ? span.startIndex : options.timeline.indexOf(currentPanel);
-        const progress = span
-          ? Math.min(1, Math.max(0, (time - span.start) / (span.end - span.start || 1)))
-          : 0;
-        const kb = getKenBurnsParams(idx);
-        const scale = kb.startScale + (kb.endScale - kb.startScale) * progress;
-        const xOff = (kb.startX + (kb.endX - kb.startX) * progress) * w;
-        const yOff = (kb.startY + (kb.endY - kb.startY) * progress) * h;
-        this.drawCoverWithKenBurns(ctx, img, w, h, 1, scale, xOff, yOff);
-      }
-    }
-
-    ctx.fillStyle = 'rgba(0,0,0,0.35)';
-    ctx.fillRect(0, 0, w, h);
-
-    const bbox = currentPanel.panelBbox;
-    const bx = (bbox.x / 100) * w;
-    const by = (bbox.y / 100) * h;
-    const bw = (bbox.width / 100) * w;
-    const bh = (bbox.height / 100) * h;
-
-    ctx.strokeStyle = '#6366f1';
-    ctx.lineWidth = 4;
-    ctx.shadowColor = '#6366f1';
-    ctx.shadowBlur = 20;
-    ctx.beginPath();
-    // @ts-ignore
-    if (ctx.roundRect) ctx.roundRect(bx, by, bw, bh, 12);
-    else ctx.rect(bx, by, bw, bh);
-    ctx.stroke();
-    ctx.shadowBlur = 0;
-
-    ctx.fillStyle = 'rgba(99, 102, 241, 0.9)';
-    ctx.beginPath();
-    // @ts-ignore
-    if (ctx.roundRect) ctx.roundRect(bx, Math.max(0, by - 32), 200, 24, 6);
-    else ctx.rect(bx, Math.max(0, by - 32), 200, 24);
-    ctx.fill();
-    ctx.fillStyle = '#fff';
-    ctx.font = 'bold 14px system-ui';
-    ctx.textAlign = 'left';
-    ctx.fillText(currentPanel.character, bx + 12, Math.max(0, by - 32) + 16);
-
-    ctx.fillStyle = 'rgba(0,0,0,0.75)';
-    ctx.beginPath();
-    // @ts-ignore
-    if (ctx.roundRect) ctx.roundRect(w * 0.05, h * 0.75, w * 0.9, h * 0.2, 16);
-    else ctx.rect(w * 0.05, h * 0.75, w * 0.9, h * 0.2);
-    ctx.fill();
-    ctx.fillStyle = '#fff';
-    ctx.font = `${Math.floor(w * 0.022)}px system-ui`;
-    ctx.textAlign = 'center';
-    const lines = this.wrapText(ctx, currentPanel.text, w * 0.8);
-    let dy = h * 0.82;
-    for (const line of lines.slice(0, 3)) {
-      ctx.fillText(line, w / 2, dy);
-      dy += Math.floor(w * 0.03);
-    }
-  }
-
-  private renderOutroFrame(ctx: CanvasRenderingContext2D, options: RenderOptions, loadedImages: Map<string, HTMLImageElement>) {
-    const w = options.width;
-    const h = options.height;
-    const gradient = ctx.createLinearGradient(0, 0, w, h);
-    gradient.addColorStop(0, '#0f0f0f');
-    gradient.addColorStop(1, '#27272a');
-    ctx.fillStyle = gradient;
-    ctx.fillRect(0, 0, w, h);
-
-    if (options.images[options.images.length - 1]) {
-      const img = loadedImages.get(options.images[options.images.length - 1]);
-      if (img) this.drawCover(ctx, img, w, h, 0.25);
-    }
-
-    ctx.fillStyle = 'rgba(0,0,0,0.6)';
-    ctx.fillRect(0, h * 0.3, w, h * 0.4);
-    ctx.fillStyle = '#fff';
-    ctx.font = `bold ${Math.floor(w * 0.032)}px system-ui`;
-    ctx.textAlign = 'center';
-    const lines = this.wrapText(ctx, options.outroText || 'Спасибо!', w * 0.8);
-    let y = h * 0.45;
-    for (const line of lines.slice(0, 3)) {
-      ctx.fillText(line, w / 2, y);
-      y += Math.floor(w * 0.04);
-    }
-  }
-
-  private renderSubtitleFrame(ctx: CanvasRenderingContext2D, options: RenderOptions, time: number) {
-    if (!options.srtContent) return;
-    const cues = this.parseSRT(options.srtContent);
-    const current = cues.find(c => time >= c.start && time < c.end);
-    if (!current) return;
-    const w = options.width;
-    const h = options.height;
-    ctx.font = `${Math.floor(w * 0.02)}px system-ui`;
-    const textWidth = ctx.measureText(current.text).width;
-    const boxWidth = Math.min(w * 0.9, textWidth + 40);
-    ctx.fillStyle = 'rgba(0,0,0,0.8)';
-    ctx.beginPath();
-    // @ts-ignore
-    if (ctx.roundRect) ctx.roundRect((w - boxWidth) / 2, h - 80, boxWidth, 40, 8);
-    else ctx.rect((w - boxWidth) / 2, h - 80, boxWidth, 40);
-    ctx.fill();
-    ctx.fillStyle = '#fff';
-    ctx.textAlign = 'center';
-    ctx.fillText(current.text, w / 2, h - 55);
-  }
-
-  private drawCover(ctx: CanvasRenderingContext2D, img: HTMLImageElement, w: number, h: number, alpha: number) {
-    ctx.globalAlpha = alpha;
-    const imgAspect = img.width / img.height;
-    const canvasAspect = w / h;
-    let dw, dh, ox, oy;
-    if (imgAspect > canvasAspect) {
-      dh = h;
-      dw = dh * imgAspect;
-      ox = (w - dw) / 2;
-      oy = 0;
-    } else {
-      dw = w;
-      dh = dw / imgAspect;
-      ox = 0;
-      oy = (h - dh) / 2;
-    }
-    ctx.drawImage(img, ox, oy, dw, dh);
-    ctx.globalAlpha = 1;
-  }
-
-  private drawCoverWithKenBurns(ctx: CanvasRenderingContext2D, img: HTMLImageElement, w: number, h: number, alpha: number, scale: number, xOff: number, yOff: number) {
-    ctx.globalAlpha = alpha;
-    const imgAspect = img.width / img.height;
-    const canvasAspect = w / h;
-    let dw, dh, bx, by;
-    if (imgAspect > canvasAspect) {
-      dh = h;
-      dw = dh * imgAspect;
-      bx = (w - dw) / 2;
-      by = 0;
-    } else {
-      dw = w;
-      dh = dw / imgAspect;
-      bx = 0;
-      by = (h - dh) / 2;
-    }
-    const sdw = dw * scale;
-    const sdh = dh * scale;
-    const maxX = (sdw - w) / 2;
-    const maxY = (sdh - h) / 2;
-    const cx = Math.max(-maxX, Math.min(maxX, xOff));
-    const cy = Math.max(-maxY, Math.min(maxY, yOff));
-    const ox = bx * scale + cx - (sdw - dw) / 2;
-    const oy = by * scale + cy - (sdh - dh) / 2;
-    ctx.drawImage(img, ox, oy, sdw, sdh);
-    ctx.globalAlpha = 1;
-  }
-
-  private wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
-    const words = text.split(' ');
-    const lines: string[] = [];
-    let current = '';
-    for (const word of words) {
-      const test = current ? `${current} ${word}` : word;
-      if (ctx.measureText(test).width > maxWidth && current) {
-        lines.push(current);
-        current = word;
-      } else current = test;
-    }
-    if (current) lines.push(current);
-    return lines;
-  }
-
-  private parseSRT(srt: string): Array<{ start: number; end: number; text: string }> {
-    const cues: Array<{ start: number; end: number; text: string }> = [];
-    const blocks = srt.trim().split('\n\n');
-    for (const block of blocks) {
-      const lines = block.split('\n');
-      if (lines.length < 3) continue;
-      const m = lines[1].match(/(\d+):(\d+):(\d+),(\d+)\s*-->\s*(\d+):(\d+):(\d+),(\d+)/);
-      if (!m) continue;
-      const start = parseInt(m[1]) * 3600 + parseInt(m[2]) * 60 + parseInt(m[3]) + parseInt(m[4]) / 1000;
-      const end = parseInt(m[5]) * 3600 + parseInt(m[6]) * 60 + parseInt(m[7]) + parseInt(m[8]) / 1000;
-      cues.push({ start, end, text: lines.slice(2).join(' ') });
-    }
-    return cues;
   }
 }
 

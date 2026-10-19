@@ -63,16 +63,31 @@ export async function writeFile(path: string[], filename: string, data: Blob | A
     throw new Error('OPFS not supported, use IDB fallback');
   }
   const dir = await ensureDir(path);
-  const fileHandle = await dir.getFileHandle(filename, { create: true });
-  const writable = await (fileHandle as any).createWritable();
-  if (data instanceof Blob) {
-    await writable.write(data);
-  } else if (data instanceof ArrayBuffer) {
-    await writable.write(data);
-  } else {
-    await writable.write(new Blob([data]));
+  const blobData = data instanceof Blob
+    ? data
+    : data instanceof ArrayBuffer
+      ? new Blob([data])
+      : new Blob([data]);
+
+  // Атомарная запись (Этап 8, п. 71): сначала временный snapshot .tmp, затем основной файл, затем удаление .tmp
+  const tmpName = `${filename}.tmp`;
+  try {
+    const tmpHandle = await dir.getFileHandle(tmpName, { create: true });
+    const tmpWritable = await (tmpHandle as unknown as { createWritable(): Promise<{ write(d: Blob): Promise<void>; close(): Promise<void> }> }).createWritable();
+    await tmpWritable.write(blobData);
+    await tmpWritable.close();
+  } catch {
+    // Если окружение не дало создать .tmp, продолжаем прямую запись
   }
+
+  const fileHandle = await dir.getFileHandle(filename, { create: true });
+  const writable = await (fileHandle as unknown as { createWritable(): Promise<{ write(d: Blob): Promise<void>; close(): Promise<void> }> }).createWritable();
+  await writable.write(blobData);
   await writable.close();
+
+  try {
+    await dir.removeEntry(tmpName);
+  } catch {}
 }
 
 export async function readFile(path: string[], filename: string): Promise<Blob> {
@@ -80,9 +95,19 @@ export async function readFile(path: string[], filename: string): Promise<Blob> 
     throw new Error('OPFS not supported');
   }
   const dir = await ensureDir(path);
-  const fileHandle = await dir.getFileHandle(filename);
-  const file = await fileHandle.getFile();
-  return file;
+  try {
+    const fileHandle = await dir.getFileHandle(filename);
+    const file = await fileHandle.getFile();
+    return file;
+  } catch (err) {
+    // Восстановление из .tmp snapshot, если основной файл не успел записаться
+    try {
+      const tmpHandle = await dir.getFileHandle(`${filename}.tmp`);
+      return await tmpHandle.getFile();
+    } catch {
+      throw err;
+    }
+  }
 }
 
 export async function readFileAsDataURL(path: string[], filename: string): Promise<string> {
@@ -108,9 +133,8 @@ export async function listFiles(path: string[]): Promise<string[]> {
   try {
     const dir = await ensureDir(path);
     const files: string[] = [];
-    // @ts-ignore - async iterator
-    for await (const [name, handle] of (dir as any).entries()) {
-      if ((handle as any).kind === 'file') files.push(name);
+    for await (const [name, handle] of (dir as unknown as { entries(): AsyncIterable<[string, { kind: string }]> }).entries()) {
+      if (handle.kind === 'file' && !name.endsWith('.tmp')) files.push(name);
     }
     return files;
   } catch {

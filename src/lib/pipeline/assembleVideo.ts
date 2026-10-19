@@ -5,12 +5,20 @@
  * - No more stub code that pretends to work
  */
 
-import { SyncTimeline } from '../storage/db';
-import { getKenBurnsParams, sameImageSpan } from './buildTimeline';
+import { PanelData, SyncTimeline } from '../storage/db';
 import { drawContain } from './draw';
 import { createPlacementScheduler, userFacingOverlaps, type AudioPlacement, type PlacementScheduler } from './audioMix';
 import { frameTime, waitForStart } from './renderClock';
-import { createStripSceneFromMedia, type StripScene } from './mangaStrip';
+import { createStripSceneFromMedia, maxScrollY, type StripScene } from './mangaStrip';
+import {
+  drawDialogue,
+  drawIntroOverlay,
+  drawOutroOverlay,
+  drawPanelWithCamera,
+  sampleCameraFrame,
+  type CameraFrameSample,
+} from './cameraSampler';
+import { yRangeFromBbox } from './yRange';
 
 export interface AssembleOptions {
   images: string[]; // data URLs
@@ -22,6 +30,10 @@ export interface AssembleOptions {
   outroText: string;
   introDuration: number;
   outroDuration: number;
+  /** Реальная длительность интро-аудио (сек), если есть (Задачи 11, 12). */
+  introAudioDuration?: number | null;
+  /** Реальная длительность аутро-аудио (сек), если есть (Задачи 11, 12). */
+  outroAudioDuration?: number | null;
   srtContent: string;
   /** Предупреждения об обрезанных репликах (текстом, для UI). */
   onAudioTrimmed?: (messages: string[]) => void;
@@ -69,10 +81,6 @@ export async function assembleVideoWithCanvas(
 
   const fps = options.fps || 30;
 
-  const panelsEnd = options.timeline.length > 0
-    ? options.timeline[options.timeline.length - 1].audioEnd
-    : options.introDuration;
-
   // Режим ленты: сцена один раз, рендер кадра — по времени.
   const stripScene: StripScene | null = options.renderMode === 'strip'
     ? createStripSceneFromMedia({
@@ -116,6 +124,17 @@ export async function assembleVideoWithCanvas(
       // но resume() вызываем явно и не считаем ошибкой.
       try { await audioContext.resume(); } catch {}
       audioDestination = audioContext.createMediaStreamDestination();
+      // Непрерывный нулевой сигнал для MediaStreamAudioDestinationNode: без активного
+      // узла на паузах и leadIn-задержке мультиплексор MediaRecorder (Opus+VP8/VP9 в Chromium)
+      // не получает аудиопакетов и не сбрасывает кластеры WebM.
+      try {
+        const carrierOsc = audioContext.createOscillator();
+        const carrierGain = audioContext.createGain();
+        carrierGain.gain.value = 0.0001;
+        carrierOsc.connect(carrierGain);
+        carrierGain.connect(audioDestination);
+        carrierOsc.start();
+      } catch {}
       // Планировщик с опережением: в графе живут только ближайшие секунды,
       // а не все 50 источников с декодированными буферами (иначе снова сотни МБ).
       scheduler = await createPlacementScheduler(audioContext, audioDestination, placements, {
@@ -180,6 +199,17 @@ export async function assembleVideoWithCanvas(
     const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 5000000 });
     recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
     recorder.onstop = () => {
+      try {
+        if (chunks.length === 0) {
+          console.warn('[assembleVideo] MediaRecorder onstop with 0 chunks', {
+            mimeType,
+            frameCount,
+            totalDuration,
+            audioStartedAt,
+            ctxTime: audioContext?.currentTime,
+          });
+        }
+      } catch {}
       try { scheduler?.dispose(); } catch {}
       try { audioContext?.close(); } catch {}
       resolve(new Blob(chunks, { type: mimeType || 'video/webm' }));
@@ -210,14 +240,15 @@ export async function assembleVideoWithCanvas(
     let frameCount = 0;
 
     const renderFrame = (time: number) => {
-      ctx.fillStyle = '#000';
-      ctx.fillRect(0, 0, width, height);
-      if (time < options.introDuration) renderIntro(ctx, width, height, options, loadedImages);
-      else if (stripScene && time < panelsEnd) stripScene.render(ctx, time);
-      else if (options.timeline.length > 0 && time < panelsEnd) renderPanel(ctx, width, height, options, time, loadedImages);
-      else renderOutro(ctx, width, height, options, loadedImages);
-      if (options.srtContent) renderSubtitle(ctx, width, height, options.srtContent, time);
-      // NB: полоса прогресса больше не рисуется — она попадала в готовое видео
+      renderExportFrameToCanvas({
+        ctx,
+        width,
+        height,
+        time,
+        options,
+        loadedImages,
+        stripScene,
+      });
     };
 
     // MediaRecorder пишет в реальном времени: кадры ведём по мастер-клоку
@@ -265,40 +296,101 @@ export async function assembleVideoWithCanvas(
   });
 }
 
+/**
+ * Единая точка отрисовки одного кадра экспорта через `sampleCameraFrame`
+ * (Итерация 2, Задачи 7, 8, 11, 12).
+ */
+export function renderExportFrameToCanvas(params: {
+  ctx: CanvasRenderingContext2D;
+  width: number;
+  height: number;
+  time: number;
+  options: AssembleOptions;
+  loadedImages: Map<string, HTMLImageElement>;
+  stripScene?: StripScene | null;
+  showStripProgress?: boolean;
+}): CameraFrameSample {
+  const { ctx, width, height, time, options, loadedImages, stripScene, showStripProgress = false } = params;
+  const renderMode = options.renderMode === 'strip' ? 'strip' : 'panels';
+  const sample = sampleCameraFrame({
+    time,
+    renderMode,
+    panels: (options.panels as PanelData[] | undefined) ?? [],
+    timeline: options.timeline,
+    introDuration: options.introDuration,
+    outroDuration: options.outroDuration,
+    introAudioDuration: options.introAudioDuration,
+    outroAudioDuration: options.outroAudioDuration,
+    stripScene: stripScene ?? null,
+    viewportWidth: width,
+    viewportHeight: height,
+  });
+
+  if (renderMode === 'strip' && stripScene) {
+    const maxY = Math.max(1, maxScrollY(stripScene.layout));
+    stripScene.render(ctx, time, {
+      scrollY: sample.stripScrollY,
+      showProgress: showStripProgress,
+      progress: Math.min(1, Math.max(0, sample.stripScrollY / maxY)),
+    });
+    // Итерация 2.2 (Б-2.1, Б-2.2): на intro/outro в strip рисуем общий оверлей;
+    // на panel/gap плашка drawDialogue не рисуется ни в Preview, ни в Export (чистый вебтун).
+    if (sample.phase === 'intro') {
+      drawIntroOverlay(ctx, width, height, options.introText);
+    } else if (sample.phase === 'outro') {
+      drawOutroOverlay(ctx, width, height, options.outroText);
+    }
+  } else if (sample.phase === 'intro') {
+    renderIntro(ctx, width, height, options, loadedImages, sample);
+  } else if (sample.phase === 'outro') {
+    renderOutro(ctx, width, height, options, loadedImages, sample);
+  } else {
+    renderPanel(ctx, width, height, options, time, loadedImages, sample);
+  }
+
+  if (options.srtContent) {
+    renderSubtitle(ctx, width, height, options.srtContent, time);
+  }
+
+  return sample;
+}
+
 function renderIntro(
   ctx: CanvasRenderingContext2D,
   w: number,
   h: number,
   options: AssembleOptions,
-  loadedImages: Map<string, HTMLImageElement>
+  loadedImages: Map<string, HTMLImageElement>,
+  sample?: CameraFrameSample
 ) {
-  const gradient = ctx.createLinearGradient(0, 0, w, h);
-  gradient.addColorStop(0, '#1e1b4b');
-  gradient.addColorStop(1, '#312e81');
-  ctx.fillStyle = gradient;
+  // Этап 3.1 (Н-3.1): единая схема фона с Preview (без createLinearGradient):
+  // #0B0B0C -> drawPanelWithCamera -> rgba(11,11,12,0.25) -> drawIntroOverlay
+  ctx.fillStyle = '#0B0B0C';
   ctx.fillRect(0, 0, w, h);
 
-  if (options.images[0]) {
-    const img = loadedImages.get(options.images[0]);
+  const displayPanel = sample?.displayPanel ?? (options.panels?.[0] as PanelData | undefined) ?? null;
+  const imgIdx = displayPanel?.imageIndex ?? sample?.moment.displaySegment?.imageIndex ?? 0;
+  const imgUrl = options.images[imgIdx] ?? options.images[0];
+  if (imgUrl) {
+    const img = loadedImages.get(imgUrl);
     if (img) {
-      drawImageCover(ctx, img, w, h, 0.3);
+      if (displayPanel?.fullFrame) {
+        drawContain(ctx, img, w, h);
+      } else {
+        const progress =
+          sample && sample.cameraMotion === 'hold'
+            ? 0
+            : (sample?.panelProgress ?? 0);
+        const yRange: [number, number] = sample?.yRange ?? [0, 100];
+        drawPanelWithCamera(ctx, img, w, h, yRange, progress);
+      }
     }
   }
 
-  ctx.fillStyle = 'rgba(0,0,0,0.6)';
-  ctx.fillRect(0, h * 0.6, w, h * 0.4);
+  ctx.fillStyle = 'rgba(11,11,12,0.25)';
+  ctx.fillRect(0, 0, w, h);
 
-  ctx.fillStyle = '#fff';
-  ctx.font = `bold ${Math.floor(w * 0.035)}px system-ui, sans-serif`;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  
-  const lines = wrapText(ctx, options.introText || 'Добро пожаловать в мир манги...', w * 0.8);
-  let y = h * 0.7;
-  for (const line of lines.slice(0, 3)) {
-    ctx.fillText(line, w / 2, y);
-    y += Math.floor(w * 0.04);
-  }
+  drawIntroOverlay(ctx, w, h, options.introText);
 }
 
 function renderPanel(
@@ -307,105 +399,67 @@ function renderPanel(
   h: number,
   options: AssembleOptions,
   currentTime: number,
-  loadedImages: Map<string, HTMLImageElement>
+  loadedImages: Map<string, HTMLImageElement>,
+  sample?: CameraFrameSample
 ) {
-  const currentPanel = options.timeline.find(t => currentTime >= t.audioStart && currentTime < t.audioEnd) 
-    || options.timeline[options.timeline.length - 1];
+  const currentPanel =
+    sample?.moment.displaySegment ??
+    options.timeline.find(t => currentTime >= t.audioStart && currentTime < t.audioEnd) ??
+    options.timeline[options.timeline.length - 1];
+  const panelObj =
+    sample?.displayPanel ??
+    (currentPanel ? (options.panels?.find(p => p.id === currentPanel.panelId) as PanelData | undefined) : undefined) ??
+    null;
 
-  if (!currentPanel) {
-    ctx.fillStyle = '#111';
+  if (!currentPanel && !panelObj) {
+    ctx.fillStyle = '#0B0B0C';
     ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = '#8A8A93';
+    ctx.font = '14px JetBrains Mono';
+    ctx.textAlign = 'center';
+    ctx.fillText('Нет панелей', w / 2, h / 2);
     return;
   }
 
-  const imageDataUrl = options.images[currentPanel.imageIndex];
+  const imgIdx = panelObj?.imageIndex ?? currentPanel?.imageIndex ?? 0;
+  const imageDataUrl = options.images[imgIdx];
   const img = imageDataUrl ? loadedImages.get(imageDataUrl) : null;
 
-  // «Весь кадр» (сценарий): contain + letterbox, камера выключена,
-  // bbox-обводку и бейдж персонажа не рисуем.
-  const isFullFrame = options.panels?.find(p => p.id === currentPanel.panelId)?.fullFrame === true;
+  // «Весь кадр» (сценарий): contain + letterbox, камера выключена.
+  const isFullFrame = Boolean(panelObj?.fullFrame);
+
+  ctx.fillStyle = '#0B0B0C';
+  ctx.fillRect(0, 0, w, h);
 
   if (img) {
     if (isFullFrame) {
       drawContain(ctx, img, w, h);
     } else {
-      // Прогресс камеры — по группе соседних панелей одного изображения,
-      // направление — с начала группы: зум не «скачет» между панелями страницы.
-      const span = sameImageSpan(options.timeline, currentPanel.panelId);
-      const panelIndex = span ? span.startIndex : options.timeline.indexOf(currentPanel);
-      const progress = span
-        ? Math.min(1, Math.max(0, (currentTime - span.start) / (span.end - span.start || 1)))
-        : 0;
-      const kb = getKenBurnsParams(panelIndex);
-      const scale = kb.startScale + (kb.endScale - kb.startScale) * progress;
-      const xOffset = (kb.startX + (kb.endX - kb.startX) * progress) * w;
-      const yOffset = (kb.startY + (kb.endY - kb.startY) * progress) * h;
-
-      // FIX BUG #3: Apply Ken Burns correctly without double transform
-      // Calculate cover dimensions first, then apply scale and offset
-      drawImageCoverWithKenBurns(ctx, img, w, h, 1, scale, xOffset, yOffset);
+      // Итерация 2.1 (Б1): экспорт в режиме panels использует sample.yRange + sample.panelProgress
+      // через общий drawPanelWithCamera (побитовое совпадение с Preview.tsx)
+      const progress = sample
+        ? (sample.phase === 'intro' || sample.phase === 'outro') && sample.cameraMotion === 'hold'
+          ? 0
+          : sample.panelProgress
+        : currentPanel
+          ? Math.min(
+              1,
+              Math.max(0, (currentTime - currentPanel.audioStart) / Math.max(1e-6, currentPanel.audioEnd - currentPanel.audioStart))
+            )
+          : 0;
+      const bbox = panelObj?.bbox ?? currentPanel?.panelBbox ?? { x: 0, y: 0, width: 100, height: 100 };
+      const fallbackRange = yRangeFromBbox(bbox, isFullFrame);
+      const yRange: [number, number] = sample?.yRange ?? (fallbackRange ? [fallbackRange.from, fallbackRange.to] : [0, 100]);
+      drawPanelWithCamera(ctx, img, w, h, yRange, progress);
     }
   }
 
-  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.fillStyle = 'rgba(11,11,12,0.25)';
   ctx.fillRect(0, 0, w, h);
 
-  if (!isFullFrame) {
-    const bbox = currentPanel.panelBbox;
-    const bx = (bbox.x / 100) * w;
-    const by = (bbox.y / 100) * h;
-    const bw = (bbox.width / 100) * w;
-    const bh = (bbox.height / 100) * h;
-
-    ctx.strokeStyle = '#6366f1';
-    ctx.lineWidth = 4;
-    ctx.shadowColor = '#6366f1';
-    ctx.shadowBlur = 20;
-    ctx.beginPath();
-    // @ts-ignore - roundRect may not be in all browsers
-    if (ctx.roundRect) {
-      ctx.roundRect(bx, by, bw, bh, 12);
-    } else {
-      ctx.rect(bx, by, bw, bh);
-    }
-    ctx.stroke();
-    ctx.shadowBlur = 0;
-
-    ctx.fillStyle = 'rgba(99, 102, 241, 0.9)';
-    const badgeText = currentPanel.character;
-    ctx.font = 'bold 14px system-ui, sans-serif';
-    const textMetrics = ctx.measureText(badgeText);
-    const badgeWidth = textMetrics.width + 24;
-    ctx.beginPath();
-    if (ctx.roundRect) {
-      ctx.roundRect(bx, Math.max(0, by - 32), badgeWidth, 24, 6);
-    } else {
-      ctx.rect(bx, Math.max(0, by - 32), badgeWidth, 24);
-    }
-    ctx.fill();
-    ctx.fillStyle = '#fff';
-    ctx.textAlign = 'left';
-    ctx.fillText(badgeText, bx + 12, Math.max(0, by - 32) + 16);
-  }
-
-  ctx.fillStyle = 'rgba(0,0,0,0.75)';
-  ctx.beginPath();
-  if (ctx.roundRect) {
-    ctx.roundRect(w * 0.05, h * 0.75, w * 0.9, h * 0.2, 16);
-  } else {
-    ctx.rect(w * 0.05, h * 0.75, w * 0.9, h * 0.2);
-  }
-  ctx.fill();
-
-  ctx.fillStyle = '#fff';
-  ctx.font = `${Math.floor(w * 0.022)}px system-ui, sans-serif`;
-  ctx.textAlign = 'center';
-  const dialogueLines = wrapText(ctx, currentPanel.text, w * 0.8);
-  let dy = h * 0.82;
-  for (const line of dialogueLines.slice(0, 3)) {
-    ctx.fillText(line, w / 2, dy);
-    dy += Math.floor(w * 0.03);
-  }
+  const dialogueText = panelObj?.dialogue ?? currentPanel?.text ?? '';
+  const characterName = panelObj?.character ?? currentPanel?.character ?? '';
+  drawDialogue(ctx, w, h, dialogueText, characterName, true);
 }
 
 function renderOutro(
@@ -413,45 +467,44 @@ function renderOutro(
   w: number,
   h: number,
   options: AssembleOptions,
-  loadedImages: Map<string, HTMLImageElement>
+  loadedImages: Map<string, HTMLImageElement>,
+  sample?: CameraFrameSample
 ) {
-  const gradient = ctx.createLinearGradient(0, 0, w, h);
-  gradient.addColorStop(0, '#0f0f0f');
-  gradient.addColorStop(1, '#27272a');
-  ctx.fillStyle = gradient;
+  // Этап 3.1 (Н-3.1): единая схема фона с Preview (без createLinearGradient):
+  // #0B0B0C -> drawPanelWithCamera -> rgba(11,11,12,0.25) -> drawOutroOverlay
+  ctx.fillStyle = '#0B0B0C';
   ctx.fillRect(0, 0, w, h);
 
-  if (options.images[options.images.length - 1]) {
-    const img = loadedImages.get(options.images[options.images.length - 1]);
+  const displayPanel =
+    sample?.displayPanel ??
+    (options.panels && options.panels.length > 0
+      ? (options.panels[options.panels.length - 1] as PanelData)
+      : null);
+  const imgIdx =
+    displayPanel?.imageIndex ??
+    sample?.moment.displaySegment?.imageIndex ??
+    Math.max(0, options.images.length - 1);
+  const imgUrl = options.images[imgIdx] ?? options.images[options.images.length - 1];
+  if (imgUrl) {
+    const img = loadedImages.get(imgUrl);
     if (img) {
-      drawImageCover(ctx, img, w, h, 0.25);
+      if (displayPanel?.fullFrame) {
+        drawContain(ctx, img, w, h);
+      } else {
+        const progress =
+          sample && sample.cameraMotion === 'hold'
+            ? 0
+            : (sample?.panelProgress ?? 0);
+        const yRange: [number, number] = sample?.yRange ?? [0, 100];
+        drawPanelWithCamera(ctx, img, w, h, yRange, progress);
+      }
     }
   }
 
-  ctx.fillStyle = 'rgba(0,0,0,0.6)';
-  ctx.fillRect(0, h * 0.3, w, h * 0.4);
+  ctx.fillStyle = 'rgba(11,11,12,0.25)';
+  ctx.fillRect(0, 0, w, h);
 
-  ctx.fillStyle = '#fff';
-  ctx.font = `bold ${Math.floor(w * 0.032)}px system-ui, sans-serif`;
-  ctx.textAlign = 'center';
-  const lines = wrapText(ctx, options.outroText || 'Спасибо за просмотр! Подписывайтесь!', w * 0.8);
-  let y = h * 0.45;
-  for (const line of lines.slice(0, 3)) {
-    ctx.fillText(line, w / 2, y);
-    y += Math.floor(w * 0.04);
-  }
-
-  ctx.fillStyle = '#6366f1';
-  ctx.beginPath();
-  if (ctx.roundRect) {
-    ctx.roundRect(w * 0.35, h * 0.65, w * 0.3, h * 0.08, 12);
-  } else {
-    ctx.rect(w * 0.35, h * 0.65, w * 0.3, h * 0.08);
-  }
-  ctx.fill();
-  ctx.fillStyle = '#fff';
-  ctx.font = `bold ${Math.floor(w * 0.022)}px system-ui, sans-serif`;
-  ctx.fillText('Подписаться', w / 2, h * 0.695);
+  drawOutroOverlay(ctx, w, h, options.outroText);
 }
 
 function renderSubtitle(ctx: CanvasRenderingContext2D, w: number, h: number, srt: string, time: number) {
@@ -477,89 +530,6 @@ function renderSubtitle(ctx: CanvasRenderingContext2D, w: number, h: number, srt
   ctx.fillStyle = '#fff';
   ctx.textAlign = 'center';
   ctx.fillText(current.text, w / 2, h - 55);
-}
-
-function drawImageCover(ctx: CanvasRenderingContext2D, img: HTMLImageElement, w: number, h: number, alpha: number) {
-  ctx.globalAlpha = alpha;
-  const imgAspect = img.width / img.height;
-  const canvasAspect = w / h;
-  let drawWidth, drawHeight, offsetX, offsetY;
-
-  if (imgAspect > canvasAspect) {
-    drawHeight = h;
-    drawWidth = drawHeight * imgAspect;
-    offsetX = (w - drawWidth) / 2;
-    offsetY = 0;
-  } else {
-    drawWidth = w;
-    drawHeight = drawWidth / imgAspect;
-    offsetX = 0;
-    offsetY = (h - drawHeight) / 2;
-  }
-
-  ctx.drawImage(img, offsetX, offsetY, drawWidth, drawHeight);
-  ctx.globalAlpha = 1;
-}
-
-function drawImageCoverWithKenBurns(
-  ctx: CanvasRenderingContext2D,
-  img: HTMLImageElement,
-  w: number,
-  h: number,
-  alpha: number,
-  scale: number,
-  xOffset: number,
-  yOffset: number
-) {
-  ctx.globalAlpha = alpha;
-  const imgAspect = img.width / img.height;
-  const canvasAspect = w / h;
-  let drawWidth, drawHeight, baseOffsetX, baseOffsetY;
-
-  if (imgAspect > canvasAspect) {
-    drawHeight = h;
-    drawWidth = drawHeight * imgAspect;
-    baseOffsetX = (w - drawWidth) / 2;
-    baseOffsetY = 0;
-  } else {
-    drawWidth = w;
-    drawHeight = drawWidth / imgAspect;
-    baseOffsetX = 0;
-    baseOffsetY = (h - drawHeight) / 2;
-  }
-
-  // Apply Ken Burns scale and offset correctly with margin clamp to avoid exposed edges
-  const scaledWidth = drawWidth * scale;
-  const scaledHeight = drawHeight * scale;
-
-  // Maximum pan to avoid exposing background: (scaled - original)/2
-  const maxXOffset = (scaledWidth - w) / 2;
-  const maxYOffset = (scaledHeight - h) / 2;
-  const clampedXOffset = Math.max(-maxXOffset, Math.min(maxXOffset, xOffset));
-  const clampedYOffset = Math.max(-maxYOffset, Math.min(maxYOffset, yOffset));
-
-  const offsetX = baseOffsetX * scale + clampedXOffset - (scaledWidth - drawWidth) / 2;
-  const offsetY = baseOffsetY * scale + clampedYOffset - (scaledHeight - drawHeight) / 2;
-
-  ctx.drawImage(img, offsetX, offsetY, scaledWidth, scaledHeight);
-  ctx.globalAlpha = 1;
-}
-
-function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
-  const words = text.split(' ');
-  const lines: string[] = [];
-  let current = '';
-  for (const word of words) {
-    const test = current ? `${current} ${word}` : word;
-    if (ctx.measureText(test).width > maxWidth && current) {
-      lines.push(current);
-      current = word;
-    } else {
-      current = test;
-    }
-  }
-  if (current) lines.push(current);
-  return lines;
 }
 
 interface SRTCue {

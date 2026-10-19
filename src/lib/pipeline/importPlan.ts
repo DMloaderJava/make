@@ -11,8 +11,8 @@
  *
  * Приоритет сопоставления (строгий, сверху вниз):
  *   1. ручное назначение (manualOverrides) — явный выбор в таблице;
- *   2. манифест «Изображение N [X..Y%] = файл»;
- *   3. имя файла = якорь («Изображение 1 [0..30%].mp3»);
+ *   2. манифест «Изображение N [X..Y%] = файл» или «panel-0007 = файл»;
+ *   3. имя файла = якорь («Изображение 1 [0..30%].mp3» или «panel-0007.mp3»);
  *   4. числовой фрагмент в имени («003.mp3», «voice_01.wav») → N-я цель по порядку,
  *      если номер есть у ВСЕХ оставшихся файлов;
  *      иначе — natural sort оставшихся файлов 1:1 с оставшимися целями
@@ -28,8 +28,12 @@ import { anchorFor, parseImageAnchor } from './scenarioFormat';
 export interface ImportFileRef {
   name: string;
   size?: number;
-  /** Длительность (аудио), если уже известна — только для отображения. */
+  /** Длительность (аудио), если уже известна — только для отображения (Этап 2 п. 17). */
   duration?: number;
+  /** SHA-256 содержимого файла (Этап 2 п. 16: обнаружение дубликатов содержимого). */
+  sha256?: string;
+  /** Ошибка предварительного декодирования до импорта (Этап 2 п. 18). */
+  decodeError?: string;
 }
 
 export type ImportVia = 'manual' | 'manifest' | 'name' | 'number' | 'order';
@@ -159,6 +163,17 @@ export function fileExtension(name: string): string {
 }
 
 /**
+ * Распознаёт явный идентификатор панели вида `panel-0007`, `panel_7`, `панель 7`
+ * (Этап 2, пункт 14). Возвращает неотрицательное целое число или null.
+ */
+export function parsePanelIdAnchor(text: string): number | null {
+  const m = nfc(text).trim().match(/^(?:panel|панель)[\s._\-:#]+0*(\d+)$/i);
+  if (!m) return null;
+  const n = parseInt(m[1], 10);
+  return Number.isSafeInteger(n) && n >= 0 ? n : null;
+}
+
+/**
  * Первый числовой фрагмент в имени файла: «003» → 3,
  * «01 - Аня» → 1, «voice_7_take» → 7; цифры в расширении не учитываются.
  */
@@ -202,7 +217,7 @@ export function parseManifest(text: string): { lines: ManifestLine[]; errors: st
     const eq = line.indexOf('=');
     const anchorText = eq === -1 ? line : line.slice(0, eq).trim();
     const file = eq === -1 ? '' : stripQuotes(line.slice(eq + 1));
-    if (eq === -1 || !parseImageAnchor(anchorText)) {
+    if (eq === -1 || (!parseImageAnchor(anchorText) && parsePanelIdAnchor(anchorText) === null)) {
       errors.push(`Манифест, строка ${lineNo}: не разобран якорь — формат «Изображение N [X..Y%] = файл»`);
       return;
     }
@@ -244,13 +259,38 @@ export function planImport<TTarget>(opts: PlanImportOptions<TTarget>): ImportPla
   }
   const labelOf = (t: TTarget) => opts.targetLabel(t);
 
-  // --- Файлы: нормализация, дубли имён ---
+  const resolvePanelIdTarget = (panelNum: number): TTarget | undefined => {
+    const byExplicitId = byId.get(String(panelNum));
+    if (byExplicitId) return byExplicitId;
+    if (panelNum >= 1 && panelNum <= sortedTargets.length) {
+      return sortedTargets[panelNum - 1];
+    }
+    return undefined;
+  };
+
+  // --- Файлы: нормализация, дубли имён, дубли по SHA-256 и ошибки декода ---
   const files = [...opts.files].sort((a, b) => naturalCompare(nfc(a.name), nfc(b.name)));
   const fileByNfc = new Map<string, string>();
+  const seenHashes = new Map<string, string>();
   for (const f of files) {
     const key = nfc(f.name);
-    if (fileByNfc.has(key)) errors.push(`Файл «${f.name}» загружен дважды — оставьте один`);
-    else fileByNfc.set(key, f.name);
+    if (fileByNfc.has(key)) {
+      errors.push(`Файл «${f.name}» загружен дважды — оставьте один`);
+      continue;
+    }
+    if (f.decodeError) {
+      errors.push(`Файл «${f.name}»: ошибка декодирования (${f.decodeError})`);
+      continue;
+    }
+    if (f.sha256) {
+      const prevSameHash = seenHashes.get(f.sha256);
+      if (prevSameHash && prevSameHash !== f.name) {
+        errors.push(`Дубликат содержимого: файлы «${prevSameHash}» и «${f.name}» идентичны по SHA-256`);
+        continue;
+      }
+      seenHashes.set(f.sha256, f.name);
+    }
+    fileByNfc.set(key, f.name);
   }
   const fileNames = [...fileByNfc.values()];
 
@@ -361,6 +401,23 @@ export function planImport<TTarget>(opts: PlanImportOptions<TTarget>): ImportPla
     errors.push(...parsed.errors);
     for (const line of parsed.lines) {
       const where = `Манифест, строка ${line.lineNo}`;
+      const panelNum = parsePanelIdAnchor(line.anchorText);
+      if (panelNum !== null) {
+        const file = resolveFile(line.file);
+        if (!file) {
+          errors.push(`Манифест: файл «${line.file}» не найден среди загруженных`);
+          continue;
+        }
+        const target = resolvePanelIdTarget(panelNum);
+        if (!target) {
+          errors.push(`${where}: нет ${nouns.genitiveSingular} «${line.anchorText}»`);
+          continue;
+        }
+        if (fileTaken.get(file)?.via === 'manual') continue;
+        claim(file, target, 'manifest');
+        continue;
+      }
+
       const anchor = parseImageAnchor(line.anchorText);
       if (!anchor) continue; // уже ошибка в parseManifest
       if (anchor.kind === 'error') {
@@ -377,11 +434,23 @@ export function planImport<TTarget>(opts: PlanImportOptions<TTarget>): ImportPla
     }
   }
 
-  // 3. Имя файла = якорь.
+  // 3. Имя файла = якорь («Изображение 1 [0..30%].mp3» или «panel-0007.mp3»).
   if (opts.allowNameAnchor !== false) {
     for (const file of fileNames) {
       if (fileTaken.has(file)) continue;
-      const anchor = parseImageAnchor(fileStem(nfc(file)));
+      const stem = fileStem(nfc(file));
+      const panelNum = parsePanelIdAnchor(stem);
+      if (panelNum !== null) {
+        const target = resolvePanelIdTarget(panelNum);
+        if (!target) {
+          errors.push(`Файл «${file}»: нет ${nouns.genitiveSingular} «${stem}»`);
+          continue;
+        }
+        claim(file, target, 'name');
+        continue;
+      }
+
+      const anchor = parseImageAnchor(stem);
       if (!anchor) continue;
       if (anchor.kind === 'error') {
         errors.push(`Файл «${file}»: ${anchor.message}`);
@@ -396,7 +465,8 @@ export function planImport<TTarget>(opts: PlanImportOptions<TTarget>): ImportPla
     const rest: string[] = [];
     for (const file of fileNames) {
       if (fileTaken.has(file)) continue;
-      if (parseImageAnchor(fileStem(nfc(file)))) continue; // якорный файл с ошибкой — уже в errors
+      const stem = fileStem(nfc(file));
+      if (parseImageAnchor(stem) || parsePanelIdAnchor(stem) !== null) continue; // якорный файл с ошибкой — уже в errors
       if (looksLikeIntroOutro(file)) {
         warnings.push(`Файл «${file}» похож на интро/аутро — по порядку не раскладывается`);
         continue;

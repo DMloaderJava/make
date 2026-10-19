@@ -43,6 +43,12 @@ jobs:
       - name: "Smoke — прод-сборка стартует"
         run: npm run smoke:server
 
+      # Браузерный smoke на Chromium (Задача 3.1.2 / Н-3.2): загрузка 100×2000 PNG,
+      # применение сценария с 2 панелями, импорт WAV, seek/Play/Pause и экспорт клипа.
+      - name: "Smoke — редактор в Chromium (E2E)"
+        if: runner.os == 'Linux'
+        run: npm run smoke:editor
+
       # Кроссплатформенные проверки (node, без pwsh): версия в package.json не
       # разъехалась по баннерам лаунчеров/README/electron-моста, а .bat соблюдают
       # правила npm-флагов, delayed expansion и %ERRORLEVEL% вне блоков.

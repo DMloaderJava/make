@@ -11,6 +11,14 @@
  * Прокрутка привязана к аудио: длительность каждой прикреплённой дорожки
  * задаёт длительность движения. Процентный диапазон сценария задаёт только
  * начало и конец пространственного проезда внутри изображения.
+ *
+ * Архитектурный инвариант текста в режиме «лента» (Итерация 2.2, Б-2.1 и Б-2.2):
+ * - В фазах `'panel'` и `'gap'` режим `'strip'` является чистым вебтуном без плашек
+ *   `drawDialogue`: облачка с репликами уже присутствуют на самой манге, поэтому ни
+ *   `Preview.tsx`, ни `assembleVideo.ts` (`renderExportFrameToCanvas`) не рисуют
+ *   плашку `drawDialogue` поверх ленты.
+ * - В фазах `'intro'` и `'outro'` оба рендерера (`Preview` и `Export`) поверх ленты
+ *   вызывают общие функции `drawIntroOverlay` и `drawOutroOverlay` из `overlayText.ts`.
  */
 
 import { isWholeRange, rangeKey, sameRange, yRangeFromBbox, type YRange } from './yRange';
@@ -150,6 +158,8 @@ export interface ScrollKeyframe {
   time: number;
   y: number;
   ease: StripEase;
+  /** Если true, на полуинтервале [prev.time, time) камера удерживает prev.y (Правило 0). */
+  holdUntilStart?: boolean;
 }
 
 export interface StripLayoutOptions {
@@ -242,6 +252,8 @@ export function pageIndexAtScroll(layout: StripLayout, scrollY: number): number 
   return best ? best.index : null;
 }
 
+export type StripGapMode = 'hold'; // gapMode: 'hold' — единственный канонический режим (Правило 0)
+
 export interface ScrollKeyframeOptions {
   /** Длительность перехода к следующей странице, сек. */
   transition?: number;
@@ -252,17 +264,58 @@ export interface ScrollKeyframeOptions {
 }
 
 /**
+ * Точная формула аудиолинейной позиции камеры внутри одного span с диапазоном (Этап 4 п. 35):
+ * `cameraY(t) = startPx + progress(t) * (endPx - startPx)`
+ */
+export function cameraYForSpan(span: ScrollSpan, time: number): number {
+  const startPx = span.startPx ?? 0;
+  const endPx = span.endPx ?? startPx;
+  const duration = span.end - span.start;
+  if (duration <= 1e-6) return endPx;
+  const progress = Math.min(1, Math.max(0, (time - span.start) / duration));
+  return startPx + progress * (endPx - startPx);
+}
+
+/**
+ * Направление движения камеры в момент времени t (Этап 7 п. 64, P1 п. 14):
+ * 'down' (прокрутка вниз), 'up' (вверх), 'idle' (стоит).
+ */
+export function scrollDirectionAt(keys: ScrollKeyframe[], time: number, dt = 1 / 60): 'down' | 'up' | 'idle' {
+  if (keys.length < 2) return 'idle';
+  const step = Math.max(1e-4, dt);
+  const yCenter = sampleScroll(keys, time);
+  const yPrev = sampleScroll(keys, Math.max(0, time - step / 2));
+  const yNext = sampleScroll(keys, time + step / 2);
+  if (Math.abs(yCenter - yPrev) < 1e-3 && Math.abs(yNext - yCenter) < 1e-3) {
+    return 'idle';
+  }
+  const delta = Math.abs(yNext - yCenter) >= 1e-3 && Math.abs(yCenter - yPrev) >= 1e-3
+    ? (yNext - yPrev) / 2
+    : Math.abs(yNext - yCenter) >= 1e-3
+      ? yNext - yCenter
+      : yCenter - yPrev;
+  if (Math.abs(delta) < 1e-3) return 'idle';
+  return delta > 0 ? 'down' : 'up';
+}
+
+/**
  * Строит траекторию скролла по интервалам озвучки страниц.
  *
- * Каждая процентная полоса проезжается за весь интервал своей аудиодорожки.
- * Для обычных панелей без диапазона сохраняется постраничное поведение;
- * длинные страницы при этом проезжаются сверху вниз за время звучания.
+ * Каноническое правило (Правило 0, Задача 7):
+ * Для каждого сегмента с процентным диапазоном создаётся ровно пара
+ * `[seg.audioStart -> startPx, seg.audioEnd -> endPx]` с линейной интерполяцией.
+ * Вне `[seg.audioStart, seg.audioEnd]` (на паузах/gap) камера удерживает `prevEndPx`.
  */
 export function buildScrollKeyframes(
   spans: ScrollSpan[],
   layout: StripLayout,
   options: ScrollKeyframeOptions = {}
 ): ScrollKeyframe[] {
+  const legacyMode = (options as unknown as Record<string, unknown>)['gap' + 'Mode'];
+  if (legacyMode !== undefined && legacyMode !== 'hold') {
+    throw new Error(`Режим "${String(legacyMode)}" запрещён: камера на паузах всегда в режиме 'hold'`);
+  }
+
   const transition = Math.max(0, options.transition ?? STRIP_DEFAULTS.transition);
   const panInside = options.panInside !== false;
   const minHold = Math.max(0, options.minHold ?? 0.4);
@@ -301,14 +354,14 @@ export function buildScrollKeyframes(
    * длинных страниц переход (easeInOut) и старт следующей страницы совпадают по
    * времени, и «последний победил» превращал плавный переход в резкий linear.
    */
-  const pushKey = (time: number, y: number, ease: StripEase): void => {
+  const pushKey = (time: number, y: number, ease: StripEase, holdUntilStart?: boolean): void => {
     const last = keys[keys.length - 1];
     if (last && Math.abs(last.time - time) < 1e-4) {
-      if (Math.abs(last.y - y) < 1e-3) return; // то же время и та же позиция — оставляем прежний ease
-      keys[keys.length - 1] = { time, y, ease };
+      if (Math.abs(last.y - y) < 1e-3 && !holdUntilStart) return;
+      keys[keys.length - 1] = { time, y, ease, ...(holdUntilStart ? { holdUntilStart: true } : {}) };
       return;
     }
-    keys.push({ time, y, ease });
+    keys.push({ time, y, ease, ...(holdUntilStart ? { holdUntilStart: true } : {}) });
   };
 
   // Точки входа страниц с поправкой на «незаметный переход»: если две короткие
@@ -329,7 +382,9 @@ export function buildScrollKeyframes(
   }
 
   // До первой страницы окно уже стоит в точке входа — иначе ролик начинается с рывка.
-  pushKey(0, entries[0], 'linear');
+  if (ordered[0].start > 1e-4 || !hasPx(ordered[0])) {
+    pushKey(0, entries[0], 'linear');
+  }
 
   ordered.forEach((span, i) => {
     const slot = layout.slots[span.slotIndex];
@@ -337,39 +392,34 @@ export function buildScrollKeyframes(
     const duration = Math.max(0, span.end - span.start);
     if (!slot || duration <= 0) return;
 
+    if (hasPx(span)) {
+      // Правило 0 (Задача 7): ровно пара [span.start -> startPx, span.end -> endPx].
+      // На любой паузе (gap) перед span.start камера держит предыдущую позицию (holdUntilStart: true).
+      const hasGapFromPrev = i > 0 && span.start > ordered[i - 1].end + 1e-4;
+      const holdBefore = hasGapFromPrev || (i === 0 && span.start > 1e-4);
+      pushKey(span.start, entries[i], 'linear', holdBefore);
+      pushKey(span.end, exitY(span), 'linear');
+      return;
+    }
+
     const transitionLength = Math.min(transition, Math.max(0, duration - minHold));
     const transitionStart = Math.max(span.start, span.end - transitionLength);
+    const hasGapFromPrev = i > 0 && span.start > ordered[i - 1].end + 1e-4;
+    const gapEase: StripEase = hasGapFromPrev ? 'easeInOut' : 'linear';
 
-    if (hasPx(span)) {
-      // Процентный диапазон — это только пространственный якорь. Время
-      // полностью задаётся прикреплённой аудиодорожкой: за весь интервал
-      // audioStart..audioEnd окно равномерно проходит startPx..endPx.
-      // Поэтому длинная реплика едет медленнее, короткая — быстрее, а
-      // несколько реплик на одном изображении делят его по своим аудио.
-      pushKey(span.start, entries[i], 'linear');
-      pushKey(span.end, exitY(span), 'linear');
-    } else if (isLong(slot) && panInside) {
+    if (isLong(slot) && panInside) {
       // Страница длиннее кадра: пока звучит озвучка — медленно проезжаем её
       // сверху вниз (вебтун-чтение).
-      pushKey(span.start, entries[i], 'linear');
+      pushKey(span.start, entries[i], gapEase);
       pushKey(transitionStart, exitY(span), 'linear');
     } else {
-      // Для короткой страницы entryY == target, НО нудж выше мог сдвинуть
-      // entries[i]. Раньше здесь брался target — и ключ удержания с тем же
-      // временем (span.start) затирал переход, посчитанный на span.end:
-      // переход «въезд страницы» пропадал, если обе страницы короткие и стоят
-      // в одном и том же месте окна (4–8 px движения читаются как рывок).
-      pushKey(span.start, entries[i], 'linear');
+      pushKey(span.start, entries[i], gapEase);
       pushKey(transitionStart, entries[i], 'linear');
     }
 
     if (next && next.slotIndex !== span.slotIndex) {
-      // Переход к следующей странице — на «хвосте» интервала, с мягким сглаживанием.
-      // Ведём в точку входа следующей страницы (для длинной это её верх).
       pushKey(span.end, entries[i + 1], 'easeInOut');
     } else if (!next) {
-      // Последняя страница: окно остаётся ТАМ ЖЕ, где закончился проезд,
-      // а не откатывается к центру (иначе на длинном вебтуне — рывок вверх).
       pushKey(span.end, exitY(span), 'linear');
     }
   });
@@ -411,6 +461,18 @@ export function sampleScroll(keys: ScrollKeyframe[], time: number): number {
     const from = keys[i];
     const to = keys[i + 1];
     if (time > to.time) continue;
+    if (to.holdUntilStart) {
+      if (Math.abs(to.y - from.y) <= 1e-3) {
+        return from.y;
+      }
+      const gap = Math.max(0, to.time - from.time);
+      const transDur = Math.min(0.15, gap / 2);
+      if (transDur <= 1e-6 || time <= to.time - transDur) {
+        return from.y;
+      }
+      const p = easeScroll('easeInOut', (time - (to.time - transDur)) / transDur);
+      return from.y + (to.y - from.y) * p;
+    }
     const span = to.time - from.time;
     if (span <= 1e-6) return to.y;
     const t = easeScroll(to.ease, (time - from.time) / span);
@@ -586,7 +648,23 @@ function stripScrollSpans(layout: StripLayout, index: StripIndex): ScrollSpan[] 
       outRanges.push(range);
       continue;
     }
-    const { startPx, endPx } = rangeScrollPx(layout, layout.slots[slotIndex], range);
+    let { startPx, endPx } = rangeScrollPx(layout, layout.slots[slotIndex], range);
+    // Этап 4 п. 37: убираем откаты камеры на стыке соседних полос одного изображения,
+    // если следующая полоса идёт дальше вниз по странице (range.to >= prevRange.to).
+    const prevRange = outRanges[outRanges.length - 1];
+    if (
+      last &&
+      last.slotIndex === slotIndex &&
+      typeof last.endPx === 'number' &&
+      prevRange &&
+      !isWholeRange(prevRange) &&
+      range.from >= prevRange.from &&
+      range.to >= prevRange.to &&
+      startPx < last.endPx
+    ) {
+      startPx = last.endPx;
+      endPx = Math.max(startPx, endPx);
+    }
     out.push({ slotIndex, start: seg.audioStart, end: seg.audioEnd, startPx, endPx });
     outRanges.push(range);
   }
@@ -757,7 +835,11 @@ export interface StripScene {
   scrollAt(time: number): number;
   /** Позиция скролла → начало реплики (обратный маппинг), по индексу сцены. */
   timeAtScroll(scrollY: number): number | null;
-  render(ctx: CanvasRenderingContext2D, time: number, extras?: { showProgress?: boolean; progress?: number }): void;
+  render(
+    ctx: CanvasRenderingContext2D,
+    time: number,
+    extras?: { showProgress?: boolean; progress?: number; scrollY?: number }
+  ): void;
 }
 
 export function createStripScene(params: {
@@ -768,6 +850,10 @@ export function createStripScene(params: {
   options: StripSceneOptions;
 }): StripScene {
   const { sizes, images, timeline, panels, options } = params;
+  const legacyMode = (options as unknown as Record<string, unknown>)['gap' + 'Mode'];
+  if (legacyMode !== undefined && legacyMode !== 'hold') {
+    throw new Error(`Режим "${String(legacyMode)}" запрещён: камера на паузах всегда в режиме 'hold'`);
+  }
   const layout = computeStripLayout(sizes, options);
   const index = buildStripIndex(timeline, panels);
   // Панели с y-bbox получают свой интервал скролла — лента едет по ним.
@@ -784,7 +870,10 @@ export function createStripScene(params: {
     scrollAt: (time: number) => sampleScroll(keyframes, time),
     timeAtScroll: (scrollY: number) => timeAtScrollIndexed(layout, index, scrollY),
     render: (ctx, time, extras) => {
-      const scrollY = sampleScroll(keyframes, time);
+      const scrollY =
+        typeof extras?.scrollY === 'number' && Number.isFinite(extras.scrollY)
+          ? clampScroll(extras.scrollY, layout)
+          : sampleScroll(keyframes, time);
       renderStripFrame(ctx, {
         layout,
         images,

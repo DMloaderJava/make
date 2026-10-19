@@ -29,6 +29,26 @@ export interface AudioPlacement {
   /** Для диагностики: к какой панели относится фрагмент. */
   label?: string;
   role?: AudioRole;
+  /** ID панели, если это реплика (Этап 9 п. 82, 83). */
+  panelId?: number;
+  /** Обрезка начала клипа, сек (Этап 6 п. 52, Этап 9 п. 83). */
+  trimIn?: number;
+  /** Обрезка конца клипа, сек (Этап 6 п. 52, Этап 9 п. 83). */
+  trimOut?: number;
+  /** Множитель громкости клипа (0..2, по умолчанию 1) (Этап 6 п. 58, Этап 9 п. 83). */
+  gain?: number;
+  /** Плавное нарастание громкости в начале клипа, сек (Этап 6 п. 58, Этап 9 п. 83). */
+  fadeIn?: number;
+  /** Плавное затухание громкости в конце клипа, сек (Этап 6 п. 58, Этап 9 п. 83). */
+  fadeOut?: number;
+  /** Заглушена ли дорожка (Этап 6 п. 57, Этап 9 п. 83). */
+  muted?: boolean;
+  /** Режим Solo для дорожки (Этап 6 п. 57, Этап 9 п. 83). */
+  solo?: boolean;
+  /** Максимальная длительность проигрывания (например, если introDuration/outroDuration уменьшен вручную, Задача 12). */
+  maxPlayDuration?: number;
+  /** Синоним maxPlayDuration для явного указания длительности проигрывания фрагмента (Итерация 2.2 Б-2.3). */
+  playDuration?: number;
 }
 
 /** Кэш длительностей: Blob → секунды. Живёт в рамках сессии экспорта. */
@@ -82,6 +102,7 @@ export function cachedBufferBytes(): number {
 export function clearBufferCache(): void {
   bufferCache.clear();
   bufferCacheBytes = 0;
+  decodeContext = null;
 }
 
 export interface PackOverlap {
@@ -106,13 +127,36 @@ export type ProcessedItem<T> = T & {
   start: number;
   /** Запрошенное начало (для диагностики). */
   requestedStart: number;
-  /** Сколько секунд реально играть (после обрезки пересечения/хвоста). */
+  /** Сколько секунд реально играть (после обрезки пересечения/хвоста) — обязательное число > 0 (Этап 3.1 Н-3.5). */
   playDuration: number;
   /** true, если фрагмент пришлось сдвинуть (наложился на предыдущий целиком). */
   shifted: boolean;
   /** true, если фрагмент обрезан по времени следующего. */
   trimmed: boolean;
 };
+
+/** Явно типизированный упакованный фрагмент с обязательным числовым `playDuration > 0` (Этап 3.1 Н-3.5). */
+export type PackedPlacement = ProcessedItem<AudioPlacement & { duration: number }>;
+
+/**
+ * Проверяет инвариант упакованных размещений: у каждого элемента `playDuration`
+ * обязан быть конечным числом строго `> 0` (Этап 3.1 Н-3.5).
+ */
+export function assertValidPackedPlacements(
+  placements: ReadonlyArray<{ playDuration: number; start: number; label?: string }>
+): void {
+  for (const item of placements) {
+    if (
+      typeof item.playDuration !== 'number' ||
+      !Number.isFinite(item.playDuration) ||
+      item.playDuration <= 0
+    ) {
+      throw new Error(
+        `[audioMix] Некорректный playDuration (${String(item.playDuration)}) у фрагмента "${item.label ?? '?'}"`
+      );
+    }
+  }
+}
 
 export interface PackResult<T = { start: number; duration: number; label?: string; role?: AudioRole }> {
   placements: Array<ProcessedItem<T>>;
@@ -202,6 +246,112 @@ export function trimBuffer(buffer: AudioBuffer, seconds: number, sampleRate = bu
     return out;
   } catch {
     return buffer;
+  }
+}
+
+/**
+ * Чистая функция применения trimIn/trimOut, gain, fadeIn/fadeOut и mute к массиву сэмплов канала
+ * (Этап 6 п. 52, 57, 58; Этап 9 п. 83).
+ */
+export function applyEnvelopeAndTrimToChannelData(
+  samples: Float32Array,
+  sampleRate: number,
+  opts: {
+    trimIn?: number;
+    trimOut?: number;
+    maxPlayDuration?: number;
+    gain?: number;
+    fadeIn?: number;
+    fadeOut?: number;
+    muted?: boolean;
+  } = {}
+): Float32Array<ArrayBuffer> {
+  const sr = Math.max(1, sampleRate);
+  const trimInFrames = Math.max(0, Math.round((opts.trimIn ?? 0) * sr));
+  const trimOutFrames = Math.max(0, Math.round((opts.trimOut ?? 0) * sr));
+  const startFrame = Math.min(samples.length, trimInFrames);
+  const afterTrimOutEnd = Math.max(startFrame, samples.length - trimOutFrames);
+  const maxFrames = opts.maxPlayDuration !== undefined && Number.isFinite(opts.maxPlayDuration)
+    ? Math.max(1, Math.round(opts.maxPlayDuration * sr))
+    : afterTrimOutEnd - startFrame;
+  const endFrame = Math.min(afterTrimOutEnd, startFrame + maxFrames);
+  const length = Math.max(1, endFrame - startFrame);
+
+  const out = new Float32Array(length);
+  if (opts.muted) {
+    return out; // заполнен нулями
+  }
+
+  const baseGain = opts.gain !== undefined && Number.isFinite(opts.gain)
+    ? Math.max(0, Math.min(2, opts.gain))
+    : 1;
+  const fadeInFrames = Math.max(0, Math.round((opts.fadeIn ?? 0) * sr));
+  const fadeOutFrames = Math.max(0, Math.round((opts.fadeOut ?? 0) * sr));
+
+  for (let i = 0; i < length; i++) {
+    let g = baseGain;
+    if (fadeInFrames > 0 && i < fadeInFrames) {
+      g *= i / fadeInFrames;
+    }
+    const fromEnd = length - 1 - i;
+    if (fadeOutFrames > 0 && fromEnd < fadeOutFrames) {
+      g *= fromEnd / fadeOutFrames;
+    }
+    const raw = samples[startFrame + i] ?? 0;
+    out[i] = Math.max(-1, Math.min(1, raw * g));
+  }
+  return out;
+}
+
+/**
+ * Применяет trimIn/trimOut, gain, fadeIn/fadeOut и mute к AudioBuffer (Этап 9 п. 83).
+ */
+export function applyPlacementEnvelope(
+  buffer: AudioBuffer,
+  item: Pick<AudioPlacement, 'trimIn' | 'trimOut' | 'gain' | 'fadeIn' | 'fadeOut' | 'muted'> & { playDuration: number },
+  sampleRate = buffer.sampleRate
+): AudioBuffer {
+  const hasNleParams =
+    (item.trimIn ?? 0) > 1e-4 ||
+    (item.trimOut ?? 0) > 1e-4 ||
+    (item.gain !== undefined && Math.abs(item.gain - 1) > 1e-4) ||
+    (item.fadeIn ?? 0) > 1e-4 ||
+    (item.fadeOut ?? 0) > 1e-4 ||
+    item.muted === true;
+
+  if (!hasNleParams) {
+    return trimBuffer(buffer, item.playDuration, sampleRate);
+  }
+
+  try {
+    const ch0 = applyEnvelopeAndTrimToChannelData(buffer.getChannelData(0), sampleRate, {
+      trimIn: item.trimIn,
+      trimOut: item.trimOut,
+      maxPlayDuration: item.playDuration,
+      gain: item.gain,
+      fadeIn: item.fadeIn,
+      fadeOut: item.fadeOut,
+      muted: item.muted,
+    });
+    // Итерация 2.2 (P1-6): applyEnvelopeAndTrimToChannelData возвращает Float32Array<ArrayBuffer>
+    // (новый буфер в памяти), поэтому copyToChannel вызывается без небезопасного as-каста.
+    const out = getDecodeContext().createBuffer(buffer.numberOfChannels, ch0.length, sampleRate);
+    out.copyToChannel(ch0, 0);
+    for (let ch = 1; ch < buffer.numberOfChannels; ch++) {
+      const processed = applyEnvelopeAndTrimToChannelData(buffer.getChannelData(ch), sampleRate, {
+        trimIn: item.trimIn,
+        trimOut: item.trimOut,
+        maxPlayDuration: item.playDuration,
+        gain: item.gain,
+        fadeIn: item.fadeIn,
+        fadeOut: item.fadeOut,
+        muted: item.muted,
+      });
+      out.copyToChannel(processed, ch);
+    }
+    return out;
+  } catch {
+    return trimBuffer(buffer, item.playDuration, sampleRate);
   }
 }
 
@@ -365,7 +515,19 @@ export async function measurePlacements(
   const durations: number[] = [];
 
   for (const placement of placements) {
-    durations.push(await measureBlobDuration(placement.blob, sampleRate, channels));
+    const raw = await measureBlobDuration(placement.blob, sampleRate, channels);
+    const trimIn = Math.max(0, placement.trimIn ?? 0);
+    const trimOut = Math.max(0, placement.trimOut ?? 0);
+    let effective = raw > 0 ? Math.max(0.05, raw - trimIn - trimOut) : 0;
+    const explicitPlayLimit = placement.maxPlayDuration ?? placement.playDuration;
+    if (
+      explicitPlayLimit !== undefined &&
+      Number.isFinite(explicitPlayLimit) &&
+      explicitPlayLimit > 0
+    ) {
+      effective = Math.min(effective, explicitPlayLimit);
+    }
+    durations.push(effective);
   }
 
   return durations;
@@ -393,12 +555,24 @@ export async function planPlacements(
   placements: AudioPlacement[],
   options: { sampleRate?: number; channels?: number; minDuration?: number } = {}
 ): Promise<{ plan: PackResult<AudioPlacement & { duration: number }>; durations: number[] }> {
+  for (const placement of placements) {
+    if ('playDuration' in placement) {
+      assertValidPackedPlacements([
+        {
+          start: placement.start,
+          playDuration: placement.playDuration as number,
+          label: placement.label,
+        },
+      ]);
+    }
+  }
   const durations = await measurePlacements(placements, options);
   const items = placements.map((placement, i) => ({
     ...placement,
     duration: durations[i],
   }));
   const plan = packStarts(items, { minDuration: options.minDuration });
+  assertValidPackedPlacements(plan.placements);
   reportOverlaps(plan.overlaps);
   return { plan, durations };
 }
@@ -554,7 +728,7 @@ export async function createPlacementScheduler(
  */
 export async function mixAudioPlacements(
   placements: AudioPlacement[],
-  totalDuration: number,
+  totalDuration = 0,
   options: { sampleRate?: number; channels?: number } = {}
 ): Promise<MixedAudio | null> {
   if (placements.length === 0) return null;
@@ -566,15 +740,24 @@ export async function mixAudioPlacements(
   // и только потом каждый фрагмент декодируется ещё раз и попадает в микс.
   const { plan } = await planPlacements(placements, { sampleRate, channels });
   if (plan.placements.length === 0) return null;
+  assertValidPackedPlacements(plan.placements);
 
-  const duration = Math.max(totalDuration, plan.totalDuration);
-  const frames = Math.max(1, Math.ceil(duration * sampleRate));
+  // Итерация 2.2 (Б-2.3): вычисляем maxEnd по упакованным размещениям (start + playDuration)
+  // и берём effectiveDuration = Math.max(totalDuration, plan.totalDuration, maxEnd),
+  // чтобы вызов mixAudioPlacements(placements) без аргумента totalDuration давал точную длину буфера.
+  const maxEnd = plan.placements.reduce(
+    (acc, item) => Math.max(acc, item.start + item.playDuration),
+    0
+  );
+  const effectiveDuration = Math.max(totalDuration, plan.totalDuration, maxEnd);
+  const frames = Math.max(1, Math.ceil(effectiveDuration * sampleRate));
 
   const OfflineCtor = getOfflineCtor();
   const offline = new OfflineCtor(channels, frames, sampleRate);
   for (const packed of plan.placements) {
-    const buffer = await decodeToTarget(packed.blob, sampleRate, channels);
-    if (!buffer) continue;
+    const rawBuffer = await decodeToTarget(packed.blob, sampleRate, channels);
+    if (!rawBuffer) continue;
+    const buffer = applyPlacementEnvelope(rawBuffer, packed, sampleRate);
     const src = offline.createBufferSource();
     src.buffer = buffer;
     src.connect(offline.destination);
@@ -613,12 +796,121 @@ export async function appendPlacements(
       await audioSource.add(createSilence(ctx, gap, sampleRate, channels));
       cursor += gap;
     }
-    const buffer = await decodeToTarget(packed.blob, sampleRate, channels);
-    if (buffer) {
-      await audioSource.add(trimBuffer(buffer, packed.playDuration, sampleRate));
-      cursor += Math.min(packed.playDuration, buffer.duration);
+    const rawBuffer = await decodeToTarget(packed.blob, sampleRate, channels);
+    if (rawBuffer) {
+      const processed = applyPlacementEnvelope(rawBuffer, packed, sampleRate);
+      await audioSource.add(processed);
+      cursor += Math.min(packed.playDuration, processed.duration);
     }
   }
 
   return { duration: cursor, overlaps: plan.overlaps };
+}
+
+/**
+ * Собирает раскладку `AudioPlacement[]` напрямую из `SyncTimeline` и `PanelData[]`
+ * (Этап 9 п. 82, 83):
+ * - экспортирует импортированное и существующее аудио напрямую без повторного синтеза TTS;
+ * - прокидывает `trimIn`, `trimOut`, `gain`, `fadeIn`, `fadeOut`, `muted` и `solo`;
+ * - поддерживает разрезанные (`splitParentId`) клипы, использующие аудио родительской панели.
+ */
+export function buildTimelineAudioPlacements(params: {
+  timeline: ReadonlyArray<{
+    panelId: number;
+    audioStart: number;
+    audioEnd: number;
+    trimIn?: number;
+    trimOut?: number;
+    gain?: number;
+    fadeIn?: number;
+    fadeOut?: number;
+    muted?: boolean;
+    solo?: boolean;
+  }>;
+  panels: ReadonlyArray<{
+    id: number;
+    character?: string;
+    sourceAudioPanelId?: number;
+    splitParentId?: number;
+    trimIn?: number;
+    trimOut?: number;
+    gain?: number;
+    fadeIn?: number;
+    fadeOut?: number;
+    muted?: boolean;
+    solo?: boolean;
+  }>;
+  panelBlobs: ReadonlyMap<number, Blob>;
+  introAudio?: Blob | null;
+  outroAudio?: Blob | null;
+  introDuration?: number;
+  outroDuration?: number;
+}): AudioPlacement[] {
+  const {
+    timeline,
+    panels,
+    panelBlobs,
+    introAudio,
+    outroAudio,
+    introDuration = 0,
+    outroDuration,
+  } = params;
+
+  const panelById = new Map(panels.map(p => [p.id, p]));
+  const hasSolo = timeline.some(t => t.solo === true) || panels.some(p => p.solo === true);
+  const placements: AudioPlacement[] = [];
+
+  if (introAudio) {
+    placements.push({
+      start: 0,
+      blob: introAudio,
+      label: 'Интро',
+      role: 'intro',
+      muted: hasSolo,
+      ...(introDuration > 0 ? { maxPlayDuration: introDuration } : {}),
+    });
+  }
+
+  for (const seg of timeline) {
+    const panel = panelById.get(seg.panelId);
+    const parentId = panel?.sourceAudioPanelId ?? panel?.splitParentId;
+    const blob =
+      panelBlobs.get(seg.panelId) ??
+      (parentId !== undefined ? panelBlobs.get(parentId) : undefined);
+    if (!blob) continue;
+
+    const solo = seg.solo ?? panel?.solo ?? false;
+    const muted = Boolean(seg.muted ?? panel?.muted) || (hasSolo && !solo);
+    const segSpan = Math.max(0.05, seg.audioEnd - seg.audioStart);
+
+    placements.push({
+      start: seg.audioStart,
+      blob,
+      panelId: seg.panelId,
+      label: `Панель ${seg.panelId}${panel?.character ? ` · ${panel.character}` : ''}`,
+      role: 'panel',
+      trimIn: seg.trimIn ?? panel?.trimIn ?? 0,
+      trimOut: seg.trimOut ?? panel?.trimOut ?? 0,
+      gain: seg.gain ?? panel?.gain ?? 1,
+      fadeIn: seg.fadeIn ?? panel?.fadeIn ?? 0,
+      fadeOut: seg.fadeOut ?? panel?.fadeOut ?? 0,
+      muted,
+      solo,
+      maxPlayDuration: segSpan,
+    });
+  }
+
+  if (outroAudio) {
+    const lastEnd = timeline.length > 0 ? timeline[timeline.length - 1].audioEnd : introDuration;
+    placements.push({
+      start: lastEnd,
+      blob: outroAudio,
+      label: 'Аутро',
+      role: 'outro',
+      muted: hasSolo,
+      ...(outroDuration !== undefined && outroDuration > 0 ? { maxPlayDuration: outroDuration } : {}),
+    });
+  }
+
+  return placements;
 }
