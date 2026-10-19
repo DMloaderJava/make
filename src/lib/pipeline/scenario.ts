@@ -26,6 +26,7 @@
 
 import { PanelData } from './extractPanels';
 import { rebuildSrt } from './buildTimeline';
+import { CURRENT_TIMELINE_VERSION } from '../storage/db';
 import {
   SCENARIO_IMAGE_LABEL,
   formatImageAnchor,
@@ -305,11 +306,14 @@ export interface ScenarioProjectPatch {
   outro: string;
   introDuration: number;
   outroDuration: number;
+  timelineVersion: number;
   warnings: string[];
 }
 
 export function applyScenarioToProject(
-  project: Pick<Project, 'panels' | 'characters' | 'intro' | 'outro' | 'introDuration' | 'outroDuration'>,
+  project: Pick<Project, 'panels' | 'characters' | 'intro' | 'outro' | 'introDuration' | 'outroDuration'> & {
+    timelineVersion?: number;
+  },
   lines: ScenarioLine[],
   opts: {
     imagesCount: number;
@@ -360,6 +364,7 @@ export function applyScenarioToProject(
     outro: project.outro,
     introDuration: project.introDuration,
     outroDuration: project.outroDuration,
+    timelineVersion: (project.timelineVersion ?? CURRENT_TIMELINE_VERSION) + 1,
     warnings,
   };
 }

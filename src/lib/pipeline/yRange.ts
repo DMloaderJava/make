@@ -2,13 +2,62 @@
  * Y-диапазон панели в процентах высоты страницы — общий примитив для
  * формата сценария (scenarioFormat.ts) и ленты (mangaStrip.ts).
  *
- * Отдельный модуль без зависимостей: сценарий не тянет ленту, лента не тянет
- * формат сценария, а правило «что считать полосой» одно на оба.
+ * Правило процентов (Этап 4 п. 31–35):
+ * 1. Проценты [from..to%] всегда задаются внутри ОДНОГО конкретного изображения
+ *    (от верха этого слота `slot.y` до его низа `slot.y + slot.height`).
+ * 2. Допустимы только значения `0 <= from < to <= 100`.
+ * 3. Проценты — строго пространственные якоря (`startPx..endPx`) и НЕ влияют
+ *    на длительность клипа (длительность определяется исключительно аудио: `audioStart..audioEnd`).
  */
 
 export type YRange = { from: number; to: number };
 
 type Bbox = { x: number; y: number; width: number; height: number };
+
+export type YRangeValidation =
+  | { ok: true; range: YRange }
+  | { ok: false; error: string };
+
+/**
+ * Строгая валидация процентного диапазона `0 <= from < to <= 100` (Этап 4 п. 32).
+ */
+export function validateYRange(from: number, to: number): YRangeValidation {
+  if (!Number.isFinite(from) || !Number.isFinite(to)) {
+    return { ok: false, error: 'Границы процентного диапазона должны быть конечными числами' };
+  }
+  if (from < 0 || to > 100) {
+    return { ok: false, error: `диапазон [${from}..${to}%] вне 0..100` };
+  }
+  if (from >= to) {
+    return { ok: false, error: `в [${from}..${to}%] начало должно быть меньше конца` };
+  }
+  return { ok: true, range: { from, to } };
+}
+
+/**
+ * Нормализует текстовую запись диапазона (`[ 0 .. 30 % ]`, `[12,5..40]`, `0..30%`)
+ * в каноническую форму `[0..30%]` / `[12.5..40%]` (Этап 4 п. 33).
+ */
+export function normalizeRangeText(raw: string): { ok: true; range: YRange; canonical: string } | { ok: false; error: string } {
+  const trimmed = (raw || '').trim().replace(/^\[/, '').replace(/\]$/, '').trim();
+  const match = trimmed.match(/^(-?\d+(?:[.,]\d+)?)\s*%?\s*\.\.\s*(-?\d+(?:[.,]\d+)?)\s*%?$/);
+  if (!match) {
+    return { ok: false, error: `Не удалось разобрать диапазон «${raw}» (ожидается формат [X..Y%])` };
+  }
+  const from = parseFloat(match[1].replace(',', '.'));
+  const to = parseFloat(match[2].replace(',', '.'));
+  const v = validateYRange(from, to);
+  if (!v.ok) return v;
+  const fmt = (n: number) => {
+    const r = Math.round(n * 10) / 10;
+    return String(Object.is(r, -0) ? 0 : r);
+  };
+  return {
+    ok: true,
+    range: v.range,
+    canonical: `[${fmt(from)}..${fmt(to)}%]`,
+  };
+}
 
 /**
  * Полоса из bbox, если она «настоящая». null — вся страница: fullFrame, нет

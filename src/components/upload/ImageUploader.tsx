@@ -125,7 +125,7 @@ export function ImageUploader({ onUpload, multiple = true, accept = 'image/*' }:
               <p className="text-[12px] text-[#8A8A93] mt-1">PNG, JPG, WEBP и другие изображения · количество не ограничено</p>
             </div>
           </div>
-          <input type="file" className="hidden" multiple={multiple} accept={accept} onChange={handleChange} disabled={loading} />
+          <input data-testid="home-image-input" type="file" className="hidden" multiple={multiple} accept={accept} onChange={handleChange} disabled={loading} />
         </label>
       </div>
 
@@ -150,7 +150,7 @@ export function ImageUploader({ onUpload, multiple = true, accept = 'image/*' }:
             ))}
           </div>
 
-          <button onClick={() => void submit()} disabled={loading} className="w-full h-11 rounded-[10px] bg-[#E8B44C] text-[#0B0B0C] font-medium text-[14px] hover:bg-[#B88A2E] transition-colors disabled:opacity-50 flex items-center justify-center gap-2">
+          <button data-testid="home-process-images-btn" onClick={() => void submit()} disabled={loading} className="w-full h-11 rounded-[10px] bg-[#E8B44C] text-[#0B0B0C] font-medium text-[14px] hover:bg-[#B88A2E] transition-colors disabled:opacity-50 flex items-center justify-center gap-2">
             {loading ? <><Loader2 className="w-4 h-4 animate-spin" /> Подготовка изображений...</> : `Обработать ${previews.length} изображений`}
           </button>
         </div>

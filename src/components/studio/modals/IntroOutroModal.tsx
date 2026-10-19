@@ -92,10 +92,10 @@ export function IntroOutroModal({
               <label className="text-[12px] text-[#8A8A93]">Текст интро</label>
               <div className="flex items-center gap-1">
                 <span className="text-[11px] text-[#8A8A93]">длительность, сек</span>
-                <Input type="number" value={introDur} onChange={(e) => setIntroDur(e.target.value)} min={0} max={60} step={0.5} className="w-20 h-7 bg-[#0B0B0C] border-[#26262C] text-xs" />
+                <Input data-testid="intro-duration-input" type="number" value={introDur} onChange={(e) => setIntroDur(e.target.value)} min={0} max={60} step={0.5} className="w-20 h-7 bg-[#0B0B0C] border-[#26262C] text-xs" />
               </div>
             </div>
-            <textarea value={introText} onChange={(e) => setIntroText(e.target.value)} rows={3} placeholder="Например: Добро пожаловать в новый разбор манги…" className="w-full rounded-[8px] bg-[#0B0B0C] border border-[#26262C] px-3 py-2 text-[13px] text-[#F5F5F7] placeholder:text-[#5A5A63] resize-y" />
+            <textarea data-testid="intro-text-input" value={introText} onChange={(e) => setIntroText(e.target.value)} rows={3} placeholder="Например: Добро пожаловать в новый разбор манги…" className="w-full rounded-[8px] bg-[#0B0B0C] border border-[#26262C] px-3 py-2 text-[13px] text-[#F5F5F7] placeholder:text-[#5A5A63] resize-y" />
             <div className="flex items-center gap-2 flex-wrap">
               <Button variant="outline" size="sm" onClick={() => introInputRef.current?.click()} disabled={busyAudio !== null || generating || voicing} className="h-8 text-xs bg-[#0B0B0C] border-[#26262C]">{busyAudio === 'intro' ? 'Загрузка…' : 'Загрузить аудио интро'}</Button>
               <input ref={introInputRef} type="file" accept="audio/*,.mp3,.wav,.ogg,.m4a,.aac,.flac,.webm" className="hidden" onChange={(e) => { const file = e.target.files?.[0]; if (file) void importAudio('intro', file); e.target.value = ''; }} />
@@ -109,10 +109,10 @@ export function IntroOutroModal({
               <label className="text-[12px] text-[#8A8A93]">Текст аутро</label>
               <div className="flex items-center gap-1">
                 <span className="text-[11px] text-[#8A8A93]">длительность, сек</span>
-                <Input type="number" value={outroDur} onChange={(e) => setOutroDur(e.target.value)} min={0} max={60} step={0.5} className="w-20 h-7 bg-[#0B0B0C] border-[#26262C] text-xs" />
+                <Input data-testid="outro-duration-input" type="number" value={outroDur} onChange={(e) => setOutroDur(e.target.value)} min={0} max={60} step={0.5} className="w-20 h-7 bg-[#0B0B0C] border-[#26262C] text-xs" />
               </div>
             </div>
-            <textarea value={outroText} onChange={(e) => setOutroText(e.target.value)} rows={3} placeholder="Например: Спасибо за просмотр, подпишитесь…" className="w-full rounded-[8px] bg-[#0B0B0C] border border-[#26262C] px-3 py-2 text-[13px] text-[#F5F5F7] placeholder:text-[#5A5A63] resize-y" />
+            <textarea data-testid="outro-text-input" value={outroText} onChange={(e) => setOutroText(e.target.value)} rows={3} placeholder="Например: Спасибо за просмотр, подпишитесь…" className="w-full rounded-[8px] bg-[#0B0B0C] border border-[#26262C] px-3 py-2 text-[13px] text-[#F5F5F7] placeholder:text-[#5A5A63] resize-y" />
             <div className="flex items-center gap-2 flex-wrap">
               <Button variant="outline" size="sm" onClick={() => outroInputRef.current?.click()} disabled={busyAudio !== null || generating || voicing} className="h-8 text-xs bg-[#0B0B0C] border-[#26262C]">{busyAudio === 'outro' ? 'Загрузка…' : 'Загрузить аудио аутро'}</Button>
               <input ref={outroInputRef} type="file" accept="audio/*,.mp3,.wav,.ogg,.m4a,.aac,.flac,.webm" className="hidden" onChange={(e) => { const file = e.target.files?.[0]; if (file) void importAudio('outro', file); e.target.value = ''; }} />
@@ -127,7 +127,7 @@ export function IntroOutroModal({
             <Button variant="outline" size="sm" onClick={onGenerateAI} disabled={generating || voicing || busyAudio !== null} className="h-8 text-xs bg-[#0B0B0C] border-[#26262C]">{generating ? 'Генерация…' : 'Сгенерировать AI'}</Button>
             <Button variant="outline" size="sm" onClick={onVoice} disabled={generating || voicing || busyAudio !== null} className="h-8 text-xs bg-[#0B0B0C] border-[#26262C]">{voicing ? 'Озвучка…' : 'Озвучить текст'}</Button>
             <Button variant="outline" size="sm" onClick={onClear} disabled={generating || voicing || busyAudio !== null} className="h-8 text-xs bg-[#0B0B0C] border-[#26262C]">Очистить текст</Button>
-            <Button size="sm" onClick={handleApply} disabled={generating || voicing || busyAudio !== null} className="ml-auto h-8 text-xs bg-[#E8B44C] text-[#0B0B0C] hover:bg-[#B88A2E]">Применить</Button>
+            <Button data-testid="intro-outro-apply-btn" size="sm" onClick={handleApply} disabled={generating || voicing || busyAudio !== null} className="ml-auto h-8 text-xs bg-[#E8B44C] text-[#0B0B0C] hover:bg-[#B88A2E]">Применить</Button>
           </div>
         </div>
       </div>

@@ -1,6 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatOverlaps, packStarts, stackBlobsBackToBack, userFacingOverlaps } from '../src/lib/pipeline/audioMix';
+import {
+  assertValidPackedPlacements,
+  formatOverlaps,
+  packStarts,
+  planPlacements,
+  stackBlobsBackToBack,
+  userFacingOverlaps,
+} from '../src/lib/pipeline/audioMix';
 
 test('packStarts: без наложений ничего не меняет', () => {
   const result = packStarts([
@@ -136,3 +143,29 @@ test('stackBlobsBackToBack: устаревшая раскладка идёт в�
 
   assert.deepEqual(stackBlobsBackToBack([], []), []);
 });
+
+test('Задача 3.1.4 (Н-3.5): planPlacements и assertValidPackedPlacements бросают ошибку при playDuration: 0 или undefined', async () => {
+  const dummyBlob = new Blob([new Uint8Array(64)]);
+  await assert.rejects(
+    () =>
+      planPlacements([
+        { start: 0, blob: dummyBlob, label: 'Клип 0', playDuration: 0 },
+      ]),
+    /Некорректный playDuration/
+  );
+  await assert.rejects(
+    () =>
+      planPlacements([
+        { start: 0, blob: dummyBlob, label: 'Клип undefined', playDuration: undefined as unknown as number },
+      ]),
+    /Некорректный playDuration/
+  );
+  assert.throws(
+    () =>
+      assertValidPackedPlacements([
+        { start: 0, playDuration: undefined as unknown as number, label: 'Без длительности' },
+      ]),
+    /Некорректный playDuration/
+  );
+});
+

@@ -2,7 +2,10 @@
 
 import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { useParams } from 'next/navigation';
-import { getProjectWithImages, saveProject, Project } from '@/lib/storage/db';
+import { getProjectWithImages, saveProject, Project, appendProjectEvent } from '@/lib/storage/db';
+import { migrateProjectSchema } from '@/lib/storage/schemaMigration';
+import { recoverInterruptedImport } from '@/lib/storage/resourceIntegrity';
+import { exportProjectToZip, importProjectFromZip } from '@/lib/storage/projectArchive';
 import { Preview } from '@/components/studio/Preview';
 import { Timeline } from '@/components/studio/Timeline';
 import { ContextPanel } from '@/components/studio/ContextPanel';
@@ -12,23 +15,53 @@ import { ExportModal } from '@/components/studio/modals/ExportModal';
 import { ScenarioModal } from '@/components/studio/modals/ScenarioModal';
 import { IntroOutroModal } from '@/components/studio/modals/IntroOutroModal';
 import { AudioImportModal, type AudioImportApplyControls } from '@/components/studio/modals/AudioImportModal';
+import { ProjectHealthModal } from '@/components/studio/modals/ProjectHealthModal';
 import { Input } from '@/components/ui/input';
 import { getAllKeys, getSettings } from '@/lib/storage/local';
 import { getLLMProvider, resolveLLMVisionModel } from '@/lib/providers/llm';
-import { buildTimeline, DEFAULT_PANEL_GAP, calculateTotalDuration, rebuildSrt } from '@/lib/pipeline/buildTimeline';
+import { buildTimeline, DEFAULT_PANEL_GAP, calculateTotalDuration, rebuildSrt, roundMediaDuration } from '@/lib/pipeline/buildTimeline';
+import { ProjectClock } from '@/lib/pipeline/projectClock';
 import { applyScenarioToProject, serializeScenario, SCENARIO_GAP_SECONDS, type ScenarioLine } from '@/lib/pipeline/scenario';
 import { translateScenarioLines, isTranslatableLanguage } from '@/lib/pipeline/translateScenario';
 import { generateIntro, generateOutro, generateFallbackIntro, generateFallbackOutro, resolveChannelName } from '@/lib/pipeline/generateIntro';
 import { formatSEOPackage, generateSEO, generateFallbackSEO } from '@/lib/pipeline/generateSEO';
 import { generateAllAudio } from '@/lib/pipeline/generateAudio';
-import { applyAudioImport, createImportPersister, mergeAppliedAudio, settleImportRegeneration, type AudioImportPlan } from '@/lib/pipeline/audioImport';
+import {
+  applyAudioImport,
+  createAudioImportUndoSnapshot,
+  createImportPersister,
+  mergeAppliedAudio,
+  settleImportRegeneration,
+  undoLastAudioImport,
+  type AudioImportPlan,
+  type LastAudioImportSnapshot,
+} from '@/lib/pipeline/audioImport';
 import { loadPanelAudios } from '@/lib/pipeline/loadPanelAudio';
 import { resolveTTSProviderId } from '@/lib/pipeline/projectSettings';
 import { getTTSProvider } from '@/lib/providers/tts/catalog';
 import { concatenateAudioBlobs } from '@/lib/pipeline/assembleVideo';
 import { renderVideo, checkCapabilities, BackendCapabilities } from '@/lib/pipeline/videoEncoder';
-import type { AudioPlacement } from '@/lib/pipeline/audioMix';
-import { loadProjectAudio, loadProjectIntroAudio, loadProjectOutroAudio, deleteProjectAudio, isOPFSSupported, saveProjectImage, saveProjectIntroAudio, saveProjectOutroAudio } from '@/lib/storage/opfs';
+import { buildTimelineAudioPlacements, type AudioPlacement } from '@/lib/pipeline/audioMix';
+import { HistoryManager, type NleHistorySnapshot } from '@/lib/pipeline/historyManager';
+import {
+  reorderPanelClips,
+  setPanelAudioGainAndFades,
+  setPanelAudioTrim,
+  setPanelDurationOverride,
+  splitPanelAudioClip,
+  togglePanelMute,
+  togglePanelSolo,
+  type NleMutationResult,
+} from '@/lib/pipeline/nleOperations';
+import { ObjectUrlRegistry } from '@/lib/pipeline/objectUrlRegistry';
+import { UnifiedAudioPlayer } from '@/lib/pipeline/audioPlayer';
+import {
+  buildDiagnosticReportJson,
+  inspectProjectHealth,
+  renderExportAudioMixPreviewWav,
+  type ProjectHealthIssue,
+} from '@/lib/pipeline/projectHealth';
+import { loadProjectAudio, loadProjectIntroAudio, loadProjectOutroAudio, deleteProjectAudio, isOPFSSupported, saveProjectAudio, saveProjectImage, saveProjectIntroAudio, saveProjectOutroAudio } from '@/lib/storage/opfs';
 import { estimateTotalCost } from '@/lib/validators';
 import { getVoiceButtonState } from '@/lib/pipeline/voiceButtonState';
 import { downloadBlob, formatTime } from '@/lib/utils';
@@ -106,6 +139,8 @@ export default function EditorPage() {
   const [audioFull, setAudioFull] = useState<Map<number, { blob: Blob; duration: number }>>(new Map());
   const [introAudio, setIntroAudio] = useState<Blob | null>(null);
   const [outroAudio, setOutroAudio] = useState<Blob | null>(null);
+  const [introAudioDuration, setIntroAudioDuration] = useState<number | null>(null);
+  const [outroAudioDuration, setOutroAudioDuration] = useState<number | null>(null);
   const [isGeneratingAudio, setIsGeneratingAudio] = useState(false);
   const [audioProgress, setAudioProgress] = useState('');
   // Обрезанные реплики/сдвиги аудио при экспорте — то, что нельзя показывать только в консоли.
@@ -121,22 +156,67 @@ export default function EditorPage() {
   const [generatingSEO, setGeneratingSEO] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [playbackStep, setPlaybackStep] = useState(0);
-  const playbackAudioRef = useRef<HTMLAudioElement | null>(null);
-  const playbackUrlRef = useRef<string | null>(null);
-  const playbackKeyRef = useRef<string | null>(null);
+  const [clockInstance] = useState<ProjectClock>(() => new ProjectClock());
+  const clockRef = useRef<ProjectClock>(clockInstance);
+  const playerRef = useRef<UnifiedAudioPlayer | null>(null);
   const [selectedId, setSelectedId] = useState<number | 'intro' | 'outro' | null>(null);
   const [showVoices, setShowVoices] = useState(false);
   const [showExport, setShowExport] = useState(false);
   const [showScenario, setShowScenario] = useState(false);
   const [showIntroOutro, setShowIntroOutro] = useState(false);
   const [showAudioImport, setShowAudioImport] = useState(false);
+  const [showHealthModal, setShowHealthModal] = useState(false);
+  const [lastImportUndo, setLastImportUndo] = useState<LastAudioImportSnapshot | null>(null);
+  const [opfsActive, setOpfsActive] = useState<boolean>(true);
+  const historyRef = useRef<HistoryManager>(new HistoryManager(50));
+  const [historyAvail, setHistoryAvail] = useState({ canUndo: false, canRedo: false });
+  const syncHistoryAvail = () =>
+    setHistoryAvail({ canUndo: historyRef.current.canUndo(), canRedo: historyRef.current.canRedo() });
+  const urlRegistryRef = useRef<ObjectUrlRegistry>(new ObjectUrlRegistry());
   const [isUploadingImages, setIsUploadingImages] = useState(false);
   const editorImageInputRef = useRef<HTMLInputElement | null>(null);
   const [voicingIntroOutro, setVoicingIntroOutro] = useState(false);
   const [backendCaps, setBackendCaps] = useState<BackendCapabilities | null>(null);
   const [preferredBackend, setPreferredBackend] = useState<'auto' | 'webcodecs' | 'canvas'>('auto');
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'unsaved'>('saved');
+
+  // Единая подписка на ProjectClock (Задача 1: единственный вызов setCurrentTime в EditorPage;
+  // P1 п. 14: rAF-тики троттлятся для React-дерева EditorPage до ~20 Гц, в то время как Preview
+  // читает clock.getTime() напрямую в своём Canvas rAF на полных 60 fps)
+  useEffect(() => {
+    const clock = clockRef.current;
+    const player = new UnifiedAudioPlayer({
+      clock,
+      registry: urlRegistryRef.current,
+      onError: (formatted) => {
+        setAudioError(formatted.message);
+      },
+    });
+    playerRef.current = player;
+
+    let lastReactSyncWallMs = 0;
+    let lastPlayingState = clock.getIsPlaying();
+
+    const unsubscribe = clock.subscribe((snap) => {
+      if (snap.isPlaying !== lastPlayingState) {
+        lastPlayingState = snap.isPlaying;
+        setIsPlaying(snap.isPlaying);
+      }
+      const nowMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      if (snap.reason === 'raf' && nowMs - lastReactSyncWallMs < 45) {
+        return;
+      }
+      lastReactSyncWallMs = nowMs;
+      setCurrentTime(snap.currentTime);
+    });
+
+    return () => {
+      unsubscribe();
+      player.dispose();
+      playerRef.current = null;
+      urlRegistryRef.current.revokeAll();
+    };
+  }, []);
 
   // ЕДИНЫЙ источник времени превью: таймлайн, по которому считаются и
   // длительность (clock), и сегменты Timeline, и траектория скролла ленты.
@@ -180,6 +260,24 @@ export default function EditorPage() {
     audioTexts: project?.audioTexts,
   }), [project, audioBlobs]);
 
+  // Отчёт о здоровье проекта («Проверка проекта», Этап 9 п. 84–86, 89; Этап 10 п. 91–93)
+  const healthReport = useMemo(() => {
+    if (!project) return null;
+    return inspectProjectHealth({
+      panels: project.panels,
+      timeline: tl,
+      srt: project.srt,
+      intro: project.intro,
+      outro: project.outro,
+      panelGap,
+      introDuration: project.introDuration,
+      outroDuration: project.outroDuration,
+      availableImageIndices: images.length,
+      voicedPanelIds: audioBlobs.keys(),
+      realDurations: audioDurations,
+    });
+  }, [project, tl, panelGap, images.length, audioBlobs, audioDurations]);
+
   useEffect(() => {
     let cancelled = false;
     const attempt = loadAttempt;
@@ -204,16 +302,26 @@ export default function EditorPage() {
         }
 
         const { project: storedProject, imageDataUrls: urls } = result;
+        // Явная идемпотентная миграция схемы проекта и таймлайна (Этап 1 п. 5, Этап 8 п. 74)
+        const migration = migrateProjectSchema(storedProject);
+        const migratedProject = migration.project;
+
+        // Восстановление после незавершённого импорта (ImportJournal, Этап 8 п. 79)
+        const journalRecovery = recoverInterruptedImport(migratedProject.id);
+        if (journalRecovery.recovered && journalRecovery.message) {
+          setNotice(journalRecovery.message);
+        }
+
         const settings = getSettings();
-        const storedLLMProvider = getLLMProvider(storedProject.settings.llmProvider || settings.defaultLLMProvider)
+        const storedLLMProvider = getLLMProvider(migratedProject.settings.llmProvider || settings.defaultLLMProvider)
           || getLLMProvider('openrouter')!;
         const safeVisionModel = resolveLLMVisionModel(
           storedLLMProvider,
-          storedProject.settings.visionModel || settings.defaultVisionModel,
+          migratedProject.settings.visionModel || settings.defaultVisionModel,
         ) || '';
-        const loadedProject = safeVisionModel === storedProject.settings.visionModel
-          ? storedProject
-          : { ...storedProject, settings: { ...storedProject.settings, visionModel: safeVisionModel } };
+        const loadedProject = safeVisionModel === migratedProject.settings.visionModel
+          ? migratedProject
+          : { ...migratedProject, settings: { ...migratedProject.settings, visionModel: safeVisionModel } };
         // Аудио панелей — по наличию файла, без фильтра по .sig (импорт без подписи).
         const loadedAudio = await loadPanelAudios({
           projectId: loadedProject.id,
@@ -227,9 +335,17 @@ export default function EditorPage() {
 
         let loadedIntroAudio: Blob | null = null;
         let loadedOutroAudio: Blob | null = null;
+        let loadedIntroAudioDur: number | null = null;
+        let loadedOutroAudioDur: number | null = null;
         try {
           loadedIntroAudio = await loadProjectIntroAudio(loadedProject.id);
           loadedOutroAudio = await loadProjectOutroAudio(loadedProject.id);
+          if (loadedIntroAudio) {
+            loadedIntroAudioDur = roundMediaDuration(await getAudioDuration(loadedIntroAudio));
+          }
+          if (loadedOutroAudio) {
+            loadedOutroAudioDur = roundMediaDuration(await getAudioDuration(loadedOutroAudio));
+          }
         } catch {}
 
         if (cancelled) return;
@@ -240,9 +356,10 @@ export default function EditorPage() {
         setAudioFull(full);
         setIntroAudio(loadedIntroAudio);
         setOutroAudio(loadedOutroAudio);
+        setIntroAudioDuration(loadedIntroAudioDur);
+        setOutroAudioDuration(loadedOutroAudioDur);
         setCurrentPanelIdx(0);
-        setCurrentTime(0);
-        setIsPlaying(false);
+        clockRef.current.reset(0);
         setAudioProgress('');
 
         if (loadedProject.panels.length > 0) {
@@ -278,7 +395,9 @@ export default function EditorPage() {
     };
 
     void loadProject();
-    void isOPFSSupported().catch(() => {});
+    void isOPFSSupported()
+      .then(supported => { if (!cancelled) setOpfsActive(Boolean(supported)); })
+      .catch(() => { if (!cancelled) setOpfsActive(false); });
     void checkCapabilities()
       .then((capabilities) => {
         if (!cancelled) setBackendCaps(capabilities);
@@ -309,6 +428,7 @@ export default function EditorPage() {
     project?.srt,
     project?.audioDurations,
     project?.seoPackage,
+    project?.timelineVersion,
     project?.settings?.visionModel,
     project?.settings?.llmProvider,
     project?.settings?.ttsProvider,
@@ -324,110 +444,50 @@ export default function EditorPage() {
     project?.settings?.musicVolume,
   ]);
 
-  // Превью воспроизводится по фактическому аудио: следующий сегмент стартует
-  // только из onended текущего HTMLAudioElement. Если у сегмента аудио нет,
-  // используется аккуратный wall-clock fallback по расчётному таймлайну.
+  // Синхронизируем длительность с ProjectClock и ведём воспроизведение через UnifiedAudioPlayer (Задачи 1, 9)
   useEffect(() => {
-    if (!isPlaying) return;
-    if (!duration || duration <= 0 || !isFinite(duration)) {
-      setIsPlaying(false);
+    clockRef.current.setDuration(duration);
+  }, [duration]);
+
+  useEffect(() => {
+    const player = playerRef.current;
+    if (!player || !project) return;
+    if (!isPlaying) {
+      player.pause();
       return;
     }
-    const stopAudio = () => {
-      playbackAudioRef.current?.pause();
-      if (playbackUrlRef.current) URL.revokeObjectURL(playbackUrlRef.current);
-      playbackAudioRef.current = null;
-      playbackUrlRef.current = null;
-      playbackKeyRef.current = null;
-    };
-    const start = currentTimeRef.current;
-    const panelSegment = tl.find(seg => start >= seg.audioStart && start < seg.audioEnd);
-    const slot = start < project!.introDuration
-      ? (introAudio ? { key: 'intro', start: 0, blob: introAudio } : null)
-      : panelSegment && audioBlobs.get(panelSegment.panelId)
-        ? { key: `panel:${panelSegment.panelId}`, start: panelSegment.audioStart, blob: audioBlobs.get(panelSegment.panelId)! }
-        : start >= (tl[tl.length - 1]?.audioEnd ?? project!.introDuration) && outroAudio
-          ? { key: 'outro', start: tl[tl.length - 1]?.audioEnd ?? project!.introDuration, blob: outroAudio }
-          : null;
-
-    if (slot) {
-      stopAudio();
-      const audio = new Audio();
-      const url = URL.createObjectURL(slot.blob);
-      playbackAudioRef.current = audio;
-      playbackUrlRef.current = url;
-      playbackKeyRef.current = slot.key;
-      audio.src = url;
-      audio.preload = 'auto';
-      audio.onerror = () => {
-        if (playbackAudioRef.current !== audio) return;
-        const label = slot.key === 'intro' ? 'интро' : slot.key === 'outro' ? 'аутро' : `панель ${panelSegment?.panelId ?? '?'}`;
-        const mime = slot.blob.type || 'неизвестный MIME';
-        stopAudio();
-        setNotice(`Аудио для ${label} не воспроизводится в этом браузере. Формат: ${mime}. Перекодируйте файл в MP3/WAV или выберите другой браузер.`);
-        setIsPlaying(false);
-      };
-      audio.onloadedmetadata = () => {
-        const offset = Math.max(0, currentTimeRef.current - slot.start);
-        if (Number.isFinite(offset) && offset > 0) audio.currentTime = offset;
-      };
-      audio.ontimeupdate = () => {
-        if (playbackAudioRef.current !== audio) return;
-        const next = slot.start + audio.currentTime;
-        currentTimeRef.current = Math.min(duration, next);
-        setCurrentTime(currentTimeRef.current);
-      };
-      audio.onended = () => {
-        if (playbackAudioRef.current !== audio) return;
-        stopAudio();
-        const panelIndex = panelSegment ? tl.findIndex(seg => seg.panelId === panelSegment.panelId) : -1;
-        const nextStart = slot.key === 'intro'
-          ? (tl[0]?.audioStart ?? duration - project!.outroDuration)
-          : panelIndex >= 0 && tl[panelIndex + 1]
-            ? tl[panelIndex + 1].audioStart
-            : slot.key.startsWith('panel:') && outroAudio
-              ? (tl[tl.length - 1]?.audioEnd ?? duration - project!.outroDuration)
-              : duration;
-        currentTimeRef.current = Math.min(duration, Math.max(0, nextStart));
-        setCurrentTime(currentTimeRef.current);
-        if (nextStart >= duration) setIsPlaying(false);
-        else setPlaybackStep(step => step + 1);
-      };
-      void audio.play().catch(() => {
-        stopAudio();
-        setNotice(`Браузер не разрешил воспроизведение ${slot.key.startsWith('panel:') ? 'аудио панели' : 'аудио'}. Нажмите Play ещё раз или проверьте разрешения автовоспроизведения.`);
-        setIsPlaying(false);
-      });
-      return stopAudio;
+    if (!duration || duration <= 0 || !isFinite(duration)) {
+      clockRef.current.pause('pause');
+      return;
     }
 
-    let lastWall = performance.now();
-    let raf = 0;
-    const tick = () => {
-      const now = performance.now();
-      const dt = (now - lastWall) / 1000;
-      lastWall = now;
-      const next = currentTimeRef.current + dt;
-      if (next >= duration) {
-        currentTimeRef.current = duration;
-        setCurrentTime(duration);
-        setIsPlaying(false);
-        return;
+    const effectiveBlobs = new Map<number, Blob>(audioBlobs);
+    for (const p of project.panels) {
+      if (!effectiveBlobs.has(p.id) && p.sourceAudioPanelId !== undefined) {
+        const parentBlob = audioBlobs.get(p.sourceAudioPanelId);
+        if (parentBlob) effectiveBlobs.set(p.id, parentBlob);
       }
-      currentTimeRef.current = next;
-      setCurrentTime(next);
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, [isPlaying, duration, tl, introAudio, outroAudio, audioBlobs, project, playbackStep]);
+    }
+
+    void player.syncPlayback({
+      timeline: tl,
+      introDuration: project.introDuration,
+      outroDuration: project.outroDuration,
+      introAudio,
+      outroAudio,
+      panelBlobs: effectiveBlobs,
+    });
+  }, [isPlaying, duration, tl, introAudio, outroAudio, audioBlobs, project]);
 
   // Актуальный handleSave для хоткеев: эффект ниже намеренно без deps,
   // поэтому состояние берём из ref. Ref объявлен до эффекта — читать его
   // в рендере-тайме (и в TDZ) больше не приходится.
   const handleSaveRef = useRef<() => Promise<void>>(async () => {});
+  const handleUndoRef = useRef<() => void>(() => {});
+  const handleRedoRef = useRef<() => void>(() => {});
+  const handleSplitRef = useRef<() => void>(() => {});
 
-  // Hotkeys with input guard
+  // Hotkeys with input guard (Space, J/K/L, arrows, S for split, Ctrl+Z / Ctrl+Shift+Z, Этап 10 п. 95; Задача 1)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
@@ -435,15 +495,24 @@ export default function EditorPage() {
       if (isInput) {
         if (!((e.metaKey || e.ctrlKey) && (e.key === 's' || e.key === 'e'))) return;
       }
-      if (e.code === 'Space') {
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
         e.preventDefault();
-        setIsPlaying(p => !p);
-      } else if (e.code === 'ArrowLeft') {
+        if (e.shiftKey) handleRedoRef.current();
+        else handleUndoRef.current();
+        return;
+      }
+      if (e.code === 'Space' || (!e.metaKey && !e.ctrlKey && e.key.toLowerCase() === 'k')) {
         e.preventDefault();
-        setCurrentTime(t => Math.max(0, t - 5));
-      } else if (e.code === 'ArrowRight') {
+        clockRef.current.togglePlayPause();
+      } else if (e.code === 'ArrowLeft' || (!e.metaKey && !e.ctrlKey && e.key.toLowerCase() === 'j')) {
         e.preventDefault();
-        setCurrentTime(t => Math.min(duration, t + 5));
+        clockRef.current.seek(Math.max(0, clockRef.current.getTime() - 5), 'seek');
+      } else if (e.code === 'ArrowRight' || (!e.metaKey && !e.ctrlKey && e.key.toLowerCase() === 'l')) {
+        e.preventDefault();
+        clockRef.current.seek(Math.min(duration, clockRef.current.getTime() + 5), 'seek');
+      } else if (!e.metaKey && !e.ctrlKey && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        handleSplitRef.current();
       } else if ((e.metaKey || e.ctrlKey) && e.key === 's') {
         e.preventDefault();
         void handleSaveRef.current();
@@ -454,8 +523,6 @@ export default function EditorPage() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-    // durationRef/currentTimeRef читаются внутри, чтобы не перевешивать
-    // слушатель 30 раз в секунду (currentTime меняется на каждом кадре).
   }, [duration]);
 
   const handleSave = async () => {
@@ -464,9 +531,10 @@ export default function EditorPage() {
     const obj: Record<number, number> = {};
     audioDurations.forEach((v, k) => obj[k] = v);
     const snapshot = { ...project, audioDurations: obj, updatedAt: Date.now() };
-    await saveProject(snapshot);
+    const saved = await saveProject(snapshot, { allowStale: true });
+    project.revision = saved.revision;
     // Облако временное (TTL 24 ч); ошибка сети не ломает локальный режим.
-    void syncProjectSnapshot(snapshot);
+    void syncProjectSnapshot(saved);
     setSaveStatus('saved');
   };
 
@@ -478,7 +546,19 @@ export default function EditorPage() {
 
   const updateProject = (updates: Partial<Project>) => {
     if (!project) return;
-    setProject({ ...project, ...updates, updatedAt: Date.now() });
+    // Задача 2: любая пересборка timeline монотонно инкрементирует timelineVersion
+    const nextTimelineVersion =
+      updates.timelineVersion !== undefined
+        ? updates.timelineVersion
+        : updates.timeline !== undefined
+          ? (project.timelineVersion ?? 2) + 1
+          : project.timelineVersion;
+    setProject({
+      ...project,
+      ...updates,
+      ...(nextTimelineVersion !== undefined ? { timelineVersion: nextTimelineVersion } : {}),
+      updatedAt: Date.now(),
+    });
   };
   const handleAddImages = async (fileList: FileList | File[]) => {
     if (!project) return;
@@ -656,8 +736,22 @@ export default function EditorPage() {
         speed: project.settings.ttsSpeed,
         previousTexts: {},
       });
-      if (result.introAudio) setIntroAudio(result.introAudio);
-      if (result.outroAudio) setOutroAudio(result.outroAudio);
+      const durationPatch: { introDuration?: number; outroDuration?: number } = {};
+      if (result.introAudio) {
+        setIntroAudio(result.introAudio);
+        const dur = roundMediaDuration(await getAudioDuration(result.introAudio));
+        setIntroAudioDuration(dur);
+        durationPatch.introDuration = dur;
+      }
+      if (result.outroAudio) {
+        setOutroAudio(result.outroAudio);
+        const dur = roundMediaDuration(await getAudioDuration(result.outroAudio));
+        setOutroAudioDuration(dur);
+        durationPatch.outroDuration = dur;
+      }
+      if (Object.keys(durationPatch).length > 0) {
+        applyIntroOutroChange(durationPatch);
+      }
       if (result.errors.length > 0) {
         setAudioError(result.errors[0] + (result.errors.length > 1 ? `\nЕщё ошибок: ${result.errors.length - 1}.` : ''));
       } else {
@@ -677,17 +771,21 @@ export default function EditorPage() {
   };
   const handleImportIntroAudio = async (file: File) => {
     if (!project) return;
-    const duration = await getImportedAudioDuration(file);
+    const rawDuration = await getImportedAudioDuration(file);
+    const duration = roundMediaDuration(rawDuration);
     await saveProjectIntroAudio(project.id, file);
     setIntroAudio(file);
+    setIntroAudioDuration(duration);
     applyIntroOutroChange({ introDuration: duration });
     setNotice(`Аудио интро загружено: ${duration.toFixed(2)} с.`);
   };
   const handleImportOutroAudio = async (file: File) => {
     if (!project) return;
-    const duration = await getImportedAudioDuration(file);
+    const rawDuration = await getImportedAudioDuration(file);
+    const duration = roundMediaDuration(rawDuration);
     await saveProjectOutroAudio(project.id, file);
     setOutroAudio(file);
+    setOutroAudioDuration(duration);
     applyIntroOutroChange({ outroDuration: duration });
     setNotice(`Аудио аутро загружено: ${duration.toFixed(2)} с.`);
   };
@@ -695,12 +793,14 @@ export default function EditorPage() {
     if (!project) return;
     await deleteProjectAudio(project.id, 'intro');
     setIntroAudio(null);
+    setIntroAudioDuration(null);
     setNotice('Аудио интро удалено.');
   };
   const handleClearOutroAudio = async () => {
     if (!project) return;
     await deleteProjectAudio(project.id, 'outro');
     setOutroAudio(null);
+    setOutroAudioDuration(null);
     setNotice('Аудио аутро удалено.');
   };
 
@@ -784,20 +884,32 @@ export default function EditorPage() {
       setAudioBlobs(blobsOnly);
       setAudioFull(fullMap);
       setAudioDurations(newDur);
-      if (result.introAudio) setIntroAudio(result.introAudio);
-      if (result.outroAudio) setOutroAudio(result.outroAudio);
+      let nextIntroDuration = project.introDuration;
+      let nextOutroDuration = project.outroDuration;
+      if (result.introAudio) {
+        setIntroAudio(result.introAudio);
+        const introDur = roundMediaDuration(await getAudioDuration(result.introAudio));
+        setIntroAudioDuration(introDur);
+        nextIntroDuration = introDur;
+      }
+      if (result.outroAudio) {
+        setOutroAudio(result.outroAudio);
+        const outroDur = roundMediaDuration(await getAudioDuration(result.outroAudio));
+        setOutroAudioDuration(outroDur);
+        nextOutroDuration = outroDur;
+      }
 
       const obj: Record<number, number> = {};
       newDur.forEach((v, k) => obj[k] = v);
-      // Финальный SRT: реальные длительности озвучки + интро/аутро проекта.
+      // Финальный SRT: реальные длительности озвучки + интро/аутро проекта (Задача 12).
       const rebuilt = rebuildSrt({
         panels: project.panels,
         audioDurations: newDur,
         voiceAssignments: project.voiceAssignments,
         intro: project.intro,
         outro: project.outro,
-        introDuration: project.introDuration,
-        outroDuration: project.outroDuration,
+        introDuration: nextIntroDuration,
+        outroDuration: nextOutroDuration,
         panelGap,
         realDurations: obj,
       });
@@ -823,8 +935,11 @@ export default function EditorPage() {
       updateProject({
         timeline: tl,
         srt,
+        introDuration: nextIntroDuration,
+        outroDuration: nextOutroDuration,
         audioDurations: obj,
         audioTexts,
+        timelineVersion: (project.timelineVersion ?? 2) + 1,
         ...(panelsAfter !== project.panels ? { panels: panelsAfter } : {}),
       });
 
@@ -867,7 +982,8 @@ export default function EditorPage() {
     if (!confirmed) return;
 
     try {
-      await saveProject(project);
+      const saved = await saveProject(project, { allowStale: true });
+      project.revision = saved.revision;
       setSaveStatus('saved');
     } catch (error) {
       setSaveStatus('unsaved');
@@ -927,9 +1043,24 @@ export default function EditorPage() {
   ) => {
     if (!project) throw new Error('Проект не загружен');
     const snapshot = project;
+    const prevDurationsObj: Record<number, number> = {};
+    audioDurations.forEach((v, k) => { prevDurationsObj[k] = v; });
+    const undoSnap = await createAudioImportUndoSnapshot({
+      projectId: snapshot.id,
+      panels: snapshot.panels,
+      audioDurations: prevDurationsObj,
+      timeline: tl,
+      srt: snapshot.srt,
+      existingBlobs: audioBlobs,
+      targetPanelIds: plan.matches.map(m => m.target.id),
+    });
+
     const persister = createImportPersister({
       snapshot,
-      save: saveProject,
+      save: async (proj) => {
+        const saved = await saveProject(proj, { allowStale: true });
+        project.revision = saved.revision;
+      },
       onSaveError: (e) => console.warn('Не удалось сохранить отметку импорта', e),
     });
 
@@ -942,6 +1073,9 @@ export default function EditorPage() {
     });
     await persister.flush();
     if (report.applied.length === 0) return report;
+
+    undoSnap.importedPanelIds = report.applied.map(a => a.panelId);
+    setLastImportUndo(undoSnap);
 
     const merged = mergeAppliedAudio({
       panels: snapshot.panels,
@@ -966,8 +1100,48 @@ export default function EditorPage() {
       panelGap,
       realDurations: merged.realDurations,
     });
-    updateProject({ panels: merged.panels, timeline: rebuilt.timeline, srt: rebuilt.srt, audioDurations: merged.durationsObj });
+    const eventLog = appendProjectEvent(snapshot.eventLog, {
+      type: 'import-audio',
+      summary: `Импортировано аудиофайлов: ${report.applied.length}`,
+    });
+    updateProject({
+      panels: merged.panels,
+      timeline: rebuilt.timeline,
+      srt: rebuilt.srt,
+      audioDurations: merged.durationsObj,
+      eventLog,
+    });
     return report;
+  };
+
+  /** Отмена последнего импорта аудио (Этап 2 п. 20). */
+  const handleUndoLastAudioImport = async () => {
+    if (!project || !lastImportUndo) return;
+    const restored = await undoLastAudioImport(lastImportUndo);
+    const nextDurations = new Map<number, number>();
+    for (const [k, v] of Object.entries(restored.audioDurations)) {
+      nextDurations.set(Number(k), v);
+    }
+    const nextFull = new Map<number, { blob: Blob; duration: number }>();
+    for (const [id, blob] of restored.restoredBlobs.entries()) {
+      nextFull.set(id, { blob, duration: nextDurations.get(id) ?? 2 });
+    }
+    setAudioBlobs(restored.restoredBlobs);
+    setAudioDurations(nextDurations);
+    setAudioFull(nextFull);
+    setLastImportUndo(null);
+    const eventLog = appendProjectEvent(project.eventLog, {
+      type: 'undo-import-audio',
+      summary: 'Отменён последний импорт аудио',
+    });
+    updateProject({
+      panels: restored.panels,
+      audioDurations: restored.audioDurations,
+      timeline: restored.timeline,
+      srt: restored.srt,
+      eventLog,
+    });
+    setNotice('Последний импорт аудио отменён, прежние файлы и таймлайн восстановлены.');
   };
 
   /**
@@ -1093,6 +1267,7 @@ export default function EditorPage() {
       settings,
       timeline: patch.timeline,
       srt: patch.srt,
+      timelineVersion: patch.timelineVersion,
       audioDurations: {},
       audioTexts: {},
     });
@@ -1146,27 +1321,23 @@ export default function EditorPage() {
         }
         const tl = project.timeline.length > 0 ? project.timeline : buildTimeline(project.panels, audioDurations, project.voiceAssignments, project.introDuration, panelGap);
 
-        // Точные позиции аудио на таймлайне: интро с 0, панели со своих audioStart,
-        // аутро — после последней панели. Это чинит рассинхрон (раньше дорожка
-        // склеивалась подряд, без пауз 0.3s между панелями).
-        const audioPlacements: AudioPlacement[] = [];
-        if (introAudio) audioPlacements.push({ start: 0, blob: introAudio, role: 'intro', label: 'Интро' });
+        // Точные позиции аудио на таймлайне с учётом trimIn/trimOut, gain, fadeIn/fadeOut и mute/solo (Этап 9 п. 82, 83)
+        const resolvedPanelBlobs = new Map<number, Blob>(audioBlobs);
         for (const p of project.panels) {
-          const seg = tl.find(t => t.panelId === p.id);
-          const b = audioBlobs.get(p.id) || await loadProjectAudio(project.id, p.id);
-          if (b && seg) {
-            audioPlacements.push({
-              start: seg.audioStart,
-              blob: b,
-              role: 'panel',
-              label: `Панель ${p.id}${p.character ? ` · ${p.character}` : ''}`,
-            });
+          if (!resolvedPanelBlobs.has(p.id)) {
+            const fromOpfs = await loadProjectAudio(project.id, p.id);
+            if (fromOpfs) resolvedPanelBlobs.set(p.id, fromOpfs);
           }
         }
-        if (outroAudio) {
-          const lastEnd = tl.length > 0 ? tl[tl.length - 1].audioEnd : project.introDuration;
-          audioPlacements.push({ start: lastEnd, blob: outroAudio, role: 'outro', label: 'Аутро' });
-        }
+        const audioPlacements: AudioPlacement[] = buildTimelineAudioPlacements({
+          timeline: tl,
+          panels: project.panels,
+          panelBlobs: resolvedPanelBlobs,
+          introAudio,
+          outroAudio,
+          introDuration: project.introDuration,
+          outroDuration: project.outroDuration,
+        });
 
         if (audioPlacements.length === 0) {
           alert('Сначала озвучь — нет аудио для видео. Экспортирую без звука.');
@@ -1181,6 +1352,8 @@ export default function EditorPage() {
           outroText: project.outro,
           introDuration: project.introDuration,
           outroDuration: project.outroDuration,
+          introAudioDuration,
+          outroAudioDuration,
           srtContent: project.srt,
           width: 1920,
           height: 1080,
@@ -1201,6 +1374,89 @@ export default function EditorPage() {
       alert(`Ошибка экспорта: ${e.message}`);
     } finally {
       setIsExporting(false);
+    }
+  };
+
+  /** Предпрослушивание финального аудиомикса перед экспортом видео (Этап 9 п. 87). */
+  const handlePreviewAudioMix = async (): Promise<string | null> => {
+    if (!project) return null;
+    const resolvedPanelBlobs = new Map<number, Blob>(audioBlobs);
+    for (const p of project.panels) {
+      if (!resolvedPanelBlobs.has(p.id)) {
+        const fromOpfs = await loadProjectAudio(project.id, p.id);
+        if (fromOpfs) resolvedPanelBlobs.set(p.id, fromOpfs);
+      }
+    }
+    const placements = buildTimelineAudioPlacements({
+      timeline: tl,
+      panels: project.panels,
+      panelBlobs: resolvedPanelBlobs,
+      introAudio,
+      outroAudio,
+      introDuration: project.introDuration,
+    });
+    const wavBlob = await renderExportAudioMixPreviewWav(placements, duration);
+    if (!wavBlob) return null;
+    return urlRegistryRef.current.acquire('export:mix-preview', wavBlob).url;
+  };
+
+  /** Скачивание диагностического JSON-отчёта о проекте и синхронизации (Этап 9 п. 88). */
+  const handleDownloadDiagnosticJson = () => {
+    if (!project || !healthReport) return;
+    const json = buildDiagnosticReportJson(project, healthReport);
+    downloadBlob(
+      new Blob([json], { type: 'application/json;charset=utf-8' }),
+      `${project.name || project.id}-diagnostics.json`
+    );
+  };
+
+  /** Полный экспорт проекта в .zip с проверкой контрольных сумм (Этап 8 п. 76). */
+  const handleExportProjectZip = async () => {
+    if (!project) return;
+    try {
+      const audioMap = new Map<number | 'intro' | 'outro', Blob>();
+      for (const [idKey, blob] of audioBlobs.entries()) audioMap.set(idKey, blob);
+      if (introAudio) audioMap.set('intro', introAudio);
+      if (outroAudio) audioMap.set('outro', outroAudio);
+      const { blob } = await exportProjectToZip(project, {
+        images,
+        audio: audioMap,
+      });
+      downloadBlob(blob, `${project.name || project.id}.zip`);
+    } catch (e) {
+      setNotice(`Не удалось экспортировать архив проекта: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  /** Восстановление проекта из .zip с верификацией SHA-256 (Этап 8 п. 77). */
+  const handleImportProjectZip = async (file: File) => {
+    try {
+      const restored = await importProjectFromZip(file);
+      const nextBlobs = new Map<number, Blob>();
+      const nextDurations = new Map<number, number>();
+      for (const [slotKey, blob] of restored.audio.entries()) {
+        if (slotKey === 'intro') {
+          setIntroAudio(blob);
+          try { await saveProjectIntroAudio(restored.project.id, blob); } catch {}
+        } else if (slotKey === 'outro') {
+          setOutroAudio(blob);
+          try { await saveProjectOutroAudio(restored.project.id, blob); } catch {}
+        } else {
+          nextBlobs.set(slotKey, blob);
+          try { await saveProjectAudio(restored.project.id, slotKey, blob); } catch {}
+        }
+      }
+      for (const [k, v] of Object.entries(restored.project.audioDurations ?? {})) {
+        nextDurations.set(Number(k), v);
+      }
+      setProject(restored.project);
+      setImages(restored.imageDataUrls);
+      setAudioBlobs(nextBlobs);
+      setAudioDurations(nextDurations);
+      setShowHealthModal(false);
+      setNotice(`Проект успешно восстановлен из архива (проверено ресурсов: ${restored.verifiedCount}).`);
+    } catch (e) {
+      setNotice(`Ошибка восстановления из архива: ${e instanceof Error ? e.message : String(e)}`);
     }
   };
 
@@ -1260,11 +1516,202 @@ export default function EditorPage() {
     updateProject({ ...patch, timeline: rebuilt.timeline, srt: rebuilt.srt });
   };
 
+  // --- NLE операции и стек истории Undo/Redo (Этап 6 п. 51–60) ---
+  const buildCurrentHistorySnapshot = (label: string): NleHistorySnapshot | null => {
+    if (!project) return null;
+    const durObj: Record<number, number> = {};
+    audioDurations.forEach((v, k) => { durObj[k] = v; });
+    return {
+      label,
+      timestamp: Date.now(),
+      panels: project.panels.map(p => ({ ...p, bbox: { ...p.bbox } })),
+      audioDurations: durObj,
+      timeline: tl.map(s => ({ ...s })),
+      srt: project.srt,
+      panelGap,
+    };
+  };
+
+  const applyHistorySnapshot = (snap: NleHistorySnapshot) => {
+    if (!project) return;
+    const nextDurs = new Map<number, number>();
+    for (const [k, v] of Object.entries(snap.audioDurations)) {
+      nextDurs.set(Number(k), v);
+    }
+    setAudioDurations(nextDurs);
+    updateProject({
+      panels: snap.panels,
+      audioDurations: snap.audioDurations,
+      timeline: snap.timeline,
+      srt: snap.srt,
+      ...(snap.panelGap !== undefined ? { settings: { ...project.settings, panelGap: snap.panelGap } } : {}),
+    });
+    syncHistoryAvail();
+  };
+
+  const handleUndo = () => {
+    const cur = buildCurrentHistorySnapshot('current');
+    if (!cur) return;
+    const prev = historyRef.current.undo(cur);
+    if (prev) applyHistorySnapshot(prev);
+  };
+
+  const handleRedo = () => {
+    const cur = buildCurrentHistorySnapshot('current');
+    if (!cur) return;
+    const next = historyRef.current.redo(cur);
+    if (next) applyHistorySnapshot(next);
+  };
+
+  const getNleOptions = () => ({
+    voiceAssignments: project?.voiceAssignments ?? {},
+    intro: project?.intro ?? '',
+    outro: project?.outro ?? '',
+    introDuration: project?.introDuration ?? 0,
+    outroDuration: project?.outroDuration ?? 0,
+    panelGap,
+    currentTimelineVersion: project?.timelineVersion,
+  });
+
+  // Единый обработчик применения результата NLE-операций (Задача 6):
+  // все 7 NLE-операций обновляют setAudioDurations и передают одинаковый набор полей в updateProject.
+  const applyNleResult = (res: NleMutationResult) => {
+    const nextDurs = new Map<number, number>();
+    for (const [k, v] of Object.entries(res.audioDurations)) {
+      nextDurs.set(Number(k), v);
+    }
+    setAudioDurations(nextDurs);
+    updateProject({
+      panels: res.panels,
+      audioDurations: res.audioDurations,
+      timeline: res.timeline,
+      srt: res.srt,
+      timelineVersion: res.timelineVersion,
+    });
+    syncHistoryAvail();
+  };
+
+  const handleSplitActiveClip = () => {
+    if (!project) return;
+    const targetPanelId = typeof selectedId === 'number'
+      ? selectedId
+      : tl.find(s => currentTime >= s.audioStart && currentTime < s.audioEnd)?.panelId ?? null;
+    if (targetPanelId === null) return;
+    const seg = tl.find(s => s.panelId === targetPanelId);
+    if (!seg) return;
+    const segDur = Math.max(0.2, seg.audioEnd - seg.audioStart);
+    const offset = currentTime > seg.audioStart + 0.05 && currentTime < seg.audioEnd - 0.05
+      ? currentTime - seg.audioStart
+      : segDur / 2;
+
+    try {
+      const snap = buildCurrentHistorySnapshot(`Разрезание панели #${targetPanelId}`);
+      if (snap) historyRef.current.record(snap);
+      const durObj: Record<number, number> = {};
+      audioDurations.forEach((v, k) => { durObj[k] = v; });
+      const res = splitPanelAudioClip(project.panels, durObj, targetPanelId, offset, getNleOptions());
+      applyNleResult(res);
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const handleReorderClip = (panelId: number, targetIdx: number) => {
+    if (!project) return;
+    const sorted = [...project.panels].sort((a, b) => a.order - b.order || a.id - b.id);
+    if (targetIdx < 0 || targetIdx >= sorted.length) return;
+    const snap = buildCurrentHistorySnapshot(`Перемещение панели #${panelId}`);
+    if (snap) historyRef.current.record(snap);
+    const durObj: Record<number, number> = {};
+    audioDurations.forEach((v, k) => { durObj[k] = v; });
+    const res = reorderPanelClips(project.panels, durObj, panelId, targetIdx, getNleOptions());
+    applyNleResult(res);
+  };
+
+  const handleMoveActiveClip = (delta: -1 | 1) => {
+    if (!project || typeof selectedId !== 'number') return;
+    const sorted = [...project.panels].sort((a, b) => a.order - b.order || a.id - b.id);
+    const fromIdx = sorted.findIndex(p => p.id === selectedId);
+    if (fromIdx < 0) return;
+    handleReorderClip(selectedId, fromIdx + delta);
+  };
+
+  const handleTogglePanelMute = (panelId: number) => {
+    if (!project) return;
+    const snap = buildCurrentHistorySnapshot(`Mute панели #${panelId}`);
+    if (snap) historyRef.current.record(snap);
+    const durObj: Record<number, number> = {};
+    audioDurations.forEach((v, k) => { durObj[k] = v; });
+    const res = togglePanelMute(project.panels, durObj, panelId, undefined, getNleOptions());
+    applyNleResult(res);
+  };
+
+  const handleTogglePanelSolo = (panelId: number) => {
+    if (!project) return;
+    const snap = buildCurrentHistorySnapshot(`Solo панели #${panelId}`);
+    if (snap) historyRef.current.record(snap);
+    const durObj: Record<number, number> = {};
+    audioDurations.forEach((v, k) => { durObj[k] = v; });
+    const res = togglePanelSolo(project.panels, durObj, panelId, undefined, getNleOptions());
+    applyNleResult(res);
+  };
+
+  const handleSetPanelAudioTrim = (panelId: number, trimIn: number, trimOut: number) => {
+    if (!project) return;
+    const snap = buildCurrentHistorySnapshot(`Trim панели #${panelId}`);
+    if (snap) historyRef.current.record(snap);
+    const durObj: Record<number, number> = {};
+    audioDurations.forEach((v, k) => { durObj[k] = v; });
+    const res = setPanelAudioTrim(project.panels, durObj, panelId, trimIn, trimOut, getNleOptions());
+    applyNleResult(res);
+  };
+
+  const handleSetPanelDurationOverride = (panelId: number, durationOverride: number | null | undefined) => {
+    if (!project) return;
+    const snap = buildCurrentHistorySnapshot(`Длительность панели #${panelId}`);
+    if (snap) historyRef.current.record(snap);
+    const durObj: Record<number, number> = {};
+    audioDurations.forEach((v, k) => { durObj[k] = v; });
+    const res = setPanelDurationOverride(project.panels, durObj, panelId, durationOverride, getNleOptions());
+    applyNleResult(res);
+  };
+
+  const handleSetPanelAudioGainAndFades = (
+    panelId: number,
+    params: { gain?: number; fadeIn?: number; fadeOut?: number }
+  ) => {
+    if (!project) return;
+    const snap = buildCurrentHistorySnapshot(`Громкость/Fade панели #${panelId}`);
+    if (snap) historyRef.current.record(snap);
+    const durObj: Record<number, number> = {};
+    audioDurations.forEach((v, k) => { durObj[k] = v; });
+    const res = setPanelAudioGainAndFades(project.panels, durObj, panelId, params, getNleOptions());
+    applyNleResult(res);
+  };
+
+  const handleJumpToHealthIssue = (issue: ProjectHealthIssue) => {
+    if (issue.panelId !== undefined && project) {
+      setSelectedId(issue.panelId);
+      const idx = project.panels.findIndex(p => p.id === issue.panelId);
+      if (idx !== -1) setCurrentPanelIdx(idx);
+    }
+    if (issue.seekTime !== undefined) {
+      handleSeek(issue.seekTime);
+    }
+    setShowHealthModal(false);
+  };
+
+  useEffect(() => {
+    handleUndoRef.current = handleUndo;
+    handleRedoRef.current = handleRedo;
+    handleSplitRef.current = handleSplitActiveClip;
+  });
+
   const handleSeek = useCallback((t: number) => {
     if (!isFinite(t)) return;
-    playbackAudioRef.current?.pause();
-    setIsPlaying(false);
-    setCurrentTime(t);
+    playerRef.current?.pause();
+    clockRef.current.pause('pause');
+    clockRef.current.seek(t, 'seek');
     if (!project) return;
     const seg = tl.find(s => t >= s.audioStart && t < s.audioEnd);
     if (seg) {
@@ -1325,7 +1772,12 @@ export default function EditorPage() {
   }
 
   return (
-    <div className="flex-1 bg-[#0B0B0C] flex flex-col min-h-0">
+    <div
+      data-testid="editor-root"
+      data-timeline-version={project.timelineVersion ?? 2}
+      data-total-duration={duration.toFixed(3)}
+      className="flex-1 bg-[#0B0B0C] flex flex-col min-h-0"
+    >
       <div className="h-14 px-4 flex items-center justify-between border-b border-[#26262C] bg-[#0B0B0C]/80 backdrop-blur sticky top-0 z-10">
         <div className="flex items-center gap-3 min-w-0">
           <Link href="/" className="w-8 h-8 rounded-[6px] bg-[#16161A] border border-[#26262C] flex items-center justify-center hover:bg-[#1E1E23] transition-colors">
@@ -1335,10 +1787,37 @@ export default function EditorPage() {
           <span className={`text-[11px] font-mono ${saveStatus === 'saved' ? 'text-[#8A8A93]' : saveStatus === 'saving' ? 'text-[#E8B44C]' : 'text-[#F87171]'}`}>
             {saveStatus === 'saved' ? 'сохранено' : saveStatus === 'saving' ? 'сохранение...' : 'не сохранено'}
           </span>
+          {/* Индикатор готовности проекта в шапке редактора (Этап 10 п. 91, 93) */}
+          {healthReport && (
+            <button
+              type="button"
+              onClick={() => setShowHealthModal(true)}
+              className={`h-6 px-2 rounded-full border text-[10px] font-mono hidden sm:flex items-center gap-1.5 transition-colors ${
+                healthReport.status === 'ready'
+                  ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20'
+                  : healthReport.status === 'errors'
+                  ? 'border-red-500/40 bg-red-500/10 text-red-300 hover:bg-red-500/20'
+                  : 'border-[#594615] bg-[#2A2416] text-[#E8B44C] hover:bg-[#3A311D]'
+              }`}
+              title="Открыть «Проверку проекта», журнал событий и архивацию (.zip)"
+            >
+              <span>●</span>
+              <span>{healthReport.badgeLabel}</span>
+            </button>
+          )}
         </div>
 
         <div className="flex items-center gap-2">
-          <button onClick={() => setShowScenario(true)} className="h-8 px-3 rounded-[6px] bg-[#16161A] border border-[#26262C] text-xs hover:bg-[#1E1E23] transition-colors whitespace-nowrap">
+          <button
+            type="button"
+            data-testid="open-health-btn"
+            onClick={() => setShowHealthModal(true)}
+            className="h-8 px-3 rounded-[6px] bg-[#16161A] border border-[#26262C] text-xs hover:bg-[#1E1E23] transition-colors whitespace-nowrap"
+            title="Проверка проекта, диагностика синхронизации и экспорт/импорт .zip"
+          >
+            Проверка
+          </button>
+          <button data-testid="open-scenario-btn" onClick={() => setShowScenario(true)} className="h-8 px-3 rounded-[6px] bg-[#16161A] border border-[#26262C] text-xs hover:bg-[#1E1E23] transition-colors whitespace-nowrap">
             Сценарий
           </button>
           <button
@@ -1360,6 +1839,7 @@ export default function EditorPage() {
             }}
           />
           <button
+            data-testid="open-audio-import-btn"
             onClick={() => setShowAudioImport(true)}
             disabled={isGeneratingAudio || project.panels.length === 0}
             title={project.panels.length === 0 ? 'Сначала создайте панели (сценарий или анализ изображений)' : 'Свои аудиофайлы на панели — по манифесту, якорю в имени, номеру или порядку'}
@@ -1367,13 +1847,13 @@ export default function EditorPage() {
           >
             Импорт аудио
           </button>
-          <button onClick={() => setShowIntroOutro(true)} className="h-8 px-3 rounded-[6px] bg-[#16161A] border border-[#26262C] text-xs hover:bg-[#1E1E23] transition-colors">
+          <button data-testid="open-intro-outro-btn" onClick={() => setShowIntroOutro(true)} className="h-8 px-3 rounded-[6px] bg-[#16161A] border border-[#26262C] text-xs hover:bg-[#1E1E23] transition-colors">
             Интро/Аутро
           </button>
           <button onClick={() => setShowVoices(true)} className="h-8 px-3 rounded-[6px] bg-[#16161A] border border-[#26262C] text-xs hover:bg-[#1E1E23] transition-colors">
             Голоса
           </button>
-          <button onClick={() => setShowExport(true)} className="h-8 px-3 rounded-[6px] bg-[#E8B44C] text-[#0B0B0C] text-xs font-medium hover:bg-[#B88A2E] transition-colors">
+          <button data-testid="open-export-btn" onClick={() => setShowExport(true)} className="h-8 px-3 rounded-[6px] bg-[#E8B44C] text-[#0B0B0C] text-xs font-medium hover:bg-[#B88A2E] transition-colors">
             Экспорт
           </button>
         </div>
@@ -1443,69 +1923,110 @@ export default function EditorPage() {
       )}
 
       <div className="flex-1 overflow-y-auto" data-scroll-area>
-        <div className="max-w-[1180px] mx-auto p-4 md:p-6">
+        <div className="max-w-[1180px] mx-auto p-3 sm:p-4 md:p-6">
           <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_320px] items-start">
             <div className="min-w-0 space-y-5">
-          <Preview
-            images={images}
-            panels={project.panels}
-            currentPanelIndex={currentPanelIdx}
-            timeline={tl}
-            currentTime={currentTime}
-            duration={duration}
-            isPlaying={isPlaying}
-            onPlayPause={() => setIsPlaying(p => !p)}
-            renderMode={renderSettings.renderMode}
-            stripViewport={renderSettings.stripViewport}
-            stripGap={renderSettings.stripGap}
-            onSeek={handleSeek}
-          />
+              <Preview
+                images={images}
+                panels={project.panels}
+                currentPanelIndex={currentPanelIdx}
+                timeline={tl}
+                currentTime={currentTime}
+                duration={duration}
+                isPlaying={isPlaying}
+                onPlayPause={() => clockRef.current.togglePlayPause()}
+                clock={clockInstance}
+                renderMode={renderSettings.renderMode}
+                stripViewport={renderSettings.stripViewport}
+                stripGap={renderSettings.stripGap}
+                onSeek={handleSeek}
+                onSelectPanel={(panelId) => {
+                  setSelectedId(panelId);
+                  const idx = project.panels.findIndex(p => p.id === panelId);
+                  if (idx !== -1) setCurrentPanelIdx(idx);
+                }}
+                selectedPanelId={typeof selectedId === 'number' ? selectedId : null}
+                audioPanelIds={existingAudioIds}
+                introText={project.intro}
+                outroText={project.outro}
+                introDuration={project.introDuration}
+                outroDuration={project.outroDuration}
+                introAudioDuration={introAudioDuration}
+                outroAudioDuration={outroAudioDuration}
+                debugOverlay={project.settings.debugOverlay}
+                onToggleDebugOverlay={(next) =>
+                  updateProject({ settings: { ...project.settings, debugOverlay: next } })
+                }
+              />
 
-          <RenderModePanel
-            {...renderSettings}
-            onChange={(patch) => updateProject({ settings: { ...project.settings, ...patch } })}
-          />
+              <RenderModePanel
+                {...renderSettings}
+                onChange={(patch) => updateProject({ settings: { ...project.settings, ...patch } })}
+              />
 
-          <Timeline
-            images={images}
-            timeline={tl}
-            currentTime={currentTime}
-            duration={duration}
-            onSeek={handleSeek}
-            onSelectPanel={(id) => { setSelectedId(id); const idx = project.panels.findIndex(p => p.id === id); if (idx !== -1) setCurrentPanelIdx(idx); }}
-            onSelectIntro={() => setSelectedId('intro')}
-            onSelectOutro={() => setSelectedId('outro')}
-            selectedId={selectedId}
-            introDuration={project.introDuration}
-            outroDuration={project.outroDuration}
-            panelGap={panelGap}
-            onGapChange={handleGapChange}
-            audioPanelIds={[...audioBlobs.keys()]}
-          />
+              <Timeline
+                images={images}
+                timeline={tl}
+                panels={project.panels}
+                currentTime={currentTime}
+                duration={duration}
+                onSeek={handleSeek}
+                onSelectPanel={(id) => {
+                  setSelectedId(id);
+                  const idx = project.panels.findIndex(p => p.id === id);
+                  if (idx !== -1) setCurrentPanelIdx(idx);
+                }}
+                onSelectIntro={() => setSelectedId('intro')}
+                onSelectOutro={() => setSelectedId('outro')}
+                selectedId={selectedId}
+                introDuration={project.introDuration}
+                outroDuration={project.outroDuration}
+                panelGap={panelGap}
+                onGapChange={handleGapChange}
+                audioPanelIds={existingAudioIds}
+                isPlaying={isPlaying}
+                onSplitActiveClip={handleSplitActiveClip}
+                onMoveActiveClipLeft={() => handleMoveActiveClip(-1)}
+                onMoveActiveClipRight={() => handleMoveActiveClip(1)}
+                onReorderPanel={handleReorderClip}
+                onReorderClip={(fromIdx, toIdx) => {
+                  const sorted = [...project.panels].sort((a, b) => a.order - b.order || a.id - b.id);
+                  const moved = sorted[fromIdx];
+                  if (moved) handleReorderClip(moved.id, toIdx);
+                }}
+                onTrimPanel={handleSetPanelAudioTrim}
+                onSetPanelTrim={handleSetPanelAudioTrim}
+                onTogglePanelMute={handleTogglePanelMute}
+                onTogglePanelSolo={handleTogglePanelSolo}
+                canUndo={historyAvail.canUndo}
+                canRedo={historyAvail.canRedo}
+                onUndo={handleUndo}
+                onRedo={handleRedo}
+              />
 
-          <div className="pt-2">
-            {/* needsAttention: панели появились или аудио удалено/устарело —
-                подсвечиваем кнопку, пока всё не озвучено (связка с остальным UI) */}
-            <button
-              onClick={handleGenerateAudio}
-              disabled={isGeneratingAudio}
-              className={`w-full h-11 rounded-[10px] bg-[#E8B44C] text-[#0B0B0C] font-medium text-[14px] hover:bg-[#B88A2E] transition-colors duration-[150ms] disabled:opacity-50 flex items-center justify-center gap-2 ${voiceButton.needsAttention && !isGeneratingAudio ? 'shadow-[0_0_18px_rgba(232,180,76,0.35)]' : ''}`}
-            >
-              {isGeneratingAudio ? <><Loader2 className="w-4 h-4 animate-spin" /> {audioProgress}</> : voiceButton.label}
-            </button>
-            {costEstimate && !isGeneratingAudio && (
-              <p className="text-center font-mono text-[11px] text-[#8A8A93] mt-2">{costEstimate.characters} симв. · {costEstimate.cost} · OPFS кэш — повтор бесплатно</p>
-            )}
-            {voiceButton.hint && !isGeneratingAudio && (
-              <p className="text-center text-[11px] text-[#E8B44C] mt-1">{voiceButton.hint}</p>
-            )}
-            {project.panels.length === 0 && (
-              <div className="mt-6 p-8 rounded-[16px] border border-dashed border-[#26262C] bg-[#16161A]/50 text-center">
-                <p className="text-[14px] font-medium">Проект пустой</p>
-                <p className="text-xs text-[#8A8A93] mt-1">Добавь изображения на главной или нажми «Озвучить» чтобы услышать интро/аутро</p>
+              <div className="pt-2">
+                {/* needsAttention: панели появились или аудио удалено/устарело —
+                    подсвечиваем кнопку, пока всё не озвучено (связка с остальным UI) */}
+                <button
+                  onClick={handleGenerateAudio}
+                  disabled={isGeneratingAudio}
+                  className={`w-full h-11 rounded-[10px] bg-[#E8B44C] text-[#0B0B0C] font-medium text-[14px] hover:bg-[#B88A2E] transition-colors duration-[150ms] disabled:opacity-50 flex items-center justify-center gap-2 ${voiceButton.needsAttention && !isGeneratingAudio ? 'shadow-[0_0_18px_rgba(232,180,76,0.35)]' : ''}`}
+                >
+                  {isGeneratingAudio ? <><Loader2 className="w-4 h-4 animate-spin" /> {audioProgress}</> : voiceButton.label}
+                </button>
+                {costEstimate && !isGeneratingAudio && (
+                  <p className="text-center font-mono text-[11px] text-[#8A8A93] mt-2">{costEstimate.characters} симв. · {costEstimate.cost} · OPFS кэш — повтор бесплатно</p>
+                )}
+                {voiceButton.hint && !isGeneratingAudio && (
+                  <p className="text-center text-[11px] text-[#E8B44C] mt-1">{voiceButton.hint}</p>
+                )}
+                {project.panels.length === 0 && (
+                  <div className="mt-6 p-8 rounded-[16px] border border-dashed border-[#26262C] bg-[#16161A]/50 text-center">
+                    <p className="text-[14px] font-medium">Проект пустой</p>
+                    <p className="text-xs text-[#8A8A93] mt-1">Добавь изображения на главной или нажми «Озвучить» чтобы услышать интро/аутро</p>
+                  </div>
+                )}
               </div>
-            )}
-          </div>
             </div>
 
             <aside className="min-w-0 lg:sticky lg:top-20">
@@ -1516,8 +2037,56 @@ export default function EditorPage() {
               <ContextPanel
                 selected={contextValue as any}
                 onUpdatePanel={(id, updates) => {
+                  if (
+                    updates.trimIn !== undefined ||
+                    updates.trimOut !== undefined
+                  ) {
+                    const p = project.panels.find(item => item.id === id);
+                    handleSetPanelAudioTrim(
+                      id,
+                      updates.trimIn ?? p?.trimIn ?? 0,
+                      updates.trimOut ?? p?.trimOut ?? 0
+                    );
+                    if (Object.keys(updates).every(k => k === 'trimIn' || k === 'trimOut')) return;
+                  }
+                  if ('durationOverride' in updates) {
+                    handleSetPanelDurationOverride(id, updates.durationOverride);
+                    if (Object.keys(updates).every(k => k === 'durationOverride')) return;
+                  }
+                  if (
+                    updates.gain !== undefined ||
+                    updates.fadeIn !== undefined ||
+                    updates.fadeOut !== undefined
+                  ) {
+                    handleSetPanelAudioGainAndFades(id, {
+                      gain: updates.gain,
+                      fadeIn: updates.fadeIn,
+                      fadeOut: updates.fadeOut,
+                    });
+                    if (Object.keys(updates).every(k => k === 'gain' || k === 'fadeIn' || k === 'fadeOut')) return;
+                  }
+                  const snap = buildCurrentHistorySnapshot(`Правка панели #${id}`);
+                  if (snap) historyRef.current.record(snap);
                   const newPanels = project.panels.map(p => p.id === id ? { ...p, ...updates } : p);
-                  updateProject({ panels: newPanels });
+                  // Любое изменение панели немедленно инвалидирует и пересобирает устаревший таймлайн + SRT (Этап 1 п. 9)
+                  const rebuilt = rebuildSrt({
+                    panels: newPanels,
+                    audioDurations,
+                    voiceAssignments: project.voiceAssignments,
+                    intro: project.intro,
+                    outro: project.outro,
+                    introDuration: project.introDuration,
+                    outroDuration: project.outroDuration,
+                    panelGap,
+                    realDurations: project.audioDurations,
+                  });
+                  updateProject({
+                    panels: newPanels,
+                    timeline: rebuilt.timeline,
+                    srt: rebuilt.srt,
+                    timelineVersion: (project.timelineVersion ?? 2) + 1,
+                  });
+                  syncHistoryAvail();
                 }}
                 onUpdateIntro={(text, dur) => applyIntroOutroChange({ intro: text, introDuration: dur })}
                 onUpdateOutro={(text, dur) => applyIntroOutroChange({ outro: text, outroDuration: dur })}
@@ -1532,11 +2101,15 @@ export default function EditorPage() {
             </aside>
           </div>
 
-          <div className="pt-8 pb-4 flex items-center justify-between text-[11px] font-mono text-[#8A8A93]/60">
-            <span>{project.useOPFS ? 'OPFS' : 'IDB'} · {images.length} изобр. · {formatTime(duration)}</span>
-            <span className="flex gap-3">
-              <span>Space play</span>
-              <span>←→ ±5s</span>
+          <div className="pt-8 pb-4 flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono text-[#8A8A93]/60">
+            <span>
+              {project.useOPFS && opfsActive ? 'OPFS + IDB' : 'IDB fallback'} · {images.length} изобр. · {formatTime(duration)}
+            </span>
+            <span className="flex flex-wrap gap-3">
+              <span>Space / K play</span>
+              <span>J / L / ←→ ±5s</span>
+              <span>S split</span>
+              <span>⌘Z / ⇧⌘Z undo/redo</span>
               <span>⌘S save</span>
               <span>⌘E export</span>
             </span>
@@ -1564,6 +2137,8 @@ export default function EditorPage() {
         panels={project.panels}
         existingAudio={existingAudioIds}
         onApply={handleImportAudio}
+        canUndoLastImport={Boolean(lastImportUndo)}
+        onUndoLastImport={() => void handleUndoLastAudioImport()}
       />}
 
       <IntroOutroModal
@@ -1628,7 +2203,23 @@ export default function EditorPage() {
         costEstimate={costEstimate}
         onGenerateSEO={handleGenerateSEO}
         generatingSEO={generatingSEO}
+        healthReport={healthReport ?? undefined}
+        onPreviewAudioMix={handlePreviewAudioMix}
+        onDownloadDiagnosticJson={handleDownloadDiagnosticJson}
       />
+
+      {showHealthModal && healthReport && (
+        <ProjectHealthModal
+          healthReport={healthReport}
+          eventLog={project.eventLog ?? []}
+          storageBackendLabel={project.useOPFS && opfsActive ? 'OPFS + IDB' : 'IDB fallback'}
+          onClose={() => setShowHealthModal(false)}
+          onJumpToIssue={handleJumpToHealthIssue}
+          onDownloadDiagnosticJson={handleDownloadDiagnosticJson}
+          onExportProjectZip={() => void handleExportProjectZip()}
+          onImportProjectZip={(file) => void handleImportProjectZip(file)}
+        />
+      )}
     </div>
   );
 }
