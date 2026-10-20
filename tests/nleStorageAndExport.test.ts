@@ -549,6 +549,8 @@ test('Итерация 2 — Задача 6: единообразное обно
   // Проверяем, что каждый из 7 именованных NLE-обработчиков EditorPage вызывает applyNleResult(res)
   const expectedNleHandlers = [
     'handleSplitActiveClip',
+    'handleDeleteActiveClip',
+    'handleDuplicateActiveClip',
     'handleReorderClip',
     'handleTogglePanelMute',
     'handleTogglePanelSolo',
@@ -568,8 +570,8 @@ test('Итерация 2 — Задача 6: единообразное обно
   const applyMatches = editorSrc.match(/applyNleResult\(/g) ?? [];
   assert.equal(
     applyMatches.length,
-    7, // 7 вызовов в NLE-обработчиках
-    `Ожидалось 7 вызовов applyNleResult в NLE-обработчиках EditorPage, найдено ${applyMatches.length}`
+    expectedNleHandlers.length,
+    `Ожидалось ${expectedNleHandlers.length} вызовов applyNleResult в NLE-обработчиках EditorPage, найдено ${applyMatches.length}`
   );
   // Также проверяем, что handleApplyScenario прокидывает timelineVersion: patch.timelineVersion
   assert.ok(

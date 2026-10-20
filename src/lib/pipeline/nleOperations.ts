@@ -399,3 +399,47 @@ export function setPanelAudioGainAndFades(
   });
   return applyRippleEdit(nextPanels, audioDurations, options);
 }
+
+export function deletePanelClipWithRipple(
+  panels: readonly PanelData[],
+  audioDurations: Record<number, number>,
+  panelId: number,
+  options?: NleRebuildOptions
+): NleMutationResult {
+  const nextPanels = panels.filter(p => p.id !== panelId);
+  const nextDurations = { ...audioDurations };
+  delete nextDurations[panelId];
+  const reindexed = [...nextPanels]
+    .sort((a, b) => a.order - b.order || a.id - b.id)
+    .map((p, i) => ({ ...p, order: i }));
+  return applyRippleEdit(reindexed, nextDurations, options);
+}
+
+export function duplicatePanelClip(
+  panels: readonly PanelData[],
+  audioDurations: Record<number, number>,
+  panelId: number,
+  options?: NleRebuildOptions
+): NleMutationResult {
+  const sorted = [...panels].sort((a, b) => a.order - b.order || a.id - b.id);
+  const targetIdx = sorted.findIndex(p => p.id === panelId);
+  if (targetIdx < 0) return applyRippleEdit(panels, audioDurations, options);
+
+  const target = sorted[targetIdx];
+  const maxId = sorted.reduce((m, p) => Math.max(m, p.id), 0);
+  const newId = maxId + 1;
+
+  const newPanel: PanelData = {
+    ...target,
+    bbox: { ...target.bbox },
+    id: newId,
+    order: target.order + 0.5,
+    sourceAudioPanelId: target.sourceAudioPanelId ?? target.id,
+  };
+  const nextList = [...sorted, newPanel].sort((a, b) => a.order - b.order || a.id - b.id);
+  const reindexed = nextList.map((p, i) => ({ ...p, order: i }));
+
+  const nextDurations = { ...audioDurations, [newId]: audioDurations[panelId] || 2.0 };
+  return applyRippleEdit(reindexed, nextDurations, options);
+}
+

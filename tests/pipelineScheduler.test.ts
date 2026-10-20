@@ -26,12 +26,22 @@ function durationOf(buffer: ArrayBuffer): number {
 class FakeAudioBuffer {
   length: number;
   duration: number;
+  private channelsData: Float32Array[];
   constructor(public numberOfChannels: number, length: number, public sampleRate: number) {
     this.length = length;
     this.duration = length / sampleRate;
+    this.channelsData = Array.from({ length: numberOfChannels }, () => {
+      const arr = new Float32Array(length);
+      arr.fill(0.5);
+      return arr;
+    });
   }
-  getChannelData(): Float32Array {
-    return new Float32Array(this.length);
+  getChannelData(ch = 0): Float32Array {
+    return this.channelsData[ch] ?? this.channelsData[0];
+  }
+  copyToChannel(src: Float32Array, ch = 0): void {
+    const dest = this.channelsData[ch];
+    if (dest) dest.set(src.subarray(0, dest.length));
   }
 }
 
@@ -39,7 +49,7 @@ class FakeContext {
   currentTime = 0;
   sampleRate = SAMPLE_RATE;
   /** Что реально попало в граф: когда и как долго. */
-  started: Array<{ when: number; playDuration: number }> = [];
+  started: Array<{ when: number; playDuration: number; buffer?: FakeAudioBuffer | null }> = [];
   /** Декодирования, которые нужно придержать (для проверки гонки с dispose). */
   held: Array<() => void> = [];
   holdNext = false;
@@ -62,7 +72,11 @@ class FakeContext {
       disconnect: () => {},
       stop: () => {},
       start: (when: number, _offset?: number, playDuration?: number) => {
-        started.push({ when, playDuration: playDuration ?? source.buffer?.duration ?? 0 });
+        started.push({
+          when,
+          playDuration: playDuration ?? source.buffer?.duration ?? 0,
+          buffer: source.buffer,
+        });
       },
     };
     return source;
@@ -185,3 +199,220 @@ test('гонка dispose(): декод, завершившийся ПОСЛЕ di
   assert.equal(scheduler!.scheduled, afterDispose, 'поздние декоды не должны планировать источники');
   assert.equal(afterDispose, 0, 'dispose до применения декодов = в графе пусто');
 });
+
+test('createPlacementScheduler: применяет огибающую (muted/gain/trim) и фиксирует startedAt ПОСЛЕ planPlacements', async () => {
+  const ctx = installFakeWebAudio();
+  // Имитируем продвижение часов AudioContext во время измерения длительностей
+  ctx.currentTime = 1.5;
+  const scheduler = await createPlacementScheduler(
+    ctx as never,
+    ctx.destination as never,
+    [
+      {
+        start: 0,
+        blob: makeBlob(2),
+        label: 'Заглушенная панель',
+        role: 'panel',
+        muted: true,
+      },
+    ],
+    {
+      lookahead: 4,
+      sampleRate: SAMPLE_RATE,
+      channels: CHANNELS,
+    }
+  );
+  assert.ok(scheduler);
+  assert.ok(
+    scheduler!.startedAt >= 1.5,
+    `startedAt (${scheduler!.startedAt}) должен отсчитываться от текущего времени после planPlacements`
+  );
+  await scheduler!.prime();
+  assert.equal(ctx.started.length, 1);
+  const scheduledBuffer = ctx.started[0].buffer as unknown as { getChannelData: (ch: number) => Float32Array };
+  const samples = scheduledBuffer.getChannelData(0);
+  const maxAbs = samples.reduce((m, v) => Math.max(m, Math.abs(v)), 0);
+  assert.equal(maxAbs, 0, 'заглушенный клип (muted: true) в планировщике MediaRecorder должен быть тишиной');
+});
+
+test('WebCodecsBackend.renderWithMediabunny: реально вызывает output.start() ДО appendPlacements и не обрезает немое аутро', async () => {
+  const { WebCodecsBackend } = await import('../src/lib/pipeline/videoEncoder');
+  installFakeWebAudio();
+  const prevDocument = (globalThis as Record<string, unknown>).document;
+  (globalThis as Record<string, unknown>).document = {
+    createElement: () => ({
+      width: 0,
+      height: 0,
+      getContext: () => ({
+        save: () => {},
+        restore: () => {},
+        fillRect: () => {},
+        strokeRect: () => {},
+        fillText: () => {},
+        drawImage: () => {},
+        beginPath: () => {},
+        rect: () => {},
+        roundRect: () => {},
+        arc: () => {},
+        clearRect: () => {},
+        moveTo: () => {},
+        lineTo: () => {},
+        arcTo: () => {},
+        closePath: () => {},
+        fill: () => {},
+        stroke: () => {},
+        clip: () => {},
+        measureText: (t: string) => ({ width: t.length * 8 }),
+        createLinearGradient: () => ({ addColorStop: () => {} }),
+      }),
+    }),
+  };
+
+  try {
+    const events: string[] = [];
+    let outputStarted = false;
+    let videoFramesAdded = 0;
+
+    class FakeBufferTarget {
+      buffer = new Uint8Array([0x00, 0x00, 0x00, 0x18]).buffer;
+    }
+    class FakeMp4OutputFormat {}
+    class FakeCanvasSource {
+      async add() {
+        if (!outputStarted) {
+          throw new Error('Output has not started.');
+        }
+        videoFramesAdded++;
+        if (videoFramesAdded === 1) events.push('canvasSource.add');
+      }
+    }
+    class FakeAudioBufferSource {
+      async add() {
+        if (!outputStarted) {
+          throw new Error('Output has not started.');
+        }
+        events.push('audioSource.add');
+      }
+    }
+    class FakeOutput {
+      addVideoTrack() {
+        events.push('output.addVideoTrack');
+      }
+      addAudioTrack() {
+        events.push('output.addAudioTrack');
+      }
+      async start() {
+        outputStarted = true;
+        events.push('output.start');
+      }
+      async finalize() {
+        events.push('output.finalize');
+      }
+    }
+
+    const backend = new WebCodecsBackend();
+    const progressEvents: Array<{ p: number; stage?: string }> = [];
+    // 1.0 с аудио панели + 1.0 с немого аутро => timelineDuration = 2.0 с (20 кадров при 10 fps)
+    const blob = await backend.renderWithMediabunny(
+      {
+        images: [],
+        audioBlobs: [],
+        audioPlacements: [{ start: 0, blob: makeBlob(1), label: 'Панель 1', role: 'panel' }],
+        timeline: [
+          {
+            panelId: 1,
+            imageIndex: 0,
+            audioStart: 0,
+            audioEnd: 1.0,
+            panelBbox: { x: 0, y: 0, width: 100, height: 100 },
+            voiceId: 'v1',
+            text: 'Тест',
+            character: 'Герой',
+          },
+        ],
+        introText: '',
+        outroText: 'Подписывайтесь!',
+        introDuration: 0,
+        outroDuration: 1.0,
+        srtContent: '',
+        width: 320,
+        height: 180,
+        fps: 10,
+        onProgress: (p, stage) => progressEvents.push({ p, stage }),
+      },
+      {
+        Output: FakeOutput,
+        Mp4OutputFormat: FakeMp4OutputFormat,
+        CanvasSource: FakeCanvasSource,
+        AudioBufferSource: FakeAudioBufferSource,
+        BufferTarget: FakeBufferTarget,
+      }
+    );
+
+    assert.equal(blob.type, 'video/mp4');
+    assert.deepEqual(events, [
+      'output.addVideoTrack',
+      'output.addAudioTrack',
+      'output.start',
+      'audioSource.add',
+      'canvasSource.add',
+      'output.finalize',
+    ]);
+    assert.equal(
+      videoFramesAdded,
+      20,
+      'длительность видео должна включать немое аутро (2.0 с * 10 fps = 20 кадров, а не обрезаться до 1.0 с аудио)'
+    );
+    assert.deepEqual(
+      progressEvents.map(item => item.p),
+      [0, 0, 0.25, 0.5, 0.75, 0.9, 1],
+      'onProgress должен вызываться на инициализации, каждые 5 кадров, на обработке аудио (0.9) и завершении (1)'
+    );
+    assert.ok(
+      progressEvents.some(item => item.stage?.includes('Рендеринг') || item.stage?.includes('Кодирование')),
+      'этапы прогресса должны содержать «Рендеринг» или «Кодирование»'
+    );
+    assert.ok(
+      progressEvents.some(item => item.stage?.includes('Обработка аудио')),
+      'этапы прогресса должны содержать «Обработка аудио»'
+    );
+
+    // Проверка отмены рендеринга через signal.aborted (AbortError)
+    const abortCtrl = new AbortController();
+    await assert.rejects(
+      async () => {
+        await backend.renderWithMediabunny(
+          {
+            images: [],
+            audioBlobs: [],
+            timeline: [],
+            introText: '',
+            outroText: '',
+            introDuration: 1.0,
+            outroDuration: 1.0,
+            srtContent: '',
+            width: 320,
+            height: 180,
+            fps: 10,
+            signal: abortCtrl.signal,
+            onProgress: (p) => {
+              if (p >= 0.25) abortCtrl.abort();
+            },
+          },
+          {
+            Output: FakeOutput,
+            Mp4OutputFormat: FakeMp4OutputFormat,
+            CanvasSource: FakeCanvasSource,
+            AudioBufferSource: FakeAudioBufferSource,
+            BufferTarget: FakeBufferTarget,
+          }
+        );
+      },
+      (err: unknown) => err instanceof Error && err.name === 'AbortError',
+      'signal.aborted должен прерывать рендеринг с AbortError'
+    );
+  } finally {
+    (globalThis as Record<string, unknown>).document = prevDocument;
+  }
+});
+

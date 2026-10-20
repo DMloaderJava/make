@@ -6,6 +6,8 @@ import { getAllProjects, createProject, Project } from '@/lib/storage/db';
 import { getAllKeys, getSettings } from '@/lib/storage/local';
 import { getLLMProvider, resolveLLMVisionModel } from '@/lib/providers/llm';
 import { processAllImages, mergeVisionResults } from '@/lib/pipeline/extractPanels';
+import { OnboardingWizard, isOnboardingCompleted } from '@/components/onboarding/OnboardingWizard';
+import { createDemoProject } from '@/lib/pipeline/demoProject';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 
@@ -25,10 +27,14 @@ export default function HomePage() {
   const [previews, setPreviews] = useState<Record<string, string>>({});
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState<{ current: number; total: number; stage: string } | null>(null);
+  const [showOnboarding, setShowOnboarding] = useState(false);
   const router = useRouter();
 
   useEffect(() => {
     loadProjects();
+    if (!isOnboardingCompleted()) {
+      setShowOnboarding(true);
+    }
   }, []);
 
   const loadProjects = async () => {
@@ -134,29 +140,7 @@ export default function HomePage() {
 
   const handleDemo = async () => {
     try {
-      const project = await createProject(`Демо ${new Date().toLocaleDateString('ru-RU')}`, [] as any);
-      const mockPanels = [
-        { id: 0, bbox: { x: 5, y: 5, width: 90, height: 40 }, dialogue: 'Ты действительно думаешь, что сможешь победить меня?', character: 'Антагонист', emotion: 'angry', type: 'speech' as const, order: 0, imageIndex: 0 },
-        { id: 1, bbox: { x: 10, y: 50, width: 80, height: 30 }, dialogue: 'Я не думаю. Я знаю.', character: 'Герой', emotion: 'neutral', type: 'speech' as const, order: 1, imageIndex: 0 },
-      ];
-      const updated: Project = {
-        ...project,
-        images: ['https://images.unsplash.com/photo-1578662996442-48f60103fc96?w=800&h=1200&fit=crop'],
-        useOPFS: false,
-        panels: mockPanels as any,
-        characters: [
-          { name: 'Герой', appearance: 'Молодой воин', voiceId: '', emotion: 'neutral' },
-          { name: 'Антагонист', appearance: 'Мощный противник', voiceId: '', emotion: 'angry' }
-        ],
-        sceneDescription: 'Эпическая битва, напряжённый диалог перед кульминацией.',
-        intro: 'Вы когда-нибудь видели момент, когда всё решается одним ударом? Эта сцена именно такая. Сейчас вы увидите.',
-        outro: 'Спасибо за просмотр! Больше — в шапке профиля. Подписывайтесь!',
-        settings: { ttsProvider: 'gemini', llmProvider: 'openrouter', visionModel: 'google/gemma-4-31b-it:free', musicVolume: 0.15 },
-        introDuration: 8,
-        outroDuration: 5,
-      };
-      const { saveProject } = await import('@/lib/storage/db');
-      await saveProject(updated);
+      const project = await createDemoProject();
       router.push(`/editor/${project.id}`);
     } catch (e: any) {
       alert(`Демо ошибка: ${e.message}`);
@@ -204,9 +188,19 @@ export default function HomePage() {
       <div className="max-w-[960px] mx-auto p-4 md:p-8 space-y-10">
         <div className="flex items-center justify-between pt-4">
           <h1 className="text-[20px] font-medium tracking-tight">Manga Voice Studio</h1>
-          <Link href="/settings" className="h-8 px-3 rounded-[6px] bg-[#16161A] border border-[#26262C] text-xs hover:bg-[#1E1E23] transition-colors flex items-center">
-            Провайдеры
-          </Link>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              data-testid="open-onboarding-btn"
+              onClick={() => setShowOnboarding(true)}
+              className="h-8 px-3 rounded-[6px] bg-[#16161A] border border-[#26262C] text-xs hover:bg-[#1E1E23] transition-colors flex items-center"
+            >
+              Настройка
+            </button>
+            <Link href="/settings" className="h-8 px-3 rounded-[6px] bg-[#16161A] border border-[#26262C] text-xs hover:bg-[#1E1E23] transition-colors flex items-center">
+              Провайдеры
+            </Link>
+          </div>
         </div>
 
         <div className="py-8 space-y-6">
@@ -230,13 +224,26 @@ export default function HomePage() {
                   <ImageUploader onUpload={handleUpload} multiple />
                 </div>
                 <div className="flex flex-wrap justify-center gap-x-4 gap-y-1">
-                  <button onClick={handleScenarioDemo} className="text-xs text-[#E8B44C] hover:text-[#F5F5F7] transition-colors">Тест сценария (демо-изображения) →</button>
-                  <button onClick={handleDemo} className="text-xs text-[#8A8A93] hover:text-[#F5F5F7] transition-colors">Попробовать демо без ключей →</button>
+                  <button
+                    type="button"
+                    data-testid="create-demo-project-btn"
+                    onClick={handleDemo}
+                    className="text-xs text-[#E8B44C] hover:text-[#F5F5F7] transition-colors font-medium"
+                  >
+                    Создать демо-проект →
+                  </button>
+                  <button onClick={handleScenarioDemo} className="text-xs text-[#8A8A93] hover:text-[#F5F5F7] transition-colors">Тест сценария (демо-изображения) →</button>
                 </div>
               </div>
             )}
           </div>
         </div>
+
+        <OnboardingWizard
+          open={showOnboarding}
+          onClose={() => setShowOnboarding(false)}
+          onCreateDemo={handleDemo}
+        />
 
         {projects.length > 0 && (
           <div className="space-y-4">

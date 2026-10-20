@@ -50,12 +50,20 @@ export interface AssembleOptions {
   stripGap?: number;
   /** Панели проекта: нужны ленте, если в таймлайне нет imageIndex. */
   panels?: Array<{ id: number; imageIndex: number; fullFrame?: boolean; bbox?: { x: number; y: number; width: number; height: number } }>;
+  /** Прогресс рендеринга 0..1 и название текущего этапа. */
+  onProgress?: (progress: number, stage?: string) => void;
+  /** Сигнал отмены рендеринга. */
+  signal?: AbortSignal;
 }
 
 // Honest implementation using Canvas + MediaRecorder - fixed Promise antipattern
 export async function assembleVideoWithCanvas(
-  options: AssembleOptions & { onProgress?: (p: number) => void }
+  options: AssembleOptions
 ): Promise<Blob> {
+  if (options.signal?.aborted) {
+    throw new DOMException('Aborted', 'AbortError');
+  }
+  options.onProgress?.(0, 'Инициализация');
   const canvas = document.createElement('canvas');
   const width = options.width || 1920;
   const height = options.height || 1080;
@@ -114,7 +122,6 @@ export async function assembleVideoWithCanvas(
   let audioDestination: MediaStreamAudioDestinationNode | null = null;
   let audioStartedAt: number | null = null;
   let scheduler: PlacementScheduler | null = null;
-  const leadIn = placements.length > 0 ? 0.25 : 0;
 
   if (placements.length > 0) {
     try {
@@ -140,10 +147,14 @@ export async function assembleVideoWithCanvas(
       scheduler = await createPlacementScheduler(audioContext, audioDestination, placements, {
         sampleRate: 44100,
         channels: 2,
-        startAt: audioContext.currentTime + leadIn,
         lookahead: 4,
       });
       if (scheduler) {
+        try {
+          await scheduler.prime();
+        } catch (e) {
+          console.warn('Не удалось предварительно подготовить аудио к старту', e);
+        }
         audioStartedAt = scheduler.startedAt;
         timelineDuration = Math.max(timelineDuration, scheduler.duration);
         // Обрезка панельных реплик — это то, о чём пользователю надо сказать явно.
@@ -196,9 +207,30 @@ export async function assembleVideoWithCanvas(
   const totalDuration = timelineDuration;
 
   return new Promise<Blob>((resolve, reject) => {
+    let settled = false;
     const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 5000000 });
     recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+
+    const handleAbort = () => {
+      if (settled) return;
+      settled = true;
+      if (stopGuard !== undefined) { clearTimeout(stopGuard); stopGuard = undefined; }
+      try { if (recorder.state === 'recording') recorder.stop(); } catch {}
+      try { scheduler?.dispose(); } catch {}
+      try { audioContext?.close(); } catch {}
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
+
+    if (options.signal?.aborted) {
+      handleAbort();
+      return;
+    }
+    options.signal?.addEventListener('abort', handleAbort, { once: true });
+
     recorder.onstop = () => {
+      options.signal?.removeEventListener('abort', handleAbort);
+      if (settled) return;
+      settled = true;
       try {
         if (chunks.length === 0) {
           console.warn('[assembleVideo] MediaRecorder onstop with 0 chunks', {
@@ -215,6 +247,9 @@ export async function assembleVideoWithCanvas(
       resolve(new Blob(chunks, { type: mimeType || 'video/webm' }));
     };
     recorder.onerror = (e) => {
+      options.signal?.removeEventListener('abort', handleAbort);
+      if (settled) return;
+      settled = true;
       if (stopGuard !== undefined) clearTimeout(stopGuard);
       try { scheduler?.dispose(); } catch {}
       try { audioContext?.close(); } catch {}
@@ -255,14 +290,27 @@ export async function assembleVideoWithCanvas(
     // (AudioContext, если есть звук), а не «наращиванием 1/fps».
     // Поправок на leadIn здесь НЕТ: он уже внутри audioStartedAt.
     const animate = () => {
+      if (options.signal?.aborted) {
+        handleAbort();
+        return;
+      }
       // Подкидываем планировщику фрагменты, до которых осталось меньше lookahead.
       // Без этого вызова в графе не окажется ни одного источника — и WEBM будет немым.
       scheduler?.tick();
       const time = mediaClock(fallbackStart);
-      if (time >= totalDuration) { renderFrame(totalDuration); stopRecorder(); return; }
+      if (time >= totalDuration) {
+        renderFrame(totalDuration);
+        options.onProgress?.(1, 'Финализация');
+        stopRecorder();
+        return;
+      }
       if (time >= 0) renderFrame(time);
       frameCount++;
-      if (frameCount % 10 === 0) options.onProgress?.(Math.max(0, time / totalDuration));
+      if (options.onProgress && frameCount % 5 === 0) {
+        const progress = Math.min(1, Math.max(0, time / totalDuration));
+        const stage = progress < 0.85 ? 'Рендеринг видео' : 'Финализация';
+        options.onProgress(progress, stage);
+      }
       requestAnimationFrame(animate);
     };
 

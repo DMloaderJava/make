@@ -286,6 +286,8 @@ export class UnifiedAudioPlayer {
   private audio: AudioLikeElement | null = null;
   private activeSlot: AudioPlayerSlot | null = null;
   private activeUrl: string | null = null;
+  private loadedSlotKey: string | null = null;
+  private playRequestId = 0;
   private status: AudioPlaybackStatus = 'idle';
   private rafId: number | null = null;
   private lastWallMs = 0;
@@ -415,13 +417,50 @@ export class UnifiedAudioPlayer {
         this.activeSlot?.blob === slot.blob &&
         this.activeUrl !== null;
 
+      const offsetInSlot = slot.trimIn + Math.max(0, currentTime - slot.timelineStart);
+
+      // Если этот же слот уже проигрывается или загружается, не перезапускаем audio.play(),
+      // чтобы не прерывать текущий промис play() с AbortError при ререндерах React.
+      if (
+        sameSlot &&
+        (this.status === 'playing' || this.status === 'loading') &&
+        !audio.paused
+      ) {
+        this.activeSlot = slot;
+        audio.muted = slot.muted;
+        audio.volume = slot.volume;
+        audio.playbackRate = this.clock.getPlaybackRate();
+        if (Math.abs(audio.currentTime - offsetInSlot) > 0.25) {
+          try {
+            audio.currentTime = offsetInSlot;
+          } catch {}
+        }
+        if (this.status === 'playing' && this.rafId === null) {
+          this.startAudioRaf(slot, params);
+        }
+        return;
+      }
+
+      const requestId = ++this.playRequestId;
+
       if (!sameSlot) {
-        if (this.activeSlot && this.activeSlot.key !== slot.key) {
-          this.registry.revokeByKey(this.activeSlot.key);
+        try {
+          audio.onended = null;
+          audio.onerror = null;
+          audio.onwaiting = null;
+          audio.onstalled = null;
+          audio.oncanplay = null;
+          audio.onloadedmetadata = null;
+          audio.pause();
+        } catch {}
+        const prevKey = this.activeSlot?.key ?? this.loadedSlotKey;
+        if (prevKey && prevKey !== slot.key) {
+          this.registry.revokeByKey(prevKey);
         }
         const { url } = this.registry.acquire(slot.key, slot.blob);
         this.activeSlot = slot;
         this.activeUrl = url;
+        this.loadedSlotKey = slot.key;
         this.setStatus('loading');
         audio.src = url;
       } else {
@@ -432,8 +471,7 @@ export class UnifiedAudioPlayer {
       audio.volume = slot.volume;
       audio.playbackRate = this.clock.getPlaybackRate();
 
-      const offsetInSlot = slot.trimIn + Math.max(0, currentTime - slot.timelineStart);
-      if (Math.abs(audio.currentTime - offsetInSlot) > 0.08 || !sameSlot) {
+      if (sameSlot ? Math.abs(audio.currentTime - offsetInSlot) > 0.08 : offsetInSlot > 0.05) {
         try {
           audio.currentTime = offsetInSlot;
         } catch {}
@@ -446,7 +484,7 @@ export class UnifiedAudioPlayer {
       this.lastElementRawTime = audio.currentTime;
 
       audio.onloadedmetadata = () => {
-        if (this.activeSlot?.key !== slot.key) return;
+        if (requestId !== this.playRequestId || this.activeSlot?.key !== slot.key) return;
         const offset = slot.trimIn + Math.max(0, this.clock.getTime() - slot.timelineStart);
         if (Number.isFinite(offset) && Math.abs(audio.currentTime - offset) > 0.05) {
           try {
@@ -456,29 +494,36 @@ export class UnifiedAudioPlayer {
       };
 
       audio.oncanplay = () => {
-        if (this.activeSlot?.key !== slot.key) return;
+        if (requestId !== this.playRequestId || this.activeSlot?.key !== slot.key) return;
         if (this.status === 'loading' || this.status === 'waiting' || this.status === 'stalled') {
           this.setStatus(this.clock.getIsPlaying() ? 'playing' : 'canplay');
         }
       };
 
       audio.onwaiting = () => {
-        if (this.activeSlot?.key !== slot.key) return;
+        if (requestId !== this.playRequestId || this.activeSlot?.key !== slot.key) return;
         this.setStatus('waiting');
       };
 
       audio.onstalled = () => {
-        if (this.activeSlot?.key !== slot.key) return;
+        if (requestId !== this.playRequestId || this.activeSlot?.key !== slot.key) return;
         this.setStatus('stalled');
       };
 
       audio.onerror = () => {
-        if (this.activeSlot?.key !== slot.key) return;
+        if (requestId !== this.playRequestId || this.activeSlot?.key !== slot.key) return;
         const formatted = formatMediaElementError(audio.error || new Error('Media error'), {
           slotKey: slot.key,
           panelId: slot.panelId,
           mime: slot.blob.type,
         });
+        if (formatted.kind === 'aborted') {
+          if (!this.clock.getIsPlaying()) {
+            this.setStatus('paused');
+            this.stopRaf();
+          }
+          return;
+        }
         this.setStatus('error');
         this.clock.pause('pause');
         this.stopRaf();
@@ -486,20 +531,45 @@ export class UnifiedAudioPlayer {
       };
 
       audio.onended = () => {
-        if (this.activeSlot?.key !== slot.key) return;
+        if (requestId !== this.playRequestId || this.activeSlot?.key !== slot.key) return;
         this.handleSlotFinished(slot, params);
       };
 
       try {
         await audio.play();
+        if (
+          requestId !== this.playRequestId ||
+          !this.clock.getIsPlaying() ||
+          this.activeSlot?.key !== slot.key
+        ) {
+          return;
+        }
+        const postPlayWall = this.nowFn();
+        if (postPlayWall > this.lastWallMs) {
+          this.lastWallMs = postPlayWall;
+          this.lastAudioWall = postPlayWall;
+        }
+        this.lastElementRawTime = audio.currentTime;
         this.setStatus('playing');
         this.startAudioRaf(slot, params);
       } catch (err) {
+        if (requestId !== this.playRequestId || this.activeSlot?.key !== slot.key) {
+          return;
+        }
         const formatted = formatMediaElementError(err, {
           slotKey: slot.key,
           panelId: slot.panelId,
           mime: slot.blob.type,
         });
+        // AbortError (code=1 / DOMException AbortError) возникает штатно при паузе,
+        // переключении дорожки или seek во время ожидания play() — это не сбой озвучки.
+        if (formatted.kind === 'aborted') {
+          if (!this.clock.getIsPlaying()) {
+            this.setStatus('paused');
+            this.stopRaf();
+          }
+          return;
+        }
         this.setStatus('error');
         this.clock.pause('pause');
         this.stopRaf();
@@ -599,7 +669,7 @@ export class UnifiedAudioPlayer {
       );
 
       if (nextTimelineTime >= slot.timelineEnd - 1e-4) {
-        this.audio.pause();
+        this.stopActiveAudio(false);
         this.activeSlot = null;
         if (params) {
           this.handleSlotFinished(slot, params, nextTimelineTime);
@@ -706,6 +776,7 @@ export class UnifiedAudioPlayer {
   }
 
   private stopActiveAudio(revokeUrl: boolean): void {
+    this.playRequestId++;
     this.stopRaf();
     if (this.audio) {
       try {
@@ -718,10 +789,14 @@ export class UnifiedAudioPlayer {
         this.audio.pause();
       } catch {}
     }
-    if (revokeUrl && this.activeSlot) {
-      this.registry.revokeByKey(this.activeSlot.key);
+    if (revokeUrl) {
+      const keyToRevoke = this.activeSlot?.key ?? this.loadedSlotKey;
+      if (keyToRevoke) {
+        this.registry.revokeByKey(keyToRevoke);
+      }
       this.activeSlot = null;
       this.activeUrl = null;
+      this.loadedSlotKey = null;
     }
   }
 

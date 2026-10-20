@@ -48,6 +48,8 @@ interface TimelineProps {
   isPlaying?: boolean;
   // NLE операции (Этап 6 п. 51–60; Этап 3.2 п. 51, 52)
   onSplitActiveClip?: () => void;
+  onDeleteActiveClip?: () => void;
+  onDuplicateActiveClip?: () => void;
   onMoveActiveClipLeft?: () => void;
   onMoveActiveClipRight?: () => void;
   onReorderPanel?: (panelId: number, targetIndex: number) => void;
@@ -98,6 +100,8 @@ export function Timeline({
   audioPanelIds = [],
   isPlaying = false,
   onSplitActiveClip,
+  onDeleteActiveClip,
+  onDuplicateActiveClip,
   onMoveActiveClipLeft,
   onMoveActiveClipRight,
   onReorderPanel,
@@ -397,8 +401,8 @@ export function Timeline({
             </div>
           )}
 
-          {/* NLE: Split и перестановка клипов (Этап 6 п. 51, 53) */}
-          {(onSplitActiveClip || onMoveActiveClipLeft || onMoveActiveClipRight) && (
+          {/* NLE: Split, удаление, дублирование и перестановка клипов (Этап 6 п. 51, 53) */}
+          {(onSplitActiveClip || onDeleteActiveClip || onDuplicateActiveClip || onMoveActiveClipLeft || onMoveActiveClipRight) && (
             <div className="flex items-center gap-1 rounded-md border border-[#26262C] bg-[#0B0B0C] px-1.5 py-0.5">
               {onSplitActiveClip && (
                 <button
@@ -410,6 +414,30 @@ export function Timeline({
                   aria-label="Разрезать клип"
                 >
                   ✂ Split (S)
+                </button>
+              )}
+              {onDeleteActiveClip && (
+                <button
+                  type="button"
+                  data-testid="timeline-delete-clip-btn"
+                  onClick={onDeleteActiveClip}
+                  disabled={selectedPanelId === null || audioLocked}
+                  className="h-5 px-1.5 rounded text-[10px] text-[#F87171] hover:bg-[#1E1E23] disabled:opacity-35"
+                  title="Удалить выбранный клип и сдвинуть остальные (Ripple Delete)"
+                >
+                  🗑️ Удалить
+                </button>
+              )}
+              {onDuplicateActiveClip && (
+                <button
+                  type="button"
+                  data-testid="timeline-duplicate-clip-btn"
+                  onClick={onDuplicateActiveClip}
+                  disabled={selectedPanelId === null}
+                  className="h-5 px-1.5 rounded text-[10px] text-[#A1A1AA] hover:bg-[#1E1E23] disabled:opacity-35"
+                  title="Дублировать выбранный клип"
+                >
+                  📄 Дублировать
                 </button>
               )}
               {onMoveActiveClipLeft && (
@@ -541,6 +569,13 @@ export function Timeline({
           if (e.ctrlKey || e.metaKey) {
             e.preventDefault();
             handleZoomChange(zoom + (e.deltaY < 0 ? 0.25 : -0.25));
+          } else if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+            const parent =
+              e.currentTarget.parentElement?.closest('[data-scroll-area]') ??
+              e.currentTarget.closest('[data-scroll-area]');
+            if (parent && parent !== e.currentTarget) {
+              parent.scrollTop += e.deltaY;
+            }
           }
         }}
       >
@@ -1290,6 +1325,32 @@ export function Timeline({
                         <span className="h-3 w-0.5 rounded bg-black/70" />
                       </span>
                     )}
+
+                    {/* Визуализация Fade In */}
+                    {panel?.fadeIn && panel.fadeIn > 0 && (
+                      <div
+                        className="absolute inset-y-0 left-0 bg-gradient-to-r from-black/80 to-transparent pointer-events-none"
+                        style={{
+                          width: `${Math.min(100, ((panel.fadeIn || 0) / Math.max(0.05, seg.audioEnd - seg.audioStart)) * 100)}%`,
+                        }}
+                      />
+                    )}
+                    {/* Визуализация Fade Out */}
+                    {panel?.fadeOut && panel.fadeOut > 0 && (
+                      <div
+                        className="absolute inset-y-0 right-0 bg-gradient-to-l from-black/80 to-transparent pointer-events-none"
+                        style={{
+                          width: `${Math.min(100, ((panel.fadeOut || 0) / Math.max(0.05, seg.audioEnd - seg.audioStart)) * 100)}%`,
+                        }}
+                      />
+                    )}
+                    {/* Линия громкости (Gain) */}
+                    <div
+                      className="absolute left-0 right-0 h-px bg-white/50 pointer-events-none"
+                      style={{
+                        bottom: `${Math.min(100, Math.max(0, ((panel?.gain ?? 1) / 2) * 100))}%`,
+                      }}
+                    />
 
                     <div className="flex h-full items-center gap-px px-2 opacity-90">
                       {waveform(seg.panelId, 48).map((height, i) => (

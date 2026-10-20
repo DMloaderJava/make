@@ -620,10 +620,16 @@ export async function createPlacementScheduler(
   const sampleRate = options.sampleRate ?? ctx.sampleRate ?? 44100;
   const channels = options.channels ?? 2;
   const lookahead = options.lookahead ?? 4;
-  const startedAt = options.startAt ?? ctx.currentTime + 0.2;
 
   const { plan } = await planPlacements(placements, { sampleRate, channels, minDuration: 0.05 });
   if (plan.placements.length === 0) return null;
+
+  // Фиксируем startedAt ПОСЛЕ измерения длительностей (planPlacements), чтобы время,
+  // потраченное на декодирование блобов, не «съедало» leadIn-задержку старта записи.
+  const startedAt =
+    options.startAt !== undefined
+      ? Math.max(options.startAt, ctx.currentTime)
+      : ctx.currentTime + 0.2;
 
   const active: AudioBufferSourceNode[] = [];
   let index = 0;
@@ -663,8 +669,10 @@ export async function createPlacementScheduler(
   const decodeAndSchedule = async (item: (typeof plan.placements)[number]): Promise<boolean> => {
     pendingDecodes++;
     try {
-      const buffer = await decodeToTarget(item.blob, sampleRate, channels);
-      return buffer ? schedule(item, buffer) : false;
+      const rawBuffer = await decodeToTarget(item.blob, sampleRate, channels);
+      if (!rawBuffer) return false;
+      const processed = applyPlacementEnvelope(rawBuffer, item, sampleRate);
+      return schedule(item, processed);
     } finally {
       pendingDecodes--;
     }

@@ -52,10 +52,17 @@ export function downloadBlob(blob: Blob, filename: string) {
   const a = document.createElement('a');
   a.href = url;
   a.download = filename;
+  a.style.display = 'none';
   document.body.appendChild(a);
   a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  setTimeout(() => {
+    try {
+      a.remove();
+    } catch {}
+  }, 100);
+  // Не отзываем blob: URL через 1 с — если у пользователя включён диалог «Куда сохранить файл»
+  // или идёт запись крупного видео/ZIP, ранний revokeObjectURL приводит к «Ошибка сети / Файл не найден».
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
 export function formatTime(seconds: number): string {

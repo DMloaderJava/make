@@ -4,6 +4,18 @@
  */
 
 import { INFO_OPFS_ROOT } from './info';
+import { detectAudioMime } from '../providers/tts/mime';
+
+async function restoreAudioBlobMime(blob: Blob): Promise<Blob> {
+  try {
+    const header = await blob.slice(0, 32).arrayBuffer();
+    const detected = detectAudioMime(header);
+    if (detected && detected !== blob.type) {
+      return blob.slice(0, blob.size, detected);
+    }
+  } catch {}
+  return blob;
+}
 
 export interface OPFSHandle {
   isOPFS: boolean;
@@ -230,7 +242,8 @@ export async function saveTTSCache(key: string, blob: Blob): Promise<void> {
 export async function loadTTSCache(key: string): Promise<Blob | null> {
   try {
     if (await fileExists(['tts-cache'], key)) {
-      return await readFile(['tts-cache'], key);
+      const raw = await readFile(['tts-cache'], key);
+      return await restoreAudioBlobMime(raw);
     }
     return null;
   } catch {
@@ -250,7 +263,8 @@ export async function saveProjectAudio(projectId: string, panelId: number, blob:
 export async function loadProjectAudio(projectId: string, panelId: number): Promise<Blob | null> {
   try {
     if (await fileExists(['projects', projectId, 'audio'], `${panelId}.mp3`)) {
-      return await readFile(['projects', projectId, 'audio'], `${panelId}.mp3`);
+      const raw = await readFile(['projects', projectId, 'audio'], `${panelId}.mp3`);
+      return await restoreAudioBlobMime(raw);
     }
     return null;
   } catch {
@@ -368,7 +382,8 @@ export async function saveProjectOutroAudio(projectId: string, blob: Blob): Prom
 export async function loadProjectIntroAudio(projectId: string): Promise<Blob | null> {
   try {
     if (await fileExists(['projects', projectId, 'audio'], `intro.mp3`)) {
-      return await readFile(['projects', projectId, 'audio'], `intro.mp3`);
+      const raw = await readFile(['projects', projectId, 'audio'], `intro.mp3`);
+      return await restoreAudioBlobMime(raw);
     }
     return null;
   } catch {
@@ -379,7 +394,8 @@ export async function loadProjectIntroAudio(projectId: string): Promise<Blob | n
 export async function loadProjectOutroAudio(projectId: string): Promise<Blob | null> {
   try {
     if (await fileExists(['projects', projectId, 'audio'], `outro.mp3`)) {
-      return await readFile(['projects', projectId, 'audio'], `outro.mp3`);
+      const raw = await readFile(['projects', projectId, 'audio'], `outro.mp3`);
+      return await restoreAudioBlobMime(raw);
     }
     return null;
   } catch {
