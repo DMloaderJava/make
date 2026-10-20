@@ -244,6 +244,10 @@ try {
 
   // 1. Открываем главную страницу и загружаем фикстуру длинной полосы 100x2000 PNG
   await page.goto(baseUrl, { waitUntil: 'networkidle' });
+  const onboardingSkipBtn = page.getByTestId('onboarding-skip-btn');
+  if ((await onboardingSkipBtn.count()) > 0 && (await onboardingSkipBtn.isVisible())) {
+    await onboardingSkipBtn.click();
+  }
   const fileInput = page.getByTestId('home-image-input');
   await fileInput.setInputFiles([pngPath]);
   const submitUploadBtn = page.getByTestId('home-process-images-btn');
@@ -422,15 +426,23 @@ try {
   await page.locator('button[aria-label="Отменить действие"]').click();
   await page.waitForTimeout(100);
 
-  // 9. Делаем seek и Play/Pause — явно ассертим, что currentTime изменился (timeAfterPlay > timeBeforePlay)
+  // 9. Делаем seek и Play/Pause через границу Панель 1 -> Пауза -> Панель 2 — явно ассертим рост currentTime и отсутствие ошибки AbortError ("Озвучка не удалась")
   await page.locator('[data-video-clip-id="0"]').click(); // seek к началу 1-й панели (0.400 с)
   await page.waitForTimeout(80);
   const timeBeforePlay = Number(
     await page.getByTestId('studio-timeline').getAttribute('data-current-time')
   );
   const playPauseBtn = page.getByTestId('preview-play-pause-btn');
-  await playPauseBtn.click(); // Play
-  await page.waitForTimeout(450);
+  await playPauseBtn.click(); // Play (проигрываем Панель 1 [0.4..1.0], паузу [1.0..1.2] и вход в Панель 2 [1.2..1.8])
+  await page.waitForFunction(
+    (startTime) => {
+      const el = document.querySelector('[data-testid="studio-timeline"]');
+      const now = Number(el?.getAttribute('data-current-time') ?? 0);
+      return now >= startTime + 0.85;
+    },
+    timeBeforePlay,
+    { timeout: 4000 }
+  );
   await playPauseBtn.click(); // Pause
   await page.waitForTimeout(80);
   const timeAfterPlay = Number(
@@ -441,10 +453,15 @@ try {
       `Ожидалось увеличение currentTime после Play/Pause: до=${timeBeforePlay}, после=${timeAfterPlay}`
     );
   }
+  const alertCount = await page.getByTestId('audio-error-alert').count();
+  if (alertCount > 0) {
+    const alertText = await page.getByTestId('audio-error-alert').first().innerText();
+    throw new Error(`Неожиданная ошибка воспроизведения после Play/Pause: ${alertText}`);
+  }
   console.log(
-    `smoke:editor — seek и Play/Pause проверены: currentTime до=${timeBeforePlay.toFixed(
+    `smoke:editor — seek и Play/Pause (Панель 1 -> Панель 2) проверены: currentTime до=${timeBeforePlay.toFixed(
       3
-    )} с -> после=${timeAfterPlay.toFixed(3)} с`
+    )} с -> после=${timeAfterPlay.toFixed(3)} с, ошибок=0`
   );
 
   // 10. Задача 3.1.1: сохраняем скриншоты Preview И Export на 4 контрольных точках (intro, panel, gap, outro) в режимах panels и strip
@@ -557,16 +574,129 @@ try {
   await page.screenshot({ path: finalShotPath, fullPage: true });
   copyFileSync(finalShotPath, join(tmpArtifactsDir, 'smoke-editor-final.png'));
 
-  // 11. Открываем Экспорт и экспортируем короткий видеоклип (≤ 3 с)
+  // 11. Открываем Экспорт и проверяем отмену экспорта («Отменить экспорт»), затем полный экспорт видеоклипа (≤ 3 с)
   await page.getByTestId('open-export-btn').click();
   const videoExportBtn = page.locator('button:has-text("1920×1080")').first();
   await videoExportBtn.waitFor({ state: 'visible', timeout: 10_000 });
 
-  const tClick = Date.now();
-  const downloadPromise = page.waitForEvent('download', { timeout: 30_000 });
+  // 11а. Тест прерывания экспорта кнопкой «Отменить экспорт» (DoD п. 5)
   await videoExportBtn.click();
-  const download = await downloadPromise;
+  await page.getByTestId('export-progress-overlay').waitFor({ state: 'visible', timeout: 5_000 });
+  const overlayClass = (await page.getByTestId('export-progress-overlay').getAttribute('class')) || '';
+  if (!overlayClass.includes('fixed') || !overlayClass.includes('inset-0')) {
+    throw new Error(`Ожидался полноэкранный оверлей с fixed inset-0, получено class="${overlayClass}"`);
+  }
+  await page.getByTestId('export-cancel-btn').waitFor({ state: 'visible', timeout: 5_000 });
+  await page.getByTestId('export-cancel-btn').click();
+  await page.getByTestId('export-progress-overlay').waitFor({ state: 'hidden', timeout: 5_000 });
+  await videoExportBtn.waitFor({ state: 'visible', timeout: 5_000 });
+  console.log('smoke:editor — отмена экспорта («Отменить экспорт») проверена: рендер прерван, модалка вернулась в исходное состояние');
+
+  // 11б. Полный рендер видеоклипа (0% -> 100%) с экраном завершения и кнопкой «Скачать файл»
+  let autoDownloadTriggered = false;
+  const onUnexpectedDownload = () => {
+    autoDownloadTriggered = true;
+  };
+  page.on('download', onUnexpectedDownload);
+
+  const tClick = Date.now();
+  await videoExportBtn.click();
+
+  // Проверяем оверлей прогресса CapCut-style во время рендера видео и блокировку закрытия модалки
+  await page.getByTestId('export-progress-overlay').waitFor({ state: 'visible', timeout: 5_000 });
+  const closeBtnDisabled = await page.getByTestId('export-modal-close-btn').isDisabled();
+  if (!closeBtnDisabled) {
+    throw new Error('Кнопка закрытия ExportModal должна быть заблокирована (disabled) во время экспорта');
+  }
+  // Клик по фону не должен закрывать модальное окно во время экспорта
+  await page.mouse.click(10, 10);
+  const stillVisibleAfterBackdropClick = await page.getByTestId('export-progress-overlay').isVisible();
+  if (!stillVisibleAfterBackdropClick) {
+    throw new Error('Клик по фону не должен закрывать ExportModal во время рендеринга');
+  }
+  await page.waitForFunction(
+    () => {
+      const el = document.querySelector('[data-testid="export-progress-percent"]');
+      const stageEl = document.querySelector('[data-testid="export-progress-stage"]');
+      const etaEl = document.querySelector('[data-testid="export-progress-eta"]');
+      if (!el || !stageEl || !etaEl) return false;
+      const pct = parseInt(el.textContent || '0', 10);
+      return pct >= 25 && pct < 100 && Boolean(stageEl.textContent?.trim());
+    },
+    null,
+    { timeout: 10_000 }
+  );
+  const progressShotPath = join(artifactsDir, 'export-progress-capcut.png');
+  await page.screenshot({ path: progressShotPath });
+  copyFileSync(progressShotPath, join(tmpArtifactsDir, 'export-progress-capcut.png'));
+
+  // DoD п. 6: на мобильном экране 375×667 (L-6) прогресс-бар и кнопка отмены помещаются в экран
+  await page.setViewportSize({ width: 375, height: 667 });
+  const mobileCancelBox = await page.getByTestId('export-cancel-btn').boundingBox();
+  if (
+    !mobileCancelBox ||
+    mobileCancelBox.x < 0 ||
+    mobileCancelBox.y < 0 ||
+    mobileCancelBox.x + mobileCancelBox.width > 375 ||
+    mobileCancelBox.y + mobileCancelBox.height > 667
+  ) {
+    throw new Error(
+      `На экране 375×667 кнопка отмены в export-progress-overlay выходит за границы экрана: ${JSON.stringify(mobileCancelBox)}`
+    );
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+
+  // Дожидаемся экрана завершения «Экспорт завершён!» (100%, зелёный круг, кнопка «Скачать файл»)
+  await page.getByTestId('export-download-btn').waitFor({ state: 'visible', timeout: 30_000 });
   const exportElapsedMs = Date.now() - tClick;
+  page.off('download', onUnexpectedDownload);
+  if (autoDownloadTriggered) {
+    throw new Error('Автоматическое скачивание не должно происходить до нажатия кнопки «Скачать файл» (DoD п. 1)');
+  }
+
+  const finalPctText = await page.getByTestId('export-progress-percent').textContent();
+  const finalStageText = await page.getByTestId('export-progress-stage').textContent();
+  if (finalPctText?.trim() !== '100%' || finalStageText?.trim() !== 'Готово') {
+    throw new Error(`Ожидались 100% и этап «Готово» на экране успеха, получено: pct=${finalPctText}, stage=${finalStageText}`);
+  }
+
+  // DoD п. 5: клик по фону во время показа экрана успеха не закрывает окно
+  await page.mouse.click(10, 10);
+  if (!(await page.getByTestId('export-download-btn').isVisible())) {
+    throw new Error('Клик по фону не должен закрывать экран успешного завершения экспорта (DoD п. 5)');
+  }
+
+  await page.waitForTimeout(350);
+  const successShotPath = join(artifactsDir, 'export-success-capcut.png');
+  await page.screenshot({ path: successShotPath });
+  copyFileSync(successShotPath, join(tmpArtifactsDir, 'export-success-capcut.png'));
+
+  // Проверяем, что «Скачать файл» — это реальный тег <a> с href="blob:..." и атрибутом download
+  const downloadBtnMeta = await page.getByTestId('export-download-btn').evaluate(el => ({
+    tagName: el.tagName,
+    href: el.getAttribute('href') || '',
+    download: el.getAttribute('download') || '',
+  }));
+  if (
+    downloadBtnMeta.tagName !== 'A' ||
+    !downloadBtnMeta.href.startsWith('blob:') ||
+    !downloadBtnMeta.download
+  ) {
+    throw new Error(
+      `Ожидался тег <a href="blob:..." download="..."> для [data-testid="export-download-btn"], получено: ${JSON.stringify(
+        downloadBtnMeta
+      )}`
+    );
+  }
+
+  // DoD п. 3: нажатие «Скачать файл» запускает скачивание
+  const downloadPromise = page.waitForEvent('download', { timeout: 15_000 });
+  await page.getByTestId('export-download-btn').click();
+  const download = await downloadPromise;
+
+  // DoD п. 4: кнопка «Закрыть» закрывает модальное окно и сбрасывает состояние
+  await page.getByTestId('export-success-close-btn').click();
+  await page.getByTestId('export-progress-overlay').waitFor({ state: 'hidden', timeout: 5_000 });
 
   const downloadedPath = join(artifactsDir, 'smoke-export.webm');
   await download.saveAs(downloadedPath);
