@@ -75,8 +75,10 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true, expiresAt });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    const status = message === 'Supabase is not configured' ? 503 : 500;
-    return NextResponse.json({ error: message }, { status });
+    if (message === 'Supabase is not configured') {
+      return NextResponse.json({ ok: false, skipped: true, error: message }, { status: 200 });
+    }
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
 
@@ -94,7 +96,10 @@ export async function GET(req: NextRequest) {
     return NextResponse.json(rows[0] || null);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return NextResponse.json({ error: message }, { status: message === 'Supabase is not configured' ? 503 : 500 });
+    if (message === 'Supabase is not configured') {
+      return NextResponse.json(null, { status: 200 });
+    }
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
 
@@ -109,6 +114,10 @@ export async function DELETE(req: NextRequest) {
     if (!response.ok) return NextResponse.json({ error: await readJson(response) }, { status: 502 });
     return NextResponse.json({ ok: true });
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
+    const message = error instanceof Error ? error.message : String(error);
+    if (message === 'Supabase is not configured') {
+      return NextResponse.json({ ok: false, skipped: true, error: message }, { status: 200 });
+    }
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

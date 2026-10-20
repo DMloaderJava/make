@@ -16,7 +16,9 @@ export async function syncProjectSnapshot(project: Project): Promise<{ expiresAt
       if (response.status === 503) return null; // Supabase ещё не настроен — локальный режим остаётся рабочим.
       throw new Error(`Cloud sync failed (${response.status})`);
     }
-    return await response.json() as { expiresAt: string };
+    const data = (await response.json()) as { expiresAt?: string; skipped?: boolean };
+    if (data.skipped || !data.expiresAt) return null;
+    return { expiresAt: data.expiresAt };
   } catch (error) {
     console.warn('[cloud] snapshot sync skipped:', error);
     return null;

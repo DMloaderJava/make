@@ -286,7 +286,7 @@ export function AudioImportModal({
           </div>
         </div>
 
-        <div className="p-5 space-y-4 max-h-[72vh] overflow-y-auto">
+        <div className="p-5 space-y-4 max-h-[72vh] overflow-y-auto overscroll-contain">
           {phase === 'edit' && (
             <>
               <div

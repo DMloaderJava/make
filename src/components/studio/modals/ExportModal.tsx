@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from 'react';
+import { Download } from 'lucide-react';
 import { BackendCapabilities } from '@/lib/pipeline/videoEncoder';
 import type { ProjectHealthReport } from '@/lib/pipeline/projectHealth';
 
@@ -18,6 +19,11 @@ interface ExportModalProps {
   preferredBackend: string;
   onBackendChange: (b: 'auto' | 'webcodecs' | 'canvas') => void;
   isExporting: boolean;
+  exportProgress?: number;
+  exportStage?: string;
+  exportEta?: number | null;
+  onCancelExport?: () => void;
+  exportedFile?: { blob: Blob; filename: string; url: string } | null;
   costEstimate: { characters: number; cost: string } | null;
   onGenerateSEO?: () => void;
   generatingSEO?: boolean;
@@ -42,6 +48,11 @@ export function ExportModal({
   preferredBackend,
   onBackendChange,
   isExporting,
+  exportProgress = 0,
+  exportStage = '',
+  exportEta = null,
+  onCancelExport,
+  exportedFile = null,
   costEstimate,
   onGenerateSEO,
   generatingSEO,
@@ -77,10 +88,15 @@ export function ExportModal({
 
   const blockingErrors = healthReport?.issues.filter(i => i.severity === 'error') ?? [];
   const exportWarnings = healthReport?.issues.filter(i => i.severity === 'warning') ?? [];
+  const showOverlay = isExporting || !!exportedFile;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-[#0B0B0C]/80 backdrop-blur-sm" onClick={onClose} />
+      <div
+        data-testid="export-modal-backdrop"
+        className="absolute inset-0 bg-[#0B0B0C]/80 backdrop-blur-sm"
+        onClick={() => !showOverlay && onClose()}
+      />
       <div className="relative w-full max-w-[460px] bg-[#16161A] border border-[#26262C] rounded-[16px] shadow-2xl overflow-hidden max-h-[88vh] flex flex-col">
         <div className="p-5 border-b border-[#26262C] flex items-center justify-between">
           <div>
@@ -90,15 +106,117 @@ export function ExportModal({
             </p>
           </div>
           <button
-            onClick={onClose}
-            className="w-8 h-8 rounded-[6px] bg-[#1E1E23] hover:bg-[#26262C] flex items-center justify-center text-[#8A8A93]"
+            data-testid="export-modal-close-btn"
+            onClick={() => !isExporting && onClose()}
+            disabled={isExporting}
+            className="w-8 h-8 rounded-[6px] bg-[#1E1E23] hover:bg-[#26262C] flex items-center justify-center text-[#8A8A93] disabled:opacity-40 disabled:pointer-events-none"
           >
             ×
           </button>
         </div>
 
-        <div className="p-5 space-y-4 overflow-y-auto flex-1">
-          {backendCaps && (
+        <div className="p-5 space-y-4 overflow-y-auto flex-1 min-h-0 overscroll-contain">
+          {showOverlay ? (
+            <div
+              data-testid="export-progress-overlay"
+              className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-[#0B0B0C]/95 backdrop-blur-md p-4"
+            >
+              {/* Круг с процентом (если файл готов, показываем 100%) */}
+              <div className="relative w-48 h-48 sm:w-64 sm:h-64">
+                <svg className="w-full h-full -rotate-90 drop-shadow-[0_0_20px_rgba(232,180,76,0.18)]" viewBox="0 0 120 120">
+                  <circle cx="60" cy="60" r="54" fill="none" stroke="#26262C" strokeWidth="6" />
+                  <circle
+                    data-testid="export-progress-circle"
+                    cx="60"
+                    cy="60"
+                    r="54"
+                    fill="none"
+                    stroke={exportedFile ? '#4ADE80' : '#E8B44C'}
+                    strokeWidth="6"
+                    strokeLinecap="round"
+                    strokeDasharray={2 * Math.PI * 54}
+                    strokeDashoffset={
+                      exportedFile
+                        ? 0
+                        : 2 * Math.PI * 54 * (1 - Math.min(1, Math.max(0, exportProgress || 0)))
+                    }
+                    className={`transition-all duration-300 ease-out ${exportedFile ? '' : 'animate-pulse'}`}
+                  />
+                </svg>
+                <div className="absolute inset-0 flex flex-col items-center justify-center px-3 text-center">
+                  <span
+                    data-testid="export-progress-percent"
+                    className={`text-5xl sm:text-6xl font-bold font-mono leading-none ${
+                      exportedFile ? 'text-[#4ADE80]' : 'text-white'
+                    }`}
+                  >
+                    {exportedFile ? '100%' : `${Math.round(Math.min(1, Math.max(0, exportProgress || 0)) * 100)}%`}
+                  </span>
+                  <span
+                    data-testid="export-progress-stage"
+                    className="text-xs text-zinc-400 mt-1.5"
+                  >
+                    {exportedFile ? 'Готово' : exportStage || 'Рендеринг видео'}
+                  </span>
+                </div>
+              </div>
+
+              {/* Состояние: Экспорт завершён */}
+              {exportedFile ? (
+                <>
+                  <h3 data-testid="export-success-title" className="mt-8 text-2xl font-bold text-white">
+                    Экспорт завершён!
+                  </h3>
+                  <p className="mt-2 text-sm text-zinc-400">Ваше видео успешно отрендерено</p>
+
+                  <div className="mt-8 flex flex-col sm:flex-row items-center gap-3">
+                    <a
+                      data-testid="export-download-btn"
+                      href={exportedFile.url}
+                      download={exportedFile.filename}
+                      className="px-8 py-3 rounded-full bg-[#E8B44C] text-[#0B0B0C] font-bold text-sm hover:bg-[#f0c15c] transition-colors flex items-center gap-2"
+                    >
+                      <Download className="w-4 h-4" />
+                      Скачать файл
+                    </a>
+                    <button
+                      type="button"
+                      data-testid="export-success-close-btn"
+                      onClick={() => onClose()}
+                      className="px-6 py-3 rounded-full border border-zinc-700 text-zinc-300 text-sm hover:bg-zinc-800 transition-colors"
+                    >
+                      Закрыть
+                    </button>
+                  </div>
+                  <p className="text-xs text-zinc-500 mt-4 text-center max-w-xs">
+                    Если скачивание не началось, нажмите правой кнопкой мыши и выберите «Сохранить ссылку как...»
+                  </p>
+                </>
+              ) : (
+                <>
+                  {/* Состояние: Идёт рендеринг */}
+                  {exportEta !== null && (
+                    <p data-testid="export-progress-eta" className="mt-6 text-sm text-zinc-400 font-mono">
+                      Осталось примерно {exportEta} сек.
+                    </p>
+                  )}
+                  <button
+                    type="button"
+                    data-testid="export-cancel-btn"
+                    onClick={onCancelExport}
+                    className="mt-8 px-6 py-2 rounded-full border border-zinc-700 text-zinc-300 text-sm hover:bg-zinc-800 transition-colors"
+                  >
+                    Отменить экспорт
+                  </button>
+                  <p className="mt-4 text-xs text-zinc-500 max-w-xs text-center">
+                    Не закрывайте вкладку и не переключайтесь на другие приложения
+                  </p>
+                </>
+              )}
+            </div>
+          ) : (
+            <>
+              {backendCaps && (
             <div className="bg-[#0B0B0C] border border-[#26262C] rounded-[10px] p-3 space-y-2">
               <div className="flex items-center justify-between">
                 <span className="text-xs font-medium">Видео бэкенд</span>
@@ -292,11 +410,7 @@ export function ExportModal({
               <p className="text-[#4ADE80]">✅ OPFS кэш — повторная озвучка бесплатна</p>
             </div>
           )}
-          {isExporting && (
-            <div className="flex items-center gap-2 text-[12px] text-[#E8B44C]">
-              <div className="w-4 h-4 border-2 border-[#26262C] border-t-[#E8B44C] rounded-full animate-spin" />
-              Экспорт...
-            </div>
+            </>
           )}
         </div>
       </div>

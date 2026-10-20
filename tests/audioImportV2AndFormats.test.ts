@@ -632,3 +632,151 @@ test('Итерация 2 — Задача 9 и P1 (1, 4): плавные PLL-ч�
   assert.equal(afterFullAdd.selectAll, true);
   assert.equal(afterFullAdd.selectedFileNames.size, 3);
 });
+
+test('Регрессия UnifiedAudioPlayer: переход панель 1 -> панель 2 (MIME: audio/mpeg), защита от AbortError при паузе/переключении и идемпотентный syncPlayback', async () => {
+  const errors: string[] = [];
+  let playCalls = 0;
+  const playCtl: {
+    reject: ((err: Error) => void) | null;
+    resolve: (() => void) | null;
+  } = { reject: null, resolve: null };
+
+  const asyncAudio: AudioLikeElement = {
+    src: '',
+    currentTime: 0,
+    paused: true,
+    muted: false,
+    volume: 1,
+    playbackRate: 1,
+    preload: 'auto',
+    error: null,
+    onended: null,
+    onerror: null,
+    onwaiting: null,
+    onstalled: null,
+    oncanplay: null,
+    onloadedmetadata: null,
+    play() {
+      playCalls++;
+      this.paused = false;
+      return new Promise<void>((resolve, reject) => {
+        playCtl.resolve = resolve;
+        playCtl.reject = reject;
+      });
+    },
+    pause() {
+      this.paused = true;
+      if (playCtl.reject) {
+        const rej = playCtl.reject;
+        playCtl.reject = null;
+        playCtl.resolve = null;
+        const abortErr = new Error('The play() request was interrupted by a call to pause().');
+        abortErr.name = 'AbortError';
+        rej(abortErr);
+      }
+    },
+  };
+
+  let nowMs = 1000;
+  const clock = new ProjectClock({ duration: 4.0, currentTime: 2.0 });
+  const player = new UnifiedAudioPlayer({
+    clock,
+    createAudio: () => asyncAudio,
+    requestFrame: () => 1,
+    cancelFrame: () => {},
+    now: () => nowMs,
+    onError: (formatted) => {
+      errors.push(formatted.message);
+    },
+  });
+
+  const timeline = [
+    {
+      panelId: 1,
+      imageIndex: 0,
+      audioStart: 0,
+      audioEnd: 2.0,
+      panelBbox: { x: 0, y: 0, width: 100, height: 50 },
+      voiceId: 'default',
+      text: 'Панель 1',
+      character: 'Акира',
+    },
+    {
+      panelId: 2,
+      imageIndex: 0,
+      audioStart: 2.0,
+      audioEnd: 4.0,
+      panelBbox: { x: 0, y: 50, width: 100, height: 50 },
+      voiceId: 'default',
+      text: 'Панель 2',
+      character: 'Акира',
+    },
+  ];
+  const mp3Blob1 = new Blob([new Uint8Array([0xff, 0xfb, 0x90, 0x64])], { type: 'audio/mpeg' });
+  const mp3Blob2 = new Blob([new Uint8Array([0xff, 0xfb, 0x90, 0x64])], { type: 'audio/mpeg' });
+  const panelBlobs = new Map<number, Blob>([
+    [1, mp3Blob1],
+    [2, mp3Blob2],
+  ]);
+
+  // 1. Запускаем панель 2 (MIME: audio/mpeg) и во время ожидания play() вызываем повторный syncPlayback (как при ререндере React)
+  clock.play('play');
+  const p1 = player.syncPlayback({
+    timeline,
+    introDuration: 0,
+    outroDuration: 0,
+    panelBlobs,
+  });
+  // Повторный syncPlayback на том же слоте во время loading НЕ должен вызывать play() повторно или прерывать первый
+  const p2 = player.syncPlayback({
+    timeline,
+    introDuration: 0,
+    outroDuration: 0,
+    panelBlobs,
+  });
+  assert.equal(playCalls, 1, 'Повторный syncPlayback того же слота не должен вызывать audio.play() дважды');
+
+  // 2. Пользователь нажимает паузу (или переключает дорожку) до завершения play() -> браузер кидает AbortError
+  clock.pause('pause');
+  player.pause();
+  await p1;
+  await p2;
+
+  assert.equal(
+    errors.length,
+    0,
+    `AbortError при паузе/переключении дорожки не должен попадать в onError ("Озвучка не удалась"), получено: ${JSON.stringify(errors)}`
+  );
+  assert.notEqual(player.getStatus(), 'error');
+
+  // 3. Проверяем нормальное завершение play() на панели 2 и переход с панели 1 на панель 2 без гонки onended
+  clock.seek(0, 'seek');
+  clock.play('play');
+  const playPanel1 = player.syncPlayback({
+    timeline,
+    introDuration: 0,
+    outroDuration: 0,
+    panelBlobs,
+  });
+  playCtl.resolve?.();
+  await playPanel1;
+  assert.equal(player.getActiveKey(), 'panel:1');
+
+  // Симулируем окончание панели 1 через tick() на границе t=2.0s: старый onended должен быть очищен до старта панели 2
+  nowMs = 3000;
+  asyncAudio.currentTime = 2.0;
+  player.tick(nowMs, {
+    timeline,
+    introDuration: 0,
+    outroDuration: 0,
+    panelBlobs,
+  });
+  assert.equal(player.getActiveKey(), 'panel:2');
+  playCtl.resolve?.();
+  await Promise.resolve();
+  assert.equal(errors.length, 0);
+  assert.equal(player.getStatus(), 'playing');
+
+  player.dispose();
+});
+

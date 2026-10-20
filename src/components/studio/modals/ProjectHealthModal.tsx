@@ -75,7 +75,7 @@ export function ProjectHealthModal({
           </button>
         </div>
 
-        <div className="p-5 overflow-y-auto space-y-5 flex-1">
+        <div className="p-5 overflow-y-auto space-y-5 flex-1 min-h-0 overscroll-contain">
           {/* Сводка */}
           <div className="grid grid-cols-3 gap-3">
             <div className="bg-black/40 border border-white/5 rounded-lg p-3">

@@ -51,6 +51,8 @@ import {
   splitPanelAudioClip,
   togglePanelMute,
   togglePanelSolo,
+  deletePanelClipWithRipple,
+  duplicatePanelClip,
   type NleMutationResult,
 } from '@/lib/pipeline/nleOperations';
 import { ObjectUrlRegistry } from '@/lib/pipeline/objectUrlRegistry';
@@ -155,6 +157,19 @@ export default function EditorPage() {
   const [isGeneratingIntro, setIsGeneratingIntro] = useState(false);
   const [generatingSEO, setGeneratingSEO] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
+  const [exportProgress, setExportProgress] = useState(0);
+  const [exportStage, setExportStage] = useState<string>('');
+  const [exportEta, setExportEta] = useState<number | null>(null);
+  const [exportAbortController, setExportAbortController] = useState<AbortController | null>(null);
+  const [exportedFile, setExportedFile] = useState<{ blob: Blob; filename: string; url: string } | null>(null);
+  const clearExportedFile = () => {
+    setExportedFile((prev) => {
+      if (prev?.url) {
+        try { URL.revokeObjectURL(prev.url); } catch {}
+      }
+      return null;
+    });
+  };
   const [isPlaying, setIsPlaying] = useState(false);
   const [clockInstance] = useState<ProjectClock>(() => new ProjectClock());
   const clockRef = useRef<ProjectClock>(clockInstance);
@@ -189,6 +204,7 @@ export default function EditorPage() {
       clock,
       registry: urlRegistryRef.current,
       onError: (formatted) => {
+        if (formatted.kind === 'aborted') return;
         setAudioError(formatted.message);
       },
     });
@@ -1300,18 +1316,40 @@ export default function EditorPage() {
         else if (type === 'seo') alert('Нет SEO пакета');
       }
       if (type === 'mp3' || type === 'all') {
-        const all: Blob[] = [];
-        if (introAudio) all.push(introAudio);
+        const exportTimeline =
+          project.timeline.length > 0
+            ? project.timeline
+            : buildTimeline(project.panels, audioDurations, project.voiceAssignments, project.introDuration, panelGap);
+        const resolvedPanelBlobs = new Map<number, Blob>(audioBlobs);
         for (const p of project.panels) {
-          const b = audioBlobs.get(p.id) || await loadProjectAudio(project.id, p.id);
-          if (b) all.push(b);
+          if (!resolvedPanelBlobs.has(p.id)) {
+            const fromOpfs = await loadProjectAudio(project.id, p.id);
+            if (fromOpfs) resolvedPanelBlobs.set(p.id, fromOpfs);
+          }
         }
-        if (outroAudio) all.push(outroAudio);
-        if (all.length > 0) {
-          // concatenateAudioBlobs всегда отдаёт WAV — раньше файл всё равно назывался .mp3
-          const merged = await concatenateAudioBlobs(all);
-          const ext = merged.type.includes('wav') ? 'wav' : merged.type.includes('mpeg') ? 'mp3' : 'bin';
-          downloadBlob(merged, `${project.name}.${ext}`);
+        const placements = buildTimelineAudioPlacements({
+          timeline: exportTimeline,
+          panels: project.panels,
+          panelBlobs: resolvedPanelBlobs,
+          introAudio,
+          outroAudio,
+          introDuration: project.introDuration,
+          outroDuration: project.outroDuration,
+        });
+        if (placements.length > 0) {
+          const totalExportDuration = calculateTotalDuration(
+            exportTimeline,
+            project.introDuration,
+            project.outroDuration
+          );
+          const mixedWav = await renderExportAudioMixPreviewWav(placements, totalExportDuration);
+          if (mixedWav) {
+            downloadBlob(mixedWav, `${project.name}.wav`);
+          } else {
+            const merged = await concatenateAudioBlobs(placements.map(item => item.blob));
+            const ext = merged.type.includes('wav') ? 'wav' : merged.type.includes('mpeg') ? 'mp3' : 'bin';
+            downloadBlob(merged, `${project.name}.${ext}`);
+          }
         } else if (type === 'mp3') alert('Сначала озвучь');
       }
       if (type === 'mp4') {
@@ -1343,6 +1381,14 @@ export default function EditorPage() {
           alert('Сначала озвучь — нет аудио для видео. Экспортирую без звука.');
         }
 
+        clearExportedFile();
+        setExportProgress(0);
+        setExportStage('Подготовка...');
+        setExportEta(null);
+        const controller = new AbortController();
+        setExportAbortController(controller);
+
+        const startTime = Date.now();
         const { blob, mimeType } = await renderVideo({
           images,
           audioBlobs: audioPlacements.map(a => a.blob),
@@ -1363,17 +1409,35 @@ export default function EditorPage() {
           stripGap: renderSettings.stripGap,
           panels: project.panels.map(p => ({ id: p.id, imageIndex: p.imageIndex, bbox: p.bbox, fullFrame: p.fullFrame })),
           onAudioTrimmed: (messages) => setAudioWarnings(messages),
+          onProgress: (p, stage) => {
+            setExportProgress(p);
+            if (stage) setExportStage(stage);
+            const elapsed = (Date.now() - startTime) / 1000;
+            if (p > 0.01) {
+              setExportEta(Math.max(0, Math.round((elapsed / p) * (1 - p))));
+            }
+          },
+          signal: controller.signal,
           preferredBackend: preferredBackend === 'auto' ? undefined : preferredBackend
         });
 
         const ext = mimeType.includes('mp4') ? 'mp4' : 'webm';
-        downloadBlob(blob, `${project.name}.${ext}`);
-        setShowExport(false);
+        const url = URL.createObjectURL(blob);
+        setExportedFile({ blob, filename: `${project.name}.${ext}`, url });
       }
     } catch (e: any) {
-      alert(`Ошибка экспорта: ${e.message}`);
+      clearExportedFile();
+      if (e?.name === 'AbortError') {
+        setNotice('Экспорт видео отменён.');
+      } else {
+        alert(`Ошибка экспорта: ${e.message}`);
+      }
     } finally {
       setIsExporting(false);
+      setExportProgress(0);
+      setExportStage('');
+      setExportEta(null);
+      setExportAbortController(null);
     }
   };
 
@@ -1394,6 +1458,7 @@ export default function EditorPage() {
       introAudio,
       outroAudio,
       introDuration: project.introDuration,
+      outroDuration: project.outroDuration,
     });
     const wavBlob = await renderExportAudioMixPreviewWav(placements, duration);
     if (!wavBlob) return null;
@@ -1616,6 +1681,27 @@ export default function EditorPage() {
     }
   };
 
+  const handleDeleteActiveClip = () => {
+    if (!project || typeof selectedId !== 'number') return;
+    const snap = buildCurrentHistorySnapshot(`Удаление панели #${selectedId}`);
+    if (snap) historyRef.current.record(snap);
+    const durObj: Record<number, number> = {};
+    audioDurations.forEach((v, k) => { durObj[k] = v; });
+    const res = deletePanelClipWithRipple(project.panels, durObj, selectedId, getNleOptions());
+    applyNleResult(res);
+    setSelectedId(null);
+  };
+
+  const handleDuplicateActiveClip = () => {
+    if (!project || typeof selectedId !== 'number') return;
+    const snap = buildCurrentHistorySnapshot(`Дублирование панели #${selectedId}`);
+    if (snap) historyRef.current.record(snap);
+    const durObj: Record<number, number> = {};
+    audioDurations.forEach((v, k) => { durObj[k] = v; });
+    const res = duplicatePanelClip(project.panels, durObj, selectedId, getNleOptions());
+    applyNleResult(res);
+  };
+
   const handleReorderClip = (panelId: number, targetIdx: number) => {
     if (!project) return;
     const sorted = [...project.panels].sort((a, b) => a.order - b.order || a.id - b.id);
@@ -1776,7 +1862,7 @@ export default function EditorPage() {
       data-testid="editor-root"
       data-timeline-version={project.timelineVersion ?? 2}
       data-total-duration={duration.toFixed(3)}
-      className="flex-1 bg-[#0B0B0C] flex flex-col min-h-0"
+      className="flex-1 bg-[#0B0B0C] flex flex-col h-[100dvh] max-h-[100dvh] overflow-hidden"
     >
       <div className="h-14 px-4 flex items-center justify-between border-b border-[#26262C] bg-[#0B0B0C]/80 backdrop-blur sticky top-0 z-10">
         <div className="flex items-center gap-3 min-w-0">
@@ -1867,7 +1953,7 @@ export default function EditorPage() {
       )}
 
       {audioError && (
-        <div className="border-b border-[#3A1414] bg-[#1E1010] px-4 py-2" role="alert" aria-live="assertive">
+        <div data-testid="audio-error-alert" className="border-b border-[#3A1414] bg-[#1E1010] px-4 py-2" role="alert" aria-live="assertive">
           <div className="max-w-[960px] mx-auto flex items-start gap-3">
             <span className="text-[13px] leading-5 text-[#E86C4C]" aria-hidden="true">⚠</span>
             <div className="flex-1 space-y-0.5">
@@ -1922,7 +2008,7 @@ export default function EditorPage() {
         </div>
       )}
 
-      <div className="flex-1 overflow-y-auto" data-scroll-area>
+      <div className="flex-1 overflow-y-auto min-h-0" data-scroll-area>
         <div className="max-w-[1180px] mx-auto p-3 sm:p-4 md:p-6">
           <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_320px] items-start">
             <div className="min-w-0 space-y-5">
@@ -1986,6 +2072,8 @@ export default function EditorPage() {
                 audioPanelIds={existingAudioIds}
                 isPlaying={isPlaying}
                 onSplitActiveClip={handleSplitActiveClip}
+                onDeleteActiveClip={handleDeleteActiveClip}
+                onDuplicateActiveClip={handleDuplicateActiveClip}
                 onMoveActiveClipLeft={() => handleMoveActiveClip(-1)}
                 onMoveActiveClipRight={() => handleMoveActiveClip(1)}
                 onReorderPanel={handleReorderClip}
@@ -2189,7 +2277,15 @@ export default function EditorPage() {
 
       <ExportModal
         open={showExport}
-        onClose={() => setShowExport(false)}
+        onClose={() => {
+          if (!isExporting) {
+            if (exportedFile) {
+              try { URL.revokeObjectURL(exportedFile.url); } catch {}
+            }
+            setShowExport(false);
+            setExportedFile(null);
+          }
+        }}
         onExport={handleExport}
         hasAudio={audioBlobs.size > 0 || !!introAudio}
         hasSRT={!!project.srt}
@@ -2200,6 +2296,11 @@ export default function EditorPage() {
         preferredBackend={preferredBackend}
         onBackendChange={setPreferredBackend}
         isExporting={isExporting}
+        exportProgress={exportProgress}
+        exportStage={exportStage}
+        exportEta={exportEta}
+        onCancelExport={() => exportAbortController?.abort()}
+        exportedFile={exportedFile}
         costEstimate={costEstimate}
         onGenerateSEO={handleGenerateSEO}
         generatingSEO={generatingSEO}

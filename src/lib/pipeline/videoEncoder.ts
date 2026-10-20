@@ -6,7 +6,7 @@
  */
 
 import { SyncTimeline } from '../storage/db';
-import { appendPlacements, measureBlobDurations, stackBlobsBackToBack, type AudioPlacement } from './audioMix';
+import { appendPlacements, measureBlobDurations, planPlacements, stackBlobsBackToBack, type AudioPlacement } from './audioMix';
 import { createStripSceneFromMedia, type StripScene } from './mangaStrip';
 import { renderExportFrameToCanvas } from './assembleVideo';
 
@@ -38,7 +38,8 @@ export interface RenderOptions {
   panels?: Array<{ id: number; imageIndex: number; fullFrame?: boolean; bbox?: { x: number; y: number; width: number; height: number } }>;
   /** Предупреждения об обрезанных репликах (текстом, для UI). */
   onAudioTrimmed?: (messages: string[]) => void;
-  onProgress?: (progress: number) => void;
+  onProgress?: (progress: number, stage?: string) => void;
+  signal?: AbortSignal;
 }
 
 export interface RenderBackend {
@@ -164,7 +165,8 @@ export class CanvasMediaRecorderBackend implements RenderBackend {
       stripGap: options.stripGap,
       panels: options.panels,
       onAudioTrimmed: options.onAudioTrimmed,
-      onProgress: options.onProgress
+      onProgress: options.onProgress,
+      signal: options.signal,
     });
   }
 }
@@ -185,6 +187,9 @@ export class WebCodecsBackend implements RenderBackend {
   }
 
   async render(options: RenderOptions): Promise<Blob> {
+    if (options.signal?.aborted) {
+      throw new DOMException('Aborted', 'AbortError');
+    }
     const caps = await checkCapabilities();
     if (!caps.webCodecs || !caps.h264) {
       console.warn('WebCodecs not fully supported, falling back to canvas');
@@ -196,15 +201,24 @@ export class WebCodecsBackend implements RenderBackend {
       // Try mediabunny implementation
       return await this.renderWithMediabunny(options);
     } catch (e) {
+      if (options.signal?.aborted || (e instanceof Error && e.name === 'AbortError')) {
+        throw e;
+      }
       console.warn('mediabunny render failed, falling back to canvas', e);
       const fallback = new CanvasMediaRecorderBackend();
       return fallback.render(options);
     }
   }
 
-  private async renderWithMediabunny(options: RenderOptions): Promise<Blob> {
+  /** @internal */
+  async renderWithMediabunny(options: RenderOptions, mediabunnyOverride?: unknown): Promise<Blob> {
+    if (options.signal?.aborted) {
+      throw new DOMException('Aborted', 'AbortError');
+    }
+    options.onProgress?.(0, 'Инициализация рендерера');
+
     // Dynamic import mediabunny
-    const mediabunny = await import('mediabunny');
+    const mediabunny = mediabunnyOverride ?? (await import('mediabunny'));
     const { Output, Mp4OutputFormat, CanvasSource, AudioBufferSource, BufferTarget } = mediabunny as any;
 
     // Preload images
@@ -272,42 +286,53 @@ export class WebCodecsBackend implements RenderBackend {
     // а не предварительным «гигантским» миксом (10 мин стерео 44.1 кГц ≈ 212 МБ).
     let audioSource: any = null;
     let mixedDuration: number | null = null;
+    let pendingPlacements: AudioPlacement[] = [];
     if (options.audioPlacements?.length || options.audioBlobs.length > 0) {
-      const placements: AudioPlacement[] = options.audioPlacements?.length
+      pendingPlacements = options.audioPlacements?.length
         ? options.audioPlacements
         : stackBlobsBackToBack(
             options.audioBlobs,
             await measureBlobDurations(options.audioBlobs, { sampleRate: 44100, channels: 2 })
           );
 
-      audioSource = new AudioBufferSource({
-        codec: 'aac',
-        bitrate: 128000,
+      const { plan } = await planPlacements(pendingPlacements, {
+        sampleRate: 44100,
+        channels: 2,
       });
-      output.addAudioTrack(audioSource);
-      const appended = await appendPlacements(audioSource, placements, {
+      if (plan.placements.length > 0 && plan.totalDuration > 0) {
+        audioSource = new AudioBufferSource({
+          codec: 'aac',
+          bitrate: 128000,
+        });
+        output.addAudioTrack(audioSource);
+        mixedDuration = plan.totalDuration;
+      }
+    }
+
+    // Длительность видео = максимум из расчётной длины таймлайна (включая немое аутро/панели)
+    // и фактической длины смикшированной аудиодорожки.
+    const totalDuration = Math.max(timelineDuration, mixedDuration ?? 0);
+
+    // ВАЖНО: mediabunny требует вызвать output.start() ДО любых вызовов audioSource.add() / canvasSource.add(),
+    // иначе AudioBufferSource.add() выбрасывает "Output has not started." и срывает MP4-экспорт в фолбэк.
+    await output.start();
+
+    if (audioSource && pendingPlacements.length > 0) {
+      await appendPlacements(audioSource, pendingPlacements, {
         sampleRate: 44100,
         channels: 2,
         onTrim: options.onAudioTrimmed,
       });
-      if (appended.duration > 0) {
-        mixedDuration = appended.duration;
-      } else {
-        audioSource = null;
-      }
     }
-
-    // Fix A/V desync: video track duration must match actual mixed audio duration
-    // If audio exists, use its duration, otherwise use timeline duration
-    const totalDuration = mixedDuration !== null && mixedDuration > 0 ? mixedDuration : timelineDuration;
-
-    await output.start();
 
     // Render frames — totalFrames based on actual audio duration
     const fps = options.fps;
     const totalFrames = Math.ceil(totalDuration * fps);
 
     for (let frame = 0; frame < totalFrames; frame++) {
+      if (options.signal?.aborted) {
+        throw new DOMException('Aborted', 'AbortError');
+      }
       const time = frame / fps;
 
       renderExportFrameToCanvas({
@@ -329,8 +354,10 @@ export class WebCodecsBackend implements RenderBackend {
         throw new Error(`Не удалось закодировать кадр t=${time.toFixed(2)}s: ${(e as Error).message}`);
       }
 
-      if (frame % 10 === 0) {
-        options.onProgress?.(time / totalDuration);
+      if (options.onProgress && frame % 5 === 0) {
+        // Вызываем раз в 5 кадров, чтобы не спамить React-состояние
+        const stage = frame < totalFrames * 0.8 ? 'Рендеринг видео' : 'Кодирование';
+        options.onProgress(frame / totalFrames, stage);
       }
 
       // Yield to main thread to keep UI responsive
@@ -339,7 +366,12 @@ export class WebCodecsBackend implements RenderBackend {
       }
     }
 
+    if (options.signal?.aborted) {
+      throw new DOMException('Aborted', 'AbortError');
+    }
+    options.onProgress?.(0.9, 'Обработка аудио');
     await output.finalize();
+    options.onProgress?.(1, 'Завершение');
     const buffer = target.buffer;
     return new Blob([buffer!], { type: 'video/mp4' });
   }
