@@ -16,7 +16,10 @@
  * 3. После завершения чтения реплики — переход к следующему изображению
  *    через 0,6 секунды (SCENARIO_GAP_SECONDS, задаётся в buildTimeline).
  * 4. Пол персонажа указывается в скобках: (Жен.) или (Муж.).
- * 5. Никакого лишнего текста — только «Изображение N» и реплики.
+ * 5. Никакого лишнего текста — только «Изображение N» и реплики. Реплика может
+ *    занимать несколько строк: жёсткие переносы и пустые строки (вставка из
+ *    чата/документа) склеиваются в один текст — новый блок начинают только
+ *    метка изображения и подпись «Имя (Пол):».
  * 6. (v1.3.17, опционально) Y-диапазон после номера: «Изображение 1 [0..30%]» —
  *    панель занимает 0–30% высоты картинки (на всю ширину). Без диапазона —
  *    вся картинка (fullFrame). Одна картинка может идти несколькими блоками
@@ -100,18 +103,23 @@ const GENDERS: Record<string, ScenarioGender> = {
  */
 const SEPARATOR_REGEX = /(?:\s*:\s*|\s+[—–]\s+|\s+-\s+)/;
 
-function splitLine(line: string): { left: string; right: string } | null {
-  const candidates: Array<{ index: number; length: number }> = [];
+function splitLine(line: string): { left: string; right: string; separator: 'colon' | 'dash' } | null {
+  const candidates: Array<{ index: number; length: number; separator: 'colon' | 'dash' }> = [];
   const re = new RegExp(SEPARATOR_REGEX.source, 'g');
   let match: RegExpExecArray | null;
   while ((match = re.exec(line)) !== null) {
-    candidates.push({ index: match.index, length: match[0].length });
+    candidates.push({
+      index: match.index,
+      length: match[0].length,
+      separator: match[0].includes(':') ? 'colon' : 'dash',
+    });
   }
   if (candidates.length === 0) return null;
   const preferred = candidates.find(c => line.slice(0, c.index).trim().endsWith(')')) || candidates[0];
   return {
     left: line.slice(0, preferred.index).trim(),
     right: line.slice(preferred.index + preferred.length).trim(),
+    separator: preferred.separator,
   };
 }
 
@@ -123,8 +131,61 @@ function parseGender(raw: string | undefined): { gender: ScenarioGender | null; 
 }
 
 /**
- * Разбирает текст сценария. Пустые строки — допустимые разделители блоков.
- * Любая строка, которая не «Изображение N» и не «Имя (Пол): текст», — ошибка.
+ * Похожа ли левая часть разделителя на подпись персонажа, а не на кусок
+ * предложения. Нужна, чтобы отличить реплику от мягкого переноса, в котором
+ * случайно оказалось тире или двоеточие:
+ *
+ *   ещё один шанс — вы сгорите в том же аду!   → продолжение реплики
+ *   Герой (Муж.): ...                          → новая реплика
+ *
+ * Признаки подписи: пол/уточнение в скобках, одно слово (перед двоеточием —
+ * даже строчными) или несколько слов, каждое из которых начинается с
+ * заглавной («Герой / Антагонист», «Персонаж 1»). Знаки конца предложения и
+ * запятые — не имя.
+ */
+function looksLikeCharacterHeader(left: string, separator: 'colon' | 'dash'): boolean {
+  const value = left.trim();
+  if (!value || value.length > 80) return false;
+  // Пол/уточнение в скобках отбрасываем до проверки знаков: «(Муж.)» —
+  // это сокращение с точкой, а не конец предложения.
+  const name = value.replace(/\s*\([^)]*\)\s*$/, '').trim();
+  if (!name || /[.!?…,;]/.test(name)) return false;
+  const words = name.split(/\s+/);
+  // Одно слово перед двоеточием — подпись даже строчными: имена из vision
+  // бывают строчными, а сериализатор пишет реплики именно через «:».
+  if (words.length === 1) return separator === 'colon' || /^[A-ZА-ЯЁ0-9«"'(]/.test(words[0]);
+  return words.every(word => word === 'и' || word === 'and' || /^[A-ZА-ЯЁ0-9/&«"'-]/.test(word));
+}
+
+/** Сколько строк перечислять в предупреждении о склейке переносов. */
+const CONTINUATION_WARNING_LINES = 8;
+
+/**
+ * Склеивает мягкий перенос с текстом реплики: перенос по дефису — без
+ * пробела («ка-» + «кой»), обычный перенос — через пробел.
+ */
+function joinContinuation(text: string, continuation: string): string {
+  return /[-\u2010\u2011\u00AD]$/.test(text) ? text + continuation : `${text} ${continuation}`;
+}
+
+/** Компактный список номеров строк: «4, 9, … и ещё 10». */
+function formatLineList(lineNumbers: number[]): string {
+  const head = lineNumbers.slice(0, CONTINUATION_WARNING_LINES).join(', ');
+  const rest = lineNumbers.length - CONTINUATION_WARNING_LINES;
+  return rest > 0 ? `${head} и ещё ${rest}` : head;
+}
+
+/**
+ * Разбирает текст сценария. Пустые строки парсер игнорирует — их можно
+ * ставить где угодно, в том числе между строк одной реплики.
+ *
+ * Реплика может занимать несколько строк: жёсткий перенос из чата/документа
+ * (часто с пустой строкой после каждой строки) склеивается в один текст.
+ * Строка продолжения отличается от новой реплики по левой части разделителя
+ * (см. looksLikeCharacterHeader), поэтому тире и двоеточие внутри
+ * перенесённого предложения не режут его на «персонажа» и «текст». Метка
+ * изображения всегда прерывает реплику; новая реплика начинается с подписи
+ * «Имя (Пол):».
  *
  * Контракт: при errors.length > 0 lines НЕ применяются (ScenarioModal блокирует
  * кнопку и обработчик). Поэтому после битого диапазона номер изображения
@@ -135,11 +196,30 @@ export function parseScenario(text: string): ScenarioParseResult {
   const lines: ScenarioLine[] = [];
   const errors: string[] = [];
   const warnings: string[] = [];
+  /** Номера строк, склеенных с предыдущей репликой (для предупреждения). */
+  const continuationLines: number[] = [];
 
   let currentImage: number | null = null;
   let currentYRange: { from: number; to: number } | null = null;
+  /** Последняя реплика — к ней дописываются мягкие переносы. */
+  let lastSpeech: ScenarioLine | null = null;
 
-  (text || '').split(/\r?\n/).forEach((raw, idx) => {
+  const applyAnchor = (anchor: NonNullable<ReturnType<typeof parseImageAnchor>>, lineNo: number) => {
+    // Метка изображения закрывает предыдущую реплику: строки после неё —
+    // уже не её продолжение.
+    lastSpeech = null;
+    if (anchor.kind === 'error') {
+      errors.push(`Строка ${lineNo}: ${anchor.message}`);
+      currentImage = anchor.imageIndex;
+      currentYRange = null;
+    } else {
+      currentImage = anchor.imageIndex;
+      currentYRange = anchor.yRange;
+    }
+  };
+
+  // BOM из буфера обмена не должен ломать первую метку изображения.
+  (text || '').replace(/^\uFEFF/, '').split(/\r?\n/).forEach((raw, idx) => {
     const lineNo = idx + 1;
     const line = raw.trim();
     if (!line) return;
@@ -149,33 +229,61 @@ export function parseScenario(text: string): ScenarioParseResult {
     // подавляет каскад «реплика до первого изображения», а не fullFrame.
     const anchor = parseImageAnchor(line);
     if (anchor) {
-      if (anchor.kind === 'error') {
-        errors.push(`Строка ${lineNo}: ${anchor.message}`);
-        currentImage = anchor.imageIndex;
-        currentYRange = null;
-      } else {
-        currentImage = anchor.imageIndex;
-        currentYRange = anchor.yRange;
-      }
+      applyAnchor(anchor, lineNo);
       return;
     }
 
     const split = splitLine(line);
-    if (!split) {
-      errors.push(`Строка ${lineNo}: не реплика (нет разделителя «:», « — » или « - »). В сценарии допускаются только «${SCENARIO_IMAGE_LABEL} N» и реплики «Имя (Пол): текст»`);
+
+    // «Герой / Антагонист (Император и Ларс): Изображение 4 [50..100%]» —
+    // метка изображения оказалась в одной строке с именем. Имя здесь — не
+    // реплика (текста нет), поэтому метка важнее: иначе диапазон попадёт в
+    // озвучку как текст.
+    if (split && split.left && split.right) {
+      const embedded = parseImageAnchor(split.right);
+      if (embedded?.kind === 'ok') {
+        warnings.unshift(
+          `Строка ${lineNo}: «${split.right}» — метка изображения, а не текст реплики; имя «${split.left}» перед ней не озвучивается`
+        );
+        applyAnchor(embedded, lineNo);
+        return;
+      }
+    }
+
+    // Строка после реплики без «подписи персонажа» — мягкий перенос, даже
+    // если в ней есть « — » или «:»: «… шанс — вы сгорите …» не должно стать
+    // репликой персонажа «… шанс». Метка изображения и подпись начинают
+    // новый блок, всё остальное дописывается к текущей реплике.
+    const isContinuation =
+      lastSpeech !== null && (!split || !looksLikeCharacterHeader(split.left, split.separator));
+    if (isContinuation && lastSpeech) {
+      lastSpeech.text = joinContinuation(lastSpeech.text, line);
+      continuationLines.push(lineNo);
       return;
     }
+
+    if (!split) {
+      errors.push(
+        `Строка ${lineNo}: не реплика (нет разделителя «:», « — » или « - »). В сценарии допускаются только «${SCENARIO_IMAGE_LABEL} N» и реплики «Имя (Пол): текст»`
+      );
+      lastSpeech = null;
+      return;
+    }
+
     const { left, right } = split;
     if (!left) {
       errors.push(`Строка ${lineNo}: не указано имя персонажа`);
+      lastSpeech = null;
       return;
     }
     if (!right) {
       errors.push(`Строка ${lineNo}: текст реплики пуст`);
+      lastSpeech = null;
       return;
     }
     if (currentImage === null) {
       errors.push(`Строка ${lineNo}: реплика стоит до первого «${SCENARIO_IMAGE_LABEL} N»`);
+      lastSpeech = null;
       return;
     }
 
@@ -183,6 +291,7 @@ export function parseScenario(text: string): ScenarioParseResult {
     const character = (leftMatch?.[1] || left).trim();
     if (!character) {
       errors.push(`Строка ${lineNo}: не указано имя персонажа`);
+      lastSpeech = null;
       return;
     }
     const { gender, label } = parseGender(leftMatch?.[2]);
@@ -192,8 +301,16 @@ export function parseScenario(text: string): ScenarioParseResult {
       warnings.push(`Строка ${lineNo}: пол не указан — формат «${character} (Жен.)» или «${character} (Муж.)»`);
     }
 
-    lines.push({ imageIndex: currentImage, character, gender, text: right, yRange: currentYRange });
+    const speech: ScenarioLine = { imageIndex: currentImage, character, gender, text: right, yRange: currentYRange };
+    lines.push(speech);
+    lastSpeech = speech;
   });
+
+  if (continuationLines.length > 0) {
+    warnings.unshift(
+      `Переносы строк внутри реплик склеены: ${continuationLines.length} (строки ${formatLineList(continuationLines)}); пустые строки парсер игнорирует`
+    );
+  }
 
   return { lines, errors, warnings };
 }
