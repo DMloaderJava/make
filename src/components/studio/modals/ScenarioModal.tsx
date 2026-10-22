@@ -51,7 +51,8 @@ interface ScenarioModalProps {
  *
  * Правила: 1) сначала изображение, затем озвучка; 2) реплики переводятся на
  * язык озвучки; 3) после реплики — пауза 0,6 с и переход к следующему
- * изображению; 4) пол в скобках: (Жен.) или (Муж.); 5) без лишнего текста.
+ * изображению; 4) пол в скобках: (Жен.) или (Муж.); 5) без лишнего текста,
+ * жёсткие переносы внутри реплики склеиваются.
  */
 export function ScenarioModal({ open, onClose, imagesCount, existingPanels, ttsLanguage, currentScenario, llmProviderId, chatModel, onSettingsChange, onApply, onTranslate }: ScenarioModalProps) {
   const [text, setText] = useState('');
@@ -143,7 +144,11 @@ export function ScenarioModal({ open, onClose, imagesCount, existingPanels, ttsL
                 <li>Каждая реплика переводится на язык озвучки: <span className="text-[#E8B44C]">{languageName}</span>.</li>
                 <li>После завершения чтения реплики — переход к следующему изображению через {String(SCENARIO_GAP_SECONDS).replace('.', ',')} секунды.</li>
                 <li>Пол персонажа указывается в скобках: (Жен.) или (Муж.).</li>
-                <li>Никакого лишнего текста — только «{SCENARIO_IMAGE_LABEL} N» и реплики.</li>
+                <li>
+                  Никакого лишнего текста — только «{SCENARIO_IMAGE_LABEL} N» и реплики.
+                  Реплику можно переносить на несколько строк и разделять пустыми строками —
+                  парсер склеит её обратно (удобно для вставки из чата или документа).
+                </li>
                 <li>
                   <span className="text-[#F5F5F7]">Y-диапазон (опционально).</span>{' '}
                   <span className="font-mono text-[#E8B44C]">{SCENARIO_IMAGE_LABEL} 1 [0..30%]</span> — панель занимает верхние 30% картинки.

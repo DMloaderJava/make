@@ -131,6 +131,83 @@ test('parseScenario: пол не указан — предупреждение',
   assert.ok(warnings.some(w => w.includes('пол не указан')));
 });
 
+// ---- Жёсткие переносы из чата/документа: «цельный сценарий» не должен падать ----
+
+const WRAPPED_SCENARIO = `Изображение 1 [0..50%]
+
+Антагонист: Шепчитесь сколько угодно, жалкие трусы. Никто из вас не посмеет даже
+
+взглянуть мне в глаза.
+
+Изображение 1 [50..100%]
+
+Герой: Пусть смотрят и боятся. Они даже не представляют, кто вернулся в этот зал
+
+под руку с их погибелью.
+
+Изображение 2 [0..50%]
+
+Антагонист: Твоя жизнь оборвется здесь, в море собственной крови. Захлебнись в
+
+своем отчаянии!
+
+Изображение 2 [50..100%]
+
+Герой: Я отдала за вас всё, а вы отняли у меня жизнь... Если судьба подарит мне
+
+еще один шанс — вы сгорите в том же аду!`;
+
+test('parseScenario: переносы строк и пустые строки внутри реплики склеиваются, а не дают «не реплика»', () => {
+  const { lines, errors, warnings } = parseScenario(WRAPPED_SCENARIO);
+  assert.deepEqual(errors, [], 'жёсткие переносы — не ошибка формата');
+  assert.equal(lines.length, 4, 'каждый блок — одна реплика, а не по строке на реплику');
+  assert.deepEqual(lines.map(l => l.text), [
+    'Шепчитесь сколько угодно, жалкие трусы. Никто из вас не посмеет даже взглянуть мне в глаза.',
+    'Пусть смотрят и боятся. Они даже не представляют, кто вернулся в этот зал под руку с их погибелью.',
+    'Твоя жизнь оборвется здесь, в море собственной крови. Захлебнись в своем отчаянии!',
+    'Я отдала за вас всё, а вы отняли у меня жизнь... Если судьба подарит мне еще один шанс — вы сгорите в том же аду!',
+  ]);
+  assert.deepEqual(lines.map(l => l.yRange), [
+    { from: 0, to: 50 },
+    { from: 50, to: 100 },
+    { from: 0, to: 50 },
+    { from: 50, to: 100 },
+  ]);
+  assert.ok(
+    warnings.some(w => w.includes('Переносы строк внутри реплик склеены: 4')),
+    'склейка видна пользователю предупреждением'
+  );
+});
+
+test('parseScenario: тире в перенесённой строке не превращает её в новую реплику', () => {
+  const { lines, errors } = parseScenario('Изображение 1\nАня (Жен.): Это был долгий путь,\n\nи вот он — конец.');
+  assert.deepEqual(errors, []);
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].character, 'Аня');
+  assert.equal(lines[0].text, 'Это был долгий путь, и вот он — конец.');
+});
+
+test('parseScenario: подпись персонажа после реплики — новая реплика, а не продолжение', () => {
+  const { lines, errors } = parseScenario('Изображение 1\nАня (Жен.): раз\nБорис (Муж.): два');
+  assert.deepEqual(errors, []);
+  assert.deepEqual(lines.map(l => l.character), ['Аня', 'Борис']);
+  assert.deepEqual(lines.map(l => l.text), ['раз', 'два']);
+});
+
+test('parseScenario: метка изображения в одной строке с именем — это метка, а не текст реплики', () => {
+  const { lines, errors, warnings } = parseScenario([
+    'Изображение 4 [0..50%]',
+    'Антагонист: П-пощадите!',
+    'Герой / Антагонист (Император и Ларс): Изображение 4 [50..100%]',
+    'Герой: Не пачкай руки.',
+  ].join('\n'));
+  assert.deepEqual(errors, []);
+  assert.equal(lines.length, 2, 'строка с именем перед меткой не становится репликой');
+  assert.deepEqual(lines.map(l => l.text), ['П-пощадите!', 'Не пачкай руки.']);
+  assert.deepEqual(lines.map(l => l.yRange), [{ from: 0, to: 50 }, { from: 50, to: 100 }]);
+  assert.ok(warnings.some(w => w.includes('метка изображения')));
+});
+
 test('serializeScenario: ровно формат ТЗ — изображения и реплики, без лишнего', () => {
   const panels: Array<{ dialogue: string; character: string; imageIndex: number; order?: number }> = [
     { dialogue: 'Привет!', character: 'Аня', imageIndex: 0, order: 0 },
@@ -153,6 +230,20 @@ test('serialize → parse: round-trip сохраняет реплики, пер�
   );
   const second = parseScenario(text);
   assert.deepEqual(second.lines, first.lines);
+});
+
+test('serialize → parse: строчные имена персонажей не склеиваются в одну реплику', () => {
+  const panels = [
+    { dialogue: 'раз — с тире', character: 'аня', imageIndex: 0, order: 0 },
+    { dialogue: 'два', character: 'борис', imageIndex: 0, order: 1 },
+  ];
+  const text = serializeScenario(panels, { аня: 'female', борис: 'male' });
+  const { lines, errors } = parseScenario(text);
+  assert.deepEqual(errors, []);
+  assert.deepEqual(lines.map(l => [l.character, l.text]), [
+    ['аня', 'раз — с тире'],
+    ['борис', 'два'],
+  ]);
 });
 
 test('scenarioToPanels: одна реплика — одна панель на всё изображение', () => {
