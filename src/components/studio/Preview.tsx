@@ -26,6 +26,7 @@ import {
 import type { ProjectClock } from '@/lib/pipeline/projectClock';
 import { renderExportFrameToCanvas } from '@/lib/pipeline/assembleVideo';
 import { yRangeFromBbox } from '@/lib/pipeline/yRange';
+import { isImageDrawable, loadImageElement } from '@/lib/pipeline/loadImage';
 
 export interface PreviewFrameRenderParams {
   ctx: CanvasRenderingContext2D;
@@ -320,25 +321,40 @@ export function Preview({
   );
 
   useEffect(() => {
+    let cancelled = false;
     const load = async () => {
       const map = new Map<string, HTMLImageElement>();
+      // Прогрессивно: как только страница декодирована — сразу показываем её,
+      // не ожидая всю пачку. Длинная webtoon-полоса декодируется секундами,
+      // и раньше превью оставалось пустым до истечения общего таймаута.
       for (const src of images) {
+        if (cancelled) return;
         if (!src) continue;
         if (map.has(src)) continue;
-        const img = new Image();
-        img.crossOrigin = 'anonymous';
-        img.src = src;
-        await new Promise<void>(res => {
-          img.onload = () => res();
-          img.onerror = () => res();
-          setTimeout(() => res(), 2000);
-        });
+        const img = await loadImageElement(src, { crossOrigin: 'anonymous' });
+        if (cancelled) return;
         map.set(src, img);
+        setLoaded(new Map(map));
+        frameDedupRef.current.invalidate();
+        if (!isImageDrawable(img)) {
+          // Таймаут страховки: дорисовываем кадр, когда файл всё-таки догрузится.
+          img.addEventListener(
+            'load',
+            () => {
+              frameDedupRef.current.invalidate();
+              scheduleDrawRef.current();
+            },
+            { once: true }
+          );
+        }
       }
       frameDedupRef.current.invalidate();
-      setLoaded(map);
+      setLoaded(new Map(map));
     };
     load();
+    return () => {
+      cancelled = true;
+    };
   }, [images]);
 
   /**
@@ -535,6 +551,14 @@ export function Preview({
       onSeek: performSeek,
     };
   });
+
+  // Новая страница догрузилась (или её декодирование завершилось позже) —
+  // сбрасываем дедупликацию кадра и перерисовываем текущий момент, иначе
+  // превью остаётся пустым до первого seek/play.
+  useEffect(() => {
+    frameDedupRef.current.invalidate();
+    scheduleDrawRef.current();
+  }, [loaded, stripScene]);
 
   /**
    * Ручной скролл ленты (колесо): scrollY → timeAtScroll → onSeek к позиции

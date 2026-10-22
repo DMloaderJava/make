@@ -9,6 +9,7 @@ import { SyncTimeline } from '../storage/db';
 import { appendPlacements, measureBlobDurations, planPlacements, stackBlobsBackToBack, type AudioPlacement } from './audioMix';
 import { createStripSceneFromMedia, type StripScene } from './mangaStrip';
 import { renderExportFrameToCanvas } from './assembleVideo';
+import { loadImageElement } from './loadImage';
 
 export interface RenderOptions {
   images: string[]; // data URLs
@@ -225,17 +226,9 @@ export class WebCodecsBackend implements RenderBackend {
     const loadedImages = new Map<string, HTMLImageElement>();
     for (const dataUrl of options.images) {
       if (!loadedImages.has(dataUrl)) {
-        try {
-          const img = new Image();
-          img.crossOrigin = 'anonymous';
-          img.src = dataUrl;
-          await new Promise((res) => {
-            img.onload = res;
-            img.onerror = res;
-            setTimeout(res, 3000);
-          });
-          loadedImages.set(dataUrl, img);
-        } catch {}
+        // Длинные полосы декодируются дольше 3 с: ждём настоящий load.
+        const img = await loadImageElement(dataUrl, { crossOrigin: 'anonymous' });
+        loadedImages.set(dataUrl, img);
       }
     }
 

@@ -28,12 +28,23 @@ export type StripEase = 'linear' | 'easeInOut';
 export interface StripSlot {
   /** Индекс изображения (страницы) в исходном массиве. */
   index: number;
-  /** Координаты в виртуальной ленте (y — вниз от верха ленты). */
+  /** Координаты содержимого в виртуальной ленте (y — вниз от верха ленты). */
   x: number;
   y: number;
+  /** Ширина отрисованной страницы; может быть меньше ширины ленты (высокая полоса). */
   width: number;
+  /** Высота слота в ленте (по ней считаются scroll/спаны). */
   height: number;
+  /**
+   * Высота отрисованного содержимого. Меньше height только у вырожденных
+   * панорам (страница ниже minSlotHeight): содержимое центрируется по вертикали.
+   * Для обычных страниц drawHeight === height.
+   */
+  drawHeight: number;
   sourceAspect: number;
+  /** Размер исходного изображения — для рисования только видимого среза. */
+  sourceWidth: number;
+  sourceHeight: number;
 }
 
 export interface StripLayout {
@@ -179,7 +190,16 @@ export interface StripLayoutOptions {
 }
 
 const DEFAULT_MIN_SLOT = 240;
-const DEFAULT_MAX_SLOT = 12000;
+/**
+ * Потолок виртуальной высоты страницы. Это НЕ лимит canvas: лента никогда не
+ * композитится целиком, рисуется только видимое окно. Потолок нужен лишь как
+ * защита от мусорных размеров, поэтому реальные вебтуны (900×12540 — это
+ * 26 752 виртуальных px при ширине ленты 1920) не обрезаются и не плющатся.
+ */
+const DEFAULT_MAX_SLOT = 40000;
+
+/** Границы высоты страницы в ленте (для тестов и диагностики). */
+export const STRIP_SLOT_LIMITS = { min: DEFAULT_MIN_SLOT, max: DEFAULT_MAX_SLOT } as const;
 
 /** Складывает страницы в вертикальную ленту в виртуальных координатах. */
 export function computeStripLayout(
@@ -203,9 +223,35 @@ export function computeStripLayout(
   let y = 0;
   sizes.forEach((size, index) => {
     const sourceAspect = size.height / Math.max(1, size.width);
-    const height = Math.min(maxSlotHeight, Math.max(minSlotHeight, width * sourceAspect));
-    slots.push({ index, x: 0, y, width, height, sourceAspect });
-    y += height + gap;
+    const naturalHeight = width * sourceAspect;
+    // Пропорции страницы неприкосновенны: ограничиваем высоту не растяжением
+    // drawImage, а шириной слота. Иначе полоса 900×12540 при ширине ленты 1920
+    // упиралась в потолок 12000 и сплющивалась по вертикали в 2,2 раза.
+    let slotHeight = naturalHeight;
+    let slotWidth = width;
+    if (naturalHeight > maxSlotHeight) {
+      slotHeight = maxSlotHeight;
+      slotWidth = slotHeight / Math.max(sourceAspect, 1e-6);
+    } else if (naturalHeight < minSlotHeight) {
+      // Панораму дотягиваем не растяжением, а высотой слота: ширина остаётся
+      // шириной ленты, содержимое рисуется тонкой полосой по центру (drawHeight).
+      slotHeight = minSlotHeight;
+    }
+    // Вырожденные панорамы после ограничения ширины не растягиваем по высоте:
+    // рисуем содержимое пропорционально и центрируем его в слоте.
+    const drawHeight = Math.min(slotHeight, slotWidth * sourceAspect);
+    slots.push({
+      index,
+      x: (width - slotWidth) / 2,
+      y,
+      width: slotWidth,
+      height: slotHeight,
+      drawHeight,
+      sourceAspect,
+      sourceWidth: Math.max(1, size.width),
+      sourceHeight: Math.max(1, size.height),
+    });
+    y += slotHeight + gap;
   });
 
   const totalHeight = Math.max(0, y - (slots.length > 0 ? gap : 0));
@@ -500,6 +546,61 @@ export interface StripRenderOptions {
   background?: string;
 }
 
+/**
+ * Размер исходника для drawImage: naturalWidth у <img>, width у canvas/ImageBitmap.
+ * Плейсхолдеры без размеров дают null — тогда координаты берутся из раскладки.
+ */
+function canvasSourceSize(image: CanvasImageSource): { width: number; height: number } | null {
+  const source = image as unknown as {
+    naturalWidth?: number;
+    naturalHeight?: number;
+    videoWidth?: number;
+    videoHeight?: number;
+    width?: number;
+    height?: number;
+  };
+  const width = source.naturalWidth ?? source.videoWidth ?? source.width;
+  const height = source.naturalHeight ?? source.videoHeight ?? source.height;
+  if (typeof width !== 'number' || typeof height !== 'number') return null;
+  if (!(width > 0) || !(height > 0)) return null;
+  return { width, height };
+}
+
+/**
+ * Рисует только видимый срез страницы (9-аргументный drawImage).
+ *
+ * Зачем: длинная полоса 900×12540 при ширине ленты 1920 просит у браузера
+ * текстуру 1920×26752 — это ~200 МБ растра на каждый кадр (и риск пустого
+ * кадра на слабых машинах), а после уменьшения ширины у сверхвысоких полос
+ * ещё и лишнее масштабирование. Срез берётся из исходника в его собственных
+ * пикселях, поэтому картинка остаётся резкой на любом зуме.
+ */
+function drawVisibleSlice(
+  ctx: CanvasRenderingContext2D,
+  image: CanvasImageSource,
+  slot: StripSlot,
+  left: number,
+  top: number,
+  drawHeight: number,
+  frameWidth: number,
+  frameHeight: number
+): void {
+  const size = canvasSourceSize(image) ?? { width: slot.sourceWidth, height: slot.sourceHeight };
+  // Пересечение содержимого страницы с кадром (в координатах кадра).
+  const ix = Math.max(0, left);
+  const iy = Math.max(0, top);
+  const ix2 = Math.min(frameWidth, left + slot.width);
+  const iy2 = Math.min(frameHeight, top + drawHeight);
+  const iw = ix2 - ix;
+  const ih = iy2 - iy;
+  if (!(iw > 0) || !(ih > 0)) return;
+  const sx = ((ix - left) / slot.width) * size.width;
+  const sy = ((iy - top) / drawHeight) * size.height;
+  const sw = (iw / slot.width) * size.width;
+  const sh = (ih / drawHeight) * size.height;
+  ctx.drawImage(image, sx, sy, sw, sh, ix, iy, iw, ih);
+}
+
 /** Рисует видимое окно ленты. Лента целиком НЕ композитится — только видимые страницы. */
 export function renderStripFrame(ctx: CanvasRenderingContext2D, options: StripRenderOptions): void {
   const { layout } = options;
@@ -525,14 +626,18 @@ export function renderStripFrame(ctx: CanvasRenderingContext2D, options: StripRe
   ctx.rect(0, 0, w, h);
   ctx.clip();
 
-  // Лента центрируется по горизонтали: при viewport < frameHeight она шире кадра
-  const x = (w - layout.width) / 2;
+  // Лента центрируется по горизонтали: при viewport < frameHeight она шире кадра.
+  // Каждая страница — в своих координатах: высокая полоса (потолок maxSlotHeight)
+  // уже ленты и стоит по центру, иначе она плющилась бы растяжением drawImage.
+  const frameX = (w - layout.width) / 2;
 
   for (const slot of visibleSlots(layout, scrollY)) {
     const image = options.images[slot.index];
     if (!image) continue;
-    const dy = slot.y - scrollY;
-    ctx.drawImage(image, x, dy, slot.width, slot.height);
+    const drawHeight = slot.drawHeight ?? slot.height;
+    const left = frameX + slot.x;
+    const top = slot.y - scrollY + (slot.height - drawHeight) / 2;
+    drawVisibleSlice(ctx, image, slot, left, top, drawHeight, w, h);
   }
 
   if (options.highlightSlot !== null && options.highlightSlot !== undefined) {
@@ -541,7 +646,7 @@ export function renderStripFrame(ctx: CanvasRenderingContext2D, options: StripRe
       ctx.strokeStyle = options.highlightColor ?? '#E8B44C';
       ctx.lineWidth = 3;
       ctx.globalAlpha = 0.9;
-      ctx.strokeRect(x + 1, slot.y - scrollY + 1, slot.width - 2, slot.height - 2);
+      ctx.strokeRect(frameX + slot.x + 1, slot.y - scrollY + 1, slot.width - 2, slot.height - 2);
       ctx.globalAlpha = 1;
     }
   }

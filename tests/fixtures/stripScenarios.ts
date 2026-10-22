@@ -57,12 +57,12 @@ export const STRIP_SCENARIOS: StripScenario[] = [
     expectedTotalHeight: 240,
   },
   {
-    name: 'слишком высокая страница обрезается лимитом',
+    name: 'слишком высокая страница обрезается лимитом (по ширине, без сплющивания)',
     sizes: [{ width: 100, height: 100000 }],
     viewport: FRAME_H,
     gap: 0,
-    expectedHeights: [12000],
-    expectedTotalHeight: 12000,
+    expectedHeights: [40000],
+    expectedTotalHeight: 40000,
     expectClamped: true,
   },
   {
