@@ -19,6 +19,7 @@ import {
   type CameraFrameSample,
 } from './cameraSampler';
 import { yRangeFromBbox } from './yRange';
+import { loadImageElement } from './loadImage';
 
 export interface AssembleOptions {
   images: string[]; // data URLs
@@ -74,16 +75,10 @@ export async function assembleVideoWithCanvas(
   const loadedImages: Map<string, HTMLImageElement> = new Map();
   for (const dataUrl of options.images) {
     if (!loadedImages.has(dataUrl)) {
-      try {
-        const img = new Image();
-        img.src = dataUrl;
-        await new Promise<void>((res) => {
-          img.onload = () => res();
-          img.onerror = () => res();
-          setTimeout(() => res(), 3000);
-        });
-        loadedImages.set(dataUrl, img);
-      } catch {}
+      // Длинные полосы декодируются дольше 3 с: ждём настоящий load, а не
+      // таймаут, иначе кадры экспорта выходили пустыми.
+      const img = await loadImageElement(dataUrl);
+      loadedImages.set(dataUrl, img);
     }
   }
 

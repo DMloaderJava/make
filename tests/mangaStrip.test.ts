@@ -8,8 +8,10 @@ import {
   computeStripLayout,
   maxScrollY,
   pageIndexAtScroll,
+  renderStripFrame,
   resolveStripViewport,
   sampleScroll,
+  STRIP_SLOT_LIMITS,
   STRIP_ZOOM_MAX,
   STRIP_ZOOM_MIN,
   targetScrollForSlot,
@@ -95,7 +97,117 @@ test('computeStripLayout: защита от панорам 1px и «бескон
     { ...FRAME, viewport: 1080, gap: 24 }
   );
   assert.ok(layout.slots[0].height >= 240, 'слишком низкая страница растянута до минимума');
-  assert.ok(layout.slots[1].height <= 12000, 'слишком высокая обрезана по максимуму');
+  assert.ok(layout.slots[1].height <= STRIP_SLOT_LIMITS.max, 'слишком высокая обрезана по максимуму');
+});
+
+// ---- Длинная webtoon-полоса: пропорции не должны страдать от лимитов ----
+
+test('computeStripLayout: полоса 900×12540 не плющится и не обрезается потолком', () => {
+  const source = { width: 900, height: 12540 };
+  const layout = computeStripLayout([source], { ...FRAME, viewport: 1080, gap: 24 });
+  const slot = layout.slots[0];
+  const sourceAspect = source.height / source.width;
+
+  assert.equal(slot.width, layout.width, 'полоса занимает всю ширину ленты');
+  assert.equal(slot.x, 0);
+  assert.equal(slot.drawHeight, slot.height, 'содержимое рисуется на всю высоту слота');
+  assert.ok(
+    Math.abs(slot.height / slot.width - sourceAspect) < 1e-9,
+    `пропорции сохранены: ${slot.height / slot.width} вместо ${sourceAspect}`
+  );
+  assert.ok(slot.height > 20000, `виртуальная высота полосы ${slot.height} не упирается в старый потолок 12000`);
+  assert.ok(slot.height <= STRIP_SLOT_LIMITS.max, 'потолок всё ещё защищает от мусорных размеров');
+});
+
+test('computeStripLayout: слишком высокая страница ограничивается по ширине, а не по пропорциям', () => {
+  const source = { width: 100, height: 100000 };
+  const layout = computeStripLayout([source], { ...FRAME, viewport: 1080, gap: 0 });
+  const slot = layout.slots[0];
+
+  assert.equal(slot.height, STRIP_SLOT_LIMITS.max);
+  assert.ok(
+    Math.abs(slot.height / slot.width - source.height / source.width) < 1e-6,
+    'ширина уменьшена пропорционально, картинка не растянута'
+  );
+  assert.ok(slot.width < layout.width, 'страница уже ленты');
+  assert.ok(Math.abs(slot.x - (layout.width - slot.width) / 2) < 1e-6, 'страница центрирована в ленте');
+});
+
+test('computeStripLayout: панорама дотягивается до минимума без вертикального растяжения', () => {
+  const layout = computeStripLayout([{ width: 10000, height: 10 }], { ...FRAME, viewport: 1080, gap: 0 });
+  const slot = layout.slots[0];
+
+  assert.equal(slot.height, 240, 'минимальная высота слота сохранена');
+  assert.equal(slot.width, layout.width, 'ширина ленты не раздувается');
+  assert.ok(slot.drawHeight < slot.height, 'содержимое ниже слота — оно центрируется, а не растягивается');
+  assert.ok(
+    Math.abs(slot.drawHeight / slot.width - 10 / 10000) < 1e-6,
+    'тонкая полоска сохраняет свои пропорции'
+  );
+});
+
+test('renderStripFrame: рисуется только видимый срез, пропорции длинной полосы сохранены', () => {
+  const source = { width: 900, height: 12540 };
+  const layout = computeStripLayout([source], { ...FRAME, viewport: 1080, gap: 24 });
+  const calls: Array<[number, number, number, number, number, number, number, number]> = [];
+  const ctx = {
+    fillStyle: '', strokeStyle: '', lineWidth: 1, globalAlpha: 1,
+    fillRect: () => {}, strokeRect: () => {}, save: () => {}, restore: () => {},
+    beginPath: () => {}, rect: () => {}, clip: () => {}, translate: () => {}, scale: () => {},
+    drawImage: (
+      _img: unknown,
+      sx: number, sy: number, sw: number, sh: number,
+      dx: number, dy: number, dw: number, dh: number
+    ) => calls.push([sx, sy, sw, sh, dx, dy, dw, dh]),
+  } as unknown as CanvasRenderingContext2D;
+
+  renderStripFrame(ctx, { layout, images: [{ width: source.width, height: source.height } as CanvasImageSource], scrollY: 0, kenBurnsAmount: 0 });
+  assert.equal(calls.length, 1, 'страница рисуется одним срезом');
+  const [sx, sy, sw, sh, dx, dy, dw, dh] = calls[0];
+  assert.equal(dw, layout.width, 'полоса на всю ширину кадра');
+  assert.equal(dx, 0, 'без горизонтальных полей');
+  assert.equal(dy, 0, 'верх полосы у верха кадра при scrollY=0');
+  assert.equal(dh, layout.frameHeight, 'в кадр попадает ровно высота кадра');
+  assert.ok(
+    Math.abs(sh / sw - dh / dw) < 1e-9,
+    `срез исходника масштабируется без искажений: ${sh / sw} вместо ${dh / dw}`
+  );
+  assert.ok(
+    Math.abs(layout.slots[0].height / layout.slots[0].width - source.height / source.width) < 1e-9,
+    'полная страница в раскладке сохраняет пропорции'
+  );
+  assert.equal(sx, 0, 'срез начинается с левого края исходника');
+  assert.equal(sy, 0, 'срез начинается с верха исходника');
+  assert.equal(sw, source.width, 'по ширине взят весь исходник');
+  assert.ok(
+    Math.abs(sh - (layout.frameHeight / layout.slots[0].height) * source.height) < 1e-6,
+    'из исходника берётся ровно та полоса, что видна в кадре'
+  );
+  assert.ok(sh < source.height, 'высокая полоса не растеризуется целиком');
+});
+
+test('renderStripFrame: срез следует за скроллом и не выходит за исходник', () => {
+  const source = { width: 900, height: 12540 };
+  const layout = computeStripLayout([source], { ...FRAME, viewport: 1080, gap: 0 });
+  const calls: Array<[number, number, number, number]> = [];
+  const ctx = {
+    fillStyle: '', strokeStyle: '', lineWidth: 1, globalAlpha: 1,
+    fillRect: () => {}, strokeRect: () => {}, save: () => {}, restore: () => {},
+    beginPath: () => {}, rect: () => {}, clip: () => {}, translate: () => {}, scale: () => {},
+    drawImage: (_img: unknown, sx: number, sy: number, _sw: number, sh: number) => calls.push([sx, sy, _sw, sh]),
+  } as unknown as CanvasRenderingContext2D;
+  const image = { width: source.width, height: source.height } as CanvasImageSource;
+  const max = maxScrollY(layout);
+
+  renderStripFrame(ctx, { layout, images: [image], scrollY: max / 2, kenBurnsAmount: 0 });
+  const [, syMid, , shMid] = calls[0];
+  assert.ok(syMid > 0, `середина ленты берёт середину исходника, получено ${syMid}`);
+  assert.ok(syMid + shMid <= source.height + 1e-6, 'срез не выходит за низ исходника');
+
+  calls.length = 0;
+  renderStripFrame(ctx, { layout, images: [image], scrollY: max, kenBurnsAmount: 0 });
+  const [, syEnd, , shEnd] = calls[0];
+  assert.ok(Math.abs(syEnd + shEnd - source.height) < 1e-6, 'в конце ленты срез доходит до низа исходника');
 });
 
 test('scroll: клампится в границы ленты, target центрирует страницу', () => {
