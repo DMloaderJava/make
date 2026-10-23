@@ -10,6 +10,7 @@ import { OnboardingWizard, isOnboardingCompleted } from '@/components/onboarding
 import { createDemoProject } from '@/lib/pipeline/demoProject';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
+import { APP_VERSION_LABEL } from '@/lib/version';
 
 function formatDurationSafe(timeline?: any[], panelsLen?: number): string {
   const last = timeline?.[timeline.length - 1]?.audioEnd;
@@ -270,7 +271,7 @@ export default function HomePage() {
         )}
 
         <div className="pt-12 pb-6 border-t border-[#16161A] flex items-center justify-between text-[11px] font-mono text-[#8A8A93]/50">
-          <span>Self-hosted · BYOK · OPFS · WebCodecs</span>
+          <span>Self-hosted · BYOK · OPFS · WebCodecs · {APP_VERSION_LABEL}</span>
           <span className="flex gap-3">
             <Link href="/settings" className="hover:text-[#8A8A93]">Провайдеры</Link>
             <span>Space play · ⌘E export</span>

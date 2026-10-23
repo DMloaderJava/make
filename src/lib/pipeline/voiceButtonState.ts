@@ -33,7 +33,7 @@ export function pluralize(n: number, one: string, few: string, many: string): st
 }
 
 /**
- * @param panels        панели проекта (audioSource: 'import' — внешний файл, v1.3.18)
+ * @param panels        панели проекта (audioSource: 'import' — внешний файл)
  * @param voicedPanelIds ID панелей, для которых сейчас есть аудио (audioBlobs)
  * @param audioTexts    снимок текстов на момент последней озвучки (project.audioTexts)
  */
@@ -57,7 +57,7 @@ export function getVoiceButtonState(params: {
     const snapshot = params.audioTexts?.[panel.id];
     // Аудио есть, но текст панели изменился после озвучки: при следующем
     // прогоне панель уйдёт в TTS заново — для пользователя она «не озвучена».
-    // Без снимка (проекты до v1.3.2) панель с аудио считается озвученной.
+    // Без снимка (старые проекты) панель с аудио считается озвученной.
     if (typeof snapshot === 'string' && snapshot !== panel.dialogue) continue;
     voicedCount += 1;
   }

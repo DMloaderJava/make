@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from 'next/server';
 // Next.js 16+ official: proxy.ts replaces middleware.ts (Node runtime, network boundary)
 // Docs: https://nextjs.org/blog/next-16 — section "`proxy.ts` (formerly `middleware.ts`)"
 //
-// Правки v1.3.2:
+// Правки:
 // - пароль больше не попадает в URL: форма отправляется POST-ом;
 // - в cookie лежит SHA-256 хэш пароля, а не сам пароль;
 // - флаг MVS_SECURE_COOKIE управляет Secure-атрибутом (прод по http иначе не может войти);
