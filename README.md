@@ -236,7 +236,18 @@ CI (`.github/workflows/ci.yml`) гоняет typecheck/test/lint/build на
 (`ELECTRON_RUN_AS_NODE` + `next/dist/bin/next`), а не через `npm run start`:
 в переносимой сборке npm может отсутствовать. Пакет собирается с `asar: false`,
 потому что серверу нужно читать `.next` с диска. Артефакты складываются в
-`release/` (в git не попадают):
+`release/` (в git не попадают), и формат зависит от ОС:
+
+| ОС | Цель `electron-builder` | Файл в `release/` |
+|---|---|---|
+| Linux | `AppImage` | `Manga Voice Studio-1.3.17.AppImage` |
+| Windows | `portable` | `Manga Voice Studio 1.3.17.exe` (переносимый exe, **не** AppImage и не установщик) |
+| macOS | не собирается | подпись/нотаризация вне scope стабилизации |
+
+Их выгружает CI (job `desktop`, матрица ubuntu + windows, retention 14 дней);
+локально `npm run desktop:pack` кладёт распакованную сборку в
+`release/*-unpacked/`. Если `release/` после упаковки пуст, отдельный шаг CI
+падает с ошибкой — молча «зелёной» desktop-джобы не бывает.
 
 `/settings` → добавь ключи (см таблицы ниже). Все в localStorage, прямые запросы из браузера для CORS-friendly.
 
@@ -570,7 +581,7 @@ npm run smoke:tts -- cartesia     # точечно по провайдеру
   проверяются только настоящим Chromium (Playwright), это отдельная задача.
 
 ### Тесты
-`npm test` (`node scripts/run-tests.mjs` → `tsx --test`) — юнит-тесты в <!-- tests:files:start -->40<!-- tests:files:end --> файлах:
+`npm test` (`node scripts/run-tests.mjs` → `tsx --test`) — юнит-тесты в <!-- tests:files:start -->42<!-- tests:files:end --> файлах:
 WAV-обёртка, определение MIME, раскладка и подпись аудио, лента (включая прогон по
 сетке раскладок), политика проксирования TTS и голосов, тело Cartesia, часы рендера,
 планировщик Web Audio, реестр провайдеров (включая структурные guard-тесты),

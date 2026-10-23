@@ -205,7 +205,6 @@ export function useEditorController(id: string) {
     setAudioError,
     setSaveStatus,
   });
-  const {  } = audioOps;
 
   const audioImport = useEditorAudioImport({
     project,
@@ -222,7 +221,6 @@ export function useEditorController(id: string) {
     setLastImportUndo,
     setNotice,
   });
-  const {  } = audioImport;
 
   const scenario = useEditorScenario({
     project,
@@ -237,7 +235,6 @@ export function useEditorController(id: string) {
     setCurrentPanelIdx,
     setShowScenario,
   });
-  const {  } = scenario;
 
 
   const exportHook = useEditorExport({
@@ -273,7 +270,6 @@ export function useEditorController(id: string) {
     setAudioDurations,
     setShowHealthModal,
   });
-  const {  } = exportHook;
 
   const nle = useEditorNle({
     project,

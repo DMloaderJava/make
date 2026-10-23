@@ -83,7 +83,7 @@
 | Desktop | Electron 33 + `electron-builder` |
 | E2E | `playwright-core` + `@sparticuz/chromium` |
 | Объём кода | `src/` ≈ **31 150 строк** |
-| Тесты | **40 файлов**, **399** тест-кейсов (`tsx --test`) |
+| Тесты | **42 файла** (сверяет `check:tests`), **409** тест-кейсов (`tsx --test`) |
 | CI | GitHub Actions, матрица `ubuntu-latest` + `windows-latest` |
 | Лицензия | MIT (`LICENSE`), поле `license` в `package.json` |
 
@@ -591,7 +591,7 @@ make/
 │   ├── smoke-audio.ts            # OfflineAudioContext → WAV
 │   └── smoke-tts.ts              # живая проверка TTS-провайдеров по ключам
 │
-├── tests/                        # 40 файлов, 399 тестов + fixtures/browserEnv
+├── tests/                        # 42 файла, 409 тестов + fixtures/browserEnv
 │
 ├── artifacts/                    # скриншоты и видео smoke-прогонов (в git не попадают)
 │
@@ -1516,7 +1516,12 @@ contextBridge.exposeInMainWorld('mangaStudio', {
   `if: always()`, retention 14 дней — поэтому локальные артефакты в git не нужны;
 - job `desktop`: та же матрица, `npm ci` с postinstall (нужен бинарь Electron),
   `next build` → `electron-builder --publish never` → выгрузка `*.AppImage`,
-  `*.exe` и `*-unpacked/**` с `if-no-files-found: warn`.
+  `*.exe` и `*-unpacked/**`. Загрузка не падает из-за формата
+  (`if-no-files-found: warn`), но следующий шаг проверяет, что `release/` не
+  пуст, и роняет джобу — «зелёной» сборки без артефакта не бывает;
+- в job `verify` desktop **не** собирается, поэтому ни `electron-builder`, ни
+  проверки `release/` там нет. Это зафиксировано тестом
+  `tests/ciWorkflow.test.ts`: при попытке вернуть шаг в `verify` он падает.
 
 ---
 
@@ -1527,7 +1532,8 @@ contextBridge.exposeInMainWorld('mangaStudio', {
 ```bash
 npm run typecheck       # tsc --noEmit
 npm run lint            # eslint
-npm test                # tsx --test, 40 файлов (число сверяет check:tests)
+npm test                # tsx --test, 42 файла (число файлов сверяет check:tests,
+                        #  число кейсов — нет: оно зависит от сборки и ОС)
 npm run check:versions  # версия не разъехалась
 npm run check:launchers # структура .bat/.sh
 npm run smoke:server    # next start + живые маршруты
@@ -1539,7 +1545,7 @@ npm run verify          # всё, включая тесты и сборку
 npm run verify:quick    # без npm test
 ```
 
-### 17.2. Что покрыто юнит-тестами (40 файлов)
+### 17.2. Что покрыто юнит-тестами (42 файла)
 
 | Группа | Файлы |
 |---|---|
@@ -1552,7 +1558,7 @@ npm run verify:quick    # без npm test
 | Провайдеры | `llmProviderCatalog`, `ttsProviderPolicy`, `providerRegistry` (43 записи, CORS-политика, ссылки), `voiceResolver`, `projectSettings` |
 | SRT/каналы | `srt`, `channel` |
 | UI/фидбек | `feedback` (баннеры вместо `alert`/`confirm`), `browserSupport` (предупреждение о неподдерживаемом браузере) |
-| Инфраструктура | `launcherChecks`, `desktopConfig` (main.js и electron-builder), `loadImage`, `onboardingAndDemo`, `previewVsExportIntroOutro`, `stripComments` (хелпер для структурных проверок) |
+| Инфраструктура | `launcherChecks`, `desktopConfig` (main.js и electron-builder), `ciWorkflow` (структура ci.yml: desktop-шаг только в job `desktop`), `editorControllerContract` (спреды контроллера, дубли ключей, лимит 400 строк), `loadImage`, `onboardingAndDemo`, `previewVsExportIntroOutro`, `stripComments` (хелпер для структурных проверок) |
 
 Характерная черта: тесты проверяют **поведение**, а не поиск подстрок в файлах;
 там, где это возможно, — чистые функции. Для браузерных API есть
@@ -1798,7 +1804,7 @@ npm run desktop
 - продуманная работа с хранилищем: TTL, revision, манифест SHA-256, журнал
   импорта, ZIP-round-trip;
 - единые источники времени, кадра, таймлайна, версии;
-- 399 тестов (40 файлов) на чистых функциях и поведении;
+- 409 тестов (42 файла) на чистых функциях и поведении;
 - реальные E2E-проверки с артефактами (скриншоты, видео, кадры сравнения);
 - кроссплатформенные лаунчеры и CI на Windows;
 - отсутствие обязательного бэкенда и ключей на сервере.

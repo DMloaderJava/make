@@ -82,17 +82,6 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      # Страховка вместо if-no-files-found: error — формат файлов зависит от
-      # ОС, но пустой release/ означает, что упаковка сломалась.
-      - name: Проверить, что артефакт desktop собрался
-        shell: bash
-        run: |
-          ls -la release || true
-          if [ -z "$(ls -A release 2>/dev/null)" ]; then
-            echo "::error::electron-builder не создал ни одного артефакта в release/"
-            exit 1
-          fi
-
       # Кроссплатформенные проверки (node, без pwsh): версия в package.json не
       # разъехалась по баннерам лаунчеров/README/electron-моста, таблицы
       # провайдеров в README совпадают с реестром, .bat соблюдают правила
@@ -142,7 +131,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      # Страховка вместо if-no-files-found: error — формат файлов зависит от
+      # Страховка вместо строгого режима загрузки: формат файлов зависит от
       # ОС, но пустой release/ означает, что упаковка сломалась.
       - name: Проверить, что артефакт desktop собрался
         shell: bash
