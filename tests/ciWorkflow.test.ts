@@ -45,14 +45,22 @@ const stepsOf = (job: string): Step[] => {
   return found.steps ?? [];
 };
 
+/**
+ * Разворачивает значение `with` в строки. Рекурсия, а не `String(value)`:
+ * если в `with` появится объект или массив, `String` дал бы `[object Object]`
+ * и проверка молча потеряла бы содержимое.
+ */
+function flatten(value: unknown): string[] {
+  if (value === null || value === undefined) return [];
+  if (Array.isArray(value)) return value.flatMap(flatten);
+  if (typeof value === 'object') return Object.entries(value).flatMap(([key, nested]) => [key, ...flatten(nested)]);
+  return [String(value)];
+}
+
 /** Всё, что job реально делает: имя, команда, экшн и все `with`-значения. */
 const actionsOf = (job: string): string =>
   stepsOf(job)
-    .map((step) =>
-      [step.name, step.uses, step.run, ...Object.values(step.with ?? {}).map(String)]
-        .filter(Boolean)
-        .join('\n')
-    )
+    .map((step) => [...flatten([step.name, step.uses, step.run, step.with])].join('\n'))
     .join('\n');
 
 /** Экшены и команды, специфичные для упаковки desktop. */

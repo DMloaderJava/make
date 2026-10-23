@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { stripComments } from './helpers/stripComments';
 
 /**
  * P0-5/desktop: переносимая сборка Electron должна запускаться.
@@ -40,7 +41,11 @@ test('desktop: артефакты сборки не попадают в git', ()
 });
 
 test('desktop: main-процесс не зависит от npm в упакованной сборке', () => {
-  const main = readFileSync(join(root, 'electron/main.js'), 'utf8');
+  // Комментарии вырезаем: в main.js прямо объясняется, почему `npm run start`
+  // не подходит («в упакованном приложении npm может отсутствовать»), и это
+  // объяснение не должно ронять проверку. Строки не трогаются, поэтому
+  // `spawn('npm', …)` в dev-ветке по-прежнему виден.
+  const main = stripComments(readFileSync(join(root, 'electron/main.js'), 'utf8'));
   const branchStart = main.indexOf('} else {\n    let nextBin');
   assert.notEqual(branchStart, -1, 'не найден прод-бранч запуска Next');
   const prodBranch = main.slice(branchStart);

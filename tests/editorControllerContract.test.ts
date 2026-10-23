@@ -22,7 +22,11 @@ const dir = join(process.cwd(), 'src/components/studio/editor');
 type ReturnShape = {
   /** Имена, которые хук отдаёт наружу (shorthand и `key: value`). */
   keys: string[];
-  /** Имена из `...spread`. */
+  /**
+   * Тексты `...spread`. Для простых источников это имя (`state`), но
+   * `...some.nested` тоже сохраняется — отбрасывать такие spread'ы нельзя:
+   * иначе тест «контроллер собирает» падал бы без реальной причины.
+   */
   spreads: string[];
 };
 
@@ -48,8 +52,7 @@ function returnShape(file: string): ReturnShape {
   const shape: ReturnShape = { keys: [], spreads: [] };
   for (const prop of last.properties) {
     if (ts.isSpreadAssignment(prop)) {
-      const text = prop.expression.getText(source);
-      if (/^[A-Za-z_]\w*$/.test(text)) shape.spreads.push(text);
+      shape.spreads.push(prop.expression.getText(source).trim());
       continue;
     }
     // shorthand (`project`) и `key: value` / `key` с комментариями
