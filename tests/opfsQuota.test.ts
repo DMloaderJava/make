@@ -5,6 +5,10 @@ import { checkStorageQuotaBeforeImport } from '../src/lib/storage/resourceIntegr
 /**
  * P1-3: квота OPFS. Импорт не должен начинаться, если места заведомо не
  * хватит, и должен предупреждать, когда хранилище почти заполнено.
+ *
+ * Сигнатура `checkStorageQuotaBeforeImport(requiredBytes, { estimate,
+ * safetyMarginBytes, warningRatio })` существует в базовой линии (b7fbd57),
+ * этот тест проверяет её поведение, а не добавляет API.
  */
 
 const MB = 1024 * 1024;
