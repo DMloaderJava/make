@@ -49,11 +49,16 @@ const stepsOf = (job: string): Step[] => {
  * Разворачивает значение `with` в строки. Рекурсия, а не `String(value)`:
  * если в `with` появится объект или массив, `String` дал бы `[object Object]`
  * и проверка молча потеряла бы содержимое.
+ *
+ * Ключи объектов намеренно не возвращаются: `action` упаковывает в них только
+ * имена параметров (`path`, `name`, `retention-days`), а проверяются значения.
+ * Иначе `with: { electron-builder: '…' }` дал бы ложное срабатывание на имени
+ * ключа, хотя содержимое шага к упаковке отношения не имеет.
  */
 function flatten(value: unknown): string[] {
   if (value === null || value === undefined) return [];
   if (Array.isArray(value)) return value.flatMap(flatten);
-  if (typeof value === 'object') return Object.entries(value).flatMap(([key, nested]) => [key, ...flatten(nested)]);
+  if (typeof value === 'object') return Object.values(value).flatMap(flatten);
   return [String(value)];
 }
 
