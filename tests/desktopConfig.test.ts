@@ -41,11 +41,19 @@ test('desktop: артефакты сборки не попадают в git', ()
 
 test('desktop: main-процесс не зависит от npm в упакованной сборке', () => {
   const main = readFileSync(join(root, 'electron/main.js'), 'utf8');
-  const prodBranch = main.slice(main.indexOf('} else {\n    let nextBin'));
-  assert.ok(prodBranch.length > 0, 'не найден прод-бранч запуска Next');
+  const branchStart = main.indexOf('} else {\n    let nextBin');
+  assert.notEqual(branchStart, -1, 'не найден прод-бранч запуска Next');
+  const prodBranch = main.slice(branchStart);
   assert.match(prodBranch, /require\.resolve\('next\/dist\/bin\/next'/);
   assert.match(prodBranch, /ELECTRON_RUN_AS_NODE/);
-  const prodSpawn = prodBranch.slice(0, prodBranch.indexOf('nextProcess.on'));
+
+  // Границу «до старта процесса» ищем явно: при рефакторинге main.js
+  // `indexOf` может вернуть -1, а slice(0, -1) молча отрежет последний символ
+  // и тест пройдёт на пустом фрагменте — это было бы ложное прохождение.
+  const spawnEnd = prodBranch.indexOf('nextProcess.on');
+  assert.notEqual(spawnEnd, -1, 'в прод-бранче нет nextProcess.on — граница проверки потеряна');
+  const prodSpawn = prodBranch.slice(0, spawnEnd);
+  assert.ok(prodSpawn.includes('spawn'), 'в прод-бранче нет вызова spawn');
   assert.doesNotMatch(prodSpawn, /npm/, 'прод-запуск не должен идти через npm/shell');
 });
 

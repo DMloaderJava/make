@@ -83,7 +83,7 @@
 | Desktop | Electron 33 + `electron-builder` |
 | E2E | `playwright-core` + `@sparticuz/chromium` |
 | Объём кода | `src/` ≈ **31 150 строк** |
-| Тесты | **42 файла** (сверяет `check:tests`), **409** тест-кейсов (`tsx --test`) |
+| Тесты | **42 файла** (сверяет `check:tests`), **410** тест-кейсов (`tsx --test`; число кейсов — снимок, см. `L-17`) |
 | CI | GitHub Actions, матрица `ubuntu-latest` + `windows-latest` |
 | Лицензия | MIT (`LICENSE`), поле `license` в `package.json` |
 
@@ -563,7 +563,7 @@ make/
 ├── .gitattributes                # .bat → CRLF, текст → LF
 ├── DEPLOYMENT_GUIDE_RU.md        # деплой на Vercel + Supabase, TTL, безопасность
 ├── README.md                     # 93 КБ: возможности, провайдеры, история версий
-├── known-limits.md               # L-1..L-16: платформа, браузеры, архитектура
+├── known-limits.md               # L-1..L-17: платформа, браузеры, архитектура
 ├── next.config.ts                # serverExternalPackages, webpack fallback
 ├── vercel.json                   # cron /api/cleanup раз в сутки в 03:00
 ├── package.json                  # скрипты, зависимости, node >= 20.9
@@ -591,7 +591,7 @@ make/
 │   ├── smoke-audio.ts            # OfflineAudioContext → WAV
 │   └── smoke-tts.ts              # живая проверка TTS-провайдеров по ключам
 │
-├── tests/                        # 42 файла, 409 тестов + fixtures/browserEnv
+├── tests/                        # 42 файла, 410 тестов + fixtures/browserEnv
 │
 ├── artifacts/                    # скриншоты и видео smoke-прогонов (в git не попадают)
 │
@@ -1532,8 +1532,8 @@ contextBridge.exposeInMainWorld('mangaStudio', {
 ```bash
 npm run typecheck       # tsc --noEmit
 npm run lint            # eslint
-npm test                # tsx --test, 42 файла (число файлов сверяет check:tests,
-                        #  число кейсов — нет: оно зависит от сборки и ОС)
+npm test                # tsx --test, 42 файла (число файлов сверяет check:tests;
+                        #  число кейсов — снимок, L-17)
 npm run check:versions  # версия не разъехалась
 npm run check:launchers # структура .bat/.sh
 npm run smoke:server    # next start + живые маршруты
@@ -1633,7 +1633,7 @@ tmp. В git они **не** попадают (`.gitignore` → `/artifacts/`): �
 
 ## 19. Известные ограничения
 
-Полный список — `known-limits.md` (L-1…L-16). Кратко:
+Полный список — `known-limits.md` (L-1…L-17). Кратко:
 
 | ID | Ограничение | Тип |
 |---|---|---|
@@ -1804,7 +1804,7 @@ npm run desktop
 - продуманная работа с хранилищем: TTL, revision, манифест SHA-256, журнал
   импорта, ZIP-round-trip;
 - единые источники времени, кадра, таймлайна, версии;
-- 409 тестов (42 файла) на чистых функциях и поведении;
+- 410 тестов (42 файла) на чистых функциях и поведении;
 - реальные E2E-проверки с артефактами (скриншоты, видео, кадры сравнения);
 - кроссплатформенные лаунчеры и CI на Windows;
 - отсутствие обязательного бэкенда и ключей на сервере.

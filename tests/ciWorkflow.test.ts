@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import yaml from 'js-yaml';
 
 /**
  * P0-4: структура `.github/workflows/ci.yml` проверяется машинно, а не глазами.
@@ -11,89 +12,119 @@ import { join } from 'node:path';
  * запускается и `release/` пуст — шаг падал с exit 1 на обеих ОС, и весь CI
  * был красным при зелёных локальных проверках.
  *
- * YAML разбирается без внешних зависимостей: у jobs в этом файле ровно один
- * уровень вложенности (`  имя:`), поэтому достаточно разрезать по нему.
+ * YAML разбирается настоящим парсером (`js-yaml`, явная devDependency):
+ * самодельная нарезка по отступу ломалась бы на `matrix.include`, job'ах с
+ * `name:` в кавычках и многострочных строках.
  */
 
+type Step = {
+  name?: string;
+  uses?: string;
+  run?: string;
+  if?: string;
+  shell?: string;
+  with?: Record<string, unknown>;
+};
+
+type Job = {
+  'runs-on'?: unknown;
+  'timeout-minutes'?: number;
+  strategy?: { 'fail-fast'?: boolean; matrix?: { os?: string[]; include?: unknown[] } };
+  steps?: Step[];
+};
+
 const root = process.cwd();
-const ci = readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8');
+const workflow = yaml.load(readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8')) as {
+  jobs?: Record<string, Job>;
+};
 
-/** Тело job'а по имени (без шапки `jobs:`). */
-function jobBody(name: string): string {
-  const lines = ci.split('\n');
-  const start = lines.findIndex((line) => line === `  ${name}:`);
-  assert.notEqual(start, -1, `в ci.yml нет job'а ${name}`);
-  let end = lines.length;
-  for (let i = start + 1; i < lines.length; i += 1) {
-    // следующий job — строка с отступом ровно 2 пробела и `:`
-    if (/^ {2}[a-zA-Z0-9_-]+:\s*$/.test(lines[i])) {
-      end = i;
-      break;
-    }
+const jobs = workflow.jobs ?? {};
+const stepsOf = (job: string): Step[] => {
+  const found = jobs[job];
+  assert.ok(found, `в ci.yml нет job'а ${job}`);
+  return found.steps ?? [];
+};
+
+/** Всё, что job реально делает: имя, команда, экшн и все `with`-значения. */
+const actionsOf = (job: string): string =>
+  stepsOf(job)
+    .map((step) =>
+      [step.name, step.uses, step.run, ...Object.values(step.with ?? {}).map(String)]
+        .filter(Boolean)
+        .join('\n')
+    )
+    .join('\n');
+
+/** Экшены и команды, специфичные для упаковки desktop. */
+const DESKTOP_ONLY = [/electron-builder/, /ls -A release/, /release\/\*\.AppImage/, /desktop-\$\{/];
+
+const verifyActions = actionsOf('verify');
+const desktopActions = actionsOf('desktop');
+
+test('ci: desktop-артефакты собираются и проверяются только в job desktop', () => {
+  for (const pattern of DESKTOP_ONLY) {
+    assert.ok(
+      !pattern.test(verifyActions),
+      `job verify не собирает desktop, но содержит ${pattern} — там release/ пуст и шаг упадёт`
+    );
   }
-  return lines.slice(start, end).join('\n');
-}
-
-const verifyJob = jobBody('verify');
-const desktopJob = jobBody('desktop');
-
-test('ci: desktop-артефакты проверяются только там, где идёт упаковка', () => {
-  assert.ok(
-    !/electron-builder/.test(verifyJob),
-    'job verify не собирает desktop — electron-builder там запускаться не должен'
-  );
-  assert.ok(
-    !/Проверить, что артефакт desktop собрался/.test(verifyJob),
-    'проверка артефакта desktop попала в job verify — там release/ пуст и шаг упадёт'
-  );
-  assert.ok(
-    !/ls -A release/.test(verifyJob),
-    'job verify не создаёт release/ — проверка артефакта desktop там всегда упадёт'
-  );
-  assert.ok(
-    /electron-builder --publish never/.test(desktopJob),
-    'job desktop должен запускать electron-builder'
-  );
-  assert.ok(
-    /Проверить, что артефакт desktop собрался/.test(desktopJob),
-    'job desktop должен явно проверять, что release/ не пуст'
-  );
+  assert.match(desktopActions, /electron-builder --publish never/, 'job desktop должен упаковывать приложение');
+  assert.match(desktopActions, /ls -A release/, 'job desktop должен проверять, что release/ не пуст');
 });
 
 test('ci: smoke-артефакты выгружаются всегда и с ограниченным сроком', () => {
-  assert.match(verifyJob, /name: smoke-\$\{\{ matrix\.os \}\}/);
-  assert.match(verifyJob, /if: always\(\)/);
-  assert.match(verifyJob, /artifacts\/smoke-editor/);
-  assert.match(verifyJob, /retention-days: 14/);
+  const upload = stepsOf('verify').find(
+    (step) => step.uses?.startsWith('actions/upload-artifact') && String(step.name ?? '').includes('smoke')
+  );
+  assert.ok(upload, 'в verify нет шага выгрузки smoke-артефактов');
+  assert.equal(upload.if, 'always()', 'smoke-артефакты нужны и при падении теста');
+  const paths = String(upload.with?.path ?? '');
+  assert.match(paths, /artifacts\/smoke-editor/);
+  assert.match(paths, /artifacts\/smoke-onboarding/);
+  assert.equal(upload.with?.['retention-days'], 14);
 });
 
 test('ci: verify идёт матрицей ubuntu+windows с потолком времени', () => {
-  assert.match(verifyJob, /os: \[ubuntu-latest, windows-latest\]/);
-  assert.match(verifyJob, /fail-fast: false/);
-  assert.match(verifyJob, /timeout-minutes: \d+/);
-  const timeout = Number(/timeout-minutes: (\d+)/.exec(verifyJob)?.[1]);
-  assert.ok(timeout > 0 && timeout <= 25, `потолок CI по ТЗ — не больше 25 минут, сейчас ${timeout}`);
+  const strategy = jobs.verify?.strategy;
+  assert.deepEqual(strategy?.matrix?.os, ['ubuntu-latest', 'windows-latest']);
+  assert.equal(strategy?.['fail-fast'], false, 'падение одной ОС не должно отменять другую');
+
+  const timeout = jobs.verify?.['timeout-minutes'];
+  assert.equal(typeof timeout, 'number', 'у verify должен быть timeout-minutes');
+  assert.ok(timeout! > 0 && timeout! <= 25, `потолок CI по ТЗ — не больше 25 минут, сейчас ${timeout}`);
+
+  const desktopTimeout = jobs.desktop?.['timeout-minutes'];
+  assert.equal(typeof desktopTimeout, 'number', 'у desktop должен быть timeout-minutes');
+  assert.ok(desktopTimeout! <= 25, `потолок desktop-джобы — 25 минут, сейчас ${desktopTimeout}`);
 });
 
 test('ci: полный smoke только на Linux, на Windows — сокращённый', () => {
-  assert.match(verifyJob, /npm run smoke:editor\n/);
-  assert.match(verifyJob, /npm run smoke:editor -- --quick/);
-  assert.match(verifyJob, /runner\.os == 'Linux'/);
-  assert.match(verifyJob, /runner\.os == 'Windows'/);
+  const steps = stepsOf('verify');
+  const full = steps.find((step) => step.run?.trim() === 'npm run smoke:editor');
+  const quick = steps.find((step) => step.run?.trim() === 'npm run smoke:editor -- --quick');
+  assert.ok(full, 'нет полного smoke:editor');
+  assert.ok(quick, 'нет сокращённого smoke:editor -- --quick');
+  assert.equal(full.if, "runner.os == 'Linux'");
+  assert.equal(quick.if, "runner.os == 'Windows'");
 });
 
 test('ci: в verify входят проверки согласованности', () => {
+  const scripts = stepsOf('verify')
+    .flatMap((step) => String(step.run ?? '').split('&&'))
+    .map((part) => part.trim());
   for (const script of ['check:versions', 'check:providers', 'check:tests', 'check:launchers']) {
-    assert.ok(verifyJob.includes(`npm run ${script}`), `verify должен запускать ${script}`);
+    assert.ok(scripts.includes(`npm run ${script}`), `verify должен запускать ${script}`);
   }
 });
 
 test('ci: desktop-артефакты не блокируют сборку из-за формата файла', () => {
   // Формат зависит от ОС (AppImage на Linux, portable exe на Windows),
   // поэтому загрузка не падает, а полноту release/ проверяет отдельный шаг.
-  assert.match(desktopJob, /if-no-files-found: warn/);
-  assert.ok(
-    !/^\s*if-no-files-found: error\s*$/m.test(desktopJob),
-    'строгий if-no-files-found ломает CI при смене layout артефактов electron-builder'
+  const upload = stepsOf('desktop').find((step) => step.uses?.startsWith('actions/upload-artifact'));
+  assert.ok(upload, 'в desktop нет выгрузки артефактов');
+  assert.equal(
+    upload.with?.['if-no-files-found'],
+    'warn',
+    'строгий режим ломает CI при смене layout артефактов electron-builder'
   );
 });
