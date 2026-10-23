@@ -14,8 +14,9 @@
  * Registry — TypeScript, поэтому дамп выполняется через tsx (кросс-платформенно,
  * без предположений о раскрытии glob оболочкой).
  */
-import { readFileSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 
@@ -28,11 +29,13 @@ const MARKERS = {
 };
 
 function loadRegistry() {
-  // Явный дампер вместо генерации временного файла: меньше точек отказа
-  // (нет записи в tmp, нет склейки путей под Windows) и никакого мусора в stdout.
+  // Реестр — TypeScript, поэтому дамп идёт через tsx. JSON пишется в файл,
+  // а не в stdout: если в реестре или каталогах появится console.log, разбор
+  // вывода молча ломался бы, а файл от этого защищён.
   const tsxCli = require.resolve('tsx/cli');
   const dumper = resolve('scripts/dump-registry.ts');
-  const result = spawnSync(process.execPath, [tsxCli, dumper], {
+  const tmpFile = join(tmpdir(), `mvs-registry-${process.pid}-${Date.now()}.json`);
+  const result = spawnSync(process.execPath, [tsxCli, dumper, tmpFile], {
     encoding: 'utf8',
     cwd: process.cwd(),
   });
@@ -41,10 +44,12 @@ function loadRegistry() {
     process.exit(1);
   }
   try {
-    return JSON.parse(result.stdout);
+    return JSON.parse(readFileSync(tmpFile, 'utf8'));
   } catch (error) {
     console.error('Дамп реестра не является JSON: ' + String(error));
     process.exit(1);
+  } finally {
+    try { unlinkSync(tmpFile); } catch {}
   }
 }
 

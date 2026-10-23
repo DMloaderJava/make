@@ -80,7 +80,13 @@ function walk(dir) {
   }
   return out;
 }
-for (const file of walk('src')) {
+// Проверяем не только src/, но и scripts/: дрейф «v1.3.18» в комментарии
+// smoke-скрипта уже случался и раньше проходил незамеченным. electron/preload.js
+// сюда не входит — его версия проверяется отдельным точным шаблоном в `claims`.
+// Сам чекер исключён: в его шапке версии упомянуты как примеры расхождений.
+const SELF = join('scripts', 'check-version.mjs');
+const versionFiles = ['src', 'scripts'].flatMap((dir) => walk(dir)).filter((file) => file !== SELF);
+for (const file of versionFiles) {
   const matches = read(file).match(VERSION_LITERAL);
   if (matches) {
     problems.push(`${file}: хардкод версии ${[...new Set(matches)].join(', ')} — используйте APP_VERSION из src/lib/version.ts`);
