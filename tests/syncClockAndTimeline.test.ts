@@ -1,4 +1,5 @@
 import { readEditorSource } from './helpers/editorSource';
+import { CURRENT_PROJECT_SCHEMA_VERSION } from '../src/lib/storage/db';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -204,7 +205,8 @@ test('Stage 1 (5) & Stage 8 (74): идемпотентная миграция с
 
   const firstRun = migrateProjectSchema(legacyRaw);
   assert.equal(firstRun.migrated, true);
-  assert.equal(firstRun.toSchemaVersion, 2);
+  assert.equal(firstRun.toSchemaVersion, CURRENT_PROJECT_SCHEMA_VERSION);
+  assert.equal(firstRun.project.locks?.videoTrackLocked, false);
   assert.equal(firstRun.toTimelineVersion, 2);
   assert.equal(firstRun.project.timeline.length, 1);
   assert.ok(firstRun.project.srt.includes('Привет!'));

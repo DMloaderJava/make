@@ -111,7 +111,21 @@ export function useEditorNle({
     outroDuration: project?.outroDuration ?? 0,
     panelGap,
     currentTimelineVersion: project?.timelineVersion,
+    // P1-1: блокировки дорожек хранятся в проекте и проверяются при каждой
+    // NLE-операции, а не только прячут кнопки в интерфейсе.
+    locks: project?.locks,
   });
+
+  const handleToggleTrackLock = (track: 'video' | 'audio') => {
+    if (!project) return;
+    const locks = {
+      videoTrackLocked: Boolean(project.locks?.videoTrackLocked),
+      audioTrackLocked: Boolean(project.locks?.audioTrackLocked),
+    };
+    if (track === 'video') locks.videoTrackLocked = !locks.videoTrackLocked;
+    else locks.audioTrackLocked = !locks.audioTrackLocked;
+    updateProject({ locks });
+  };
 
   // Единый обработчик применения результата NLE-операций (Задача 6):
   // все 7 NLE-операций обновляют setAudioDurations и передают одинаковый набор полей в updateProject.
@@ -279,5 +293,6 @@ export function useEditorNle({
     handleSetPanelDurationOverride,
     handleSetPanelAudioGainAndFades,
     handleJumpToHealthIssue,
+    handleToggleTrackLock,
   };
 }

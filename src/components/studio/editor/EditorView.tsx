@@ -77,6 +77,7 @@ export function EditorView({ c }: { c: EditorController }) {
     handleImportProjectZip,
     handleIntroOutroAI,
     handleJumpToHealthIssue,
+    handleToggleTrackLock,
     handleMoveActiveClip,
     handlePreviewAudioMix,
     handleRedo,
@@ -405,6 +406,9 @@ export function EditorView({ c }: { c: EditorController }) {
                 onSetPanelTrim={handleSetPanelAudioTrim}
                 onTogglePanelMute={handleTogglePanelMute}
                 onTogglePanelSolo={handleTogglePanelSolo}
+                videoTrackLocked={project.locks?.videoTrackLocked ?? false}
+                audioTrackLocked={project.locks?.audioTrackLocked ?? false}
+                onToggleTrackLock={handleToggleTrackLock}
                 canUndo={historyAvail.canUndo}
                 canRedo={historyAvail.canRedo}
                 onUndo={handleUndo}

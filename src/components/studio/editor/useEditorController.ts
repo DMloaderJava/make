@@ -588,6 +588,7 @@ export function useEditorController(id: string) {
     handleSetPanelDurationOverride,
     handleSetPanelAudioGainAndFades,
     handleJumpToHealthIssue,
+    handleToggleTrackLock,
   } = useEditorNle({
     project,
     tl,
@@ -741,6 +742,7 @@ export function useEditorController(id: string) {
     voiceButton,
     voicingIntroOutro,
     isProjectLoading,
+    handleToggleTrackLock,
     reloadProject,
   };
 }

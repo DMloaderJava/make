@@ -11,7 +11,7 @@ const DB_VERSION = 3;
 export const PROJECT_TTL_MS = 24 * 60 * 60 * 1000;
 
 /** Текущая версия схемы проекта (Этап 1 п. 5, Этап 8 п. 74). */
-export const CURRENT_PROJECT_SCHEMA_VERSION = 2;
+export const CURRENT_PROJECT_SCHEMA_VERSION = 3;
 /** Текущая версия формата таймлайна (Этап 1 п. 5). */
 export const CURRENT_TIMELINE_VERSION = 2;
 
@@ -191,6 +191,14 @@ export interface Project {
    * нельзя отличить «текст не менялся» от «менялся, но файл остался старым».
    */
   audioTexts?: Record<number, string>;
+  /**
+   * Блокировки дорожек таймлайна (P1-1, схема v3).
+   *
+   * Раньше это был локальный useState в Timeline: блокировка аудио/видео
+   * исчезала после перезагрузки страницы, и «случайно» разблокированный
+   * таймлайн менялся от первого неосторожного drag-and-drop.
+   */
+  locks?: { videoTrackLocked?: boolean; audioTrackLocked?: boolean };
   /** Манифест ресурсов проекта: контрольные суммы, MIME, размеры (Этап 8 п. 72, 73). */
   resourceManifest?: Record<string, ResourceManifestEntry>;
   /** Снимок для отмены последнего импорта аудио (Этап 2 п. 20). */
