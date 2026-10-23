@@ -593,7 +593,7 @@ make/
 │
 ├── tests/                        # 33 файла, ~350 тестов + fixtures/browserEnv
 │
-├── artifacts/                    # скриншоты и видео smoke-прогонов (в git)
+├── artifacts/                    # скриншоты и видео smoke-прогонов (в git не попадают)
 │
 ├── src/
 │   ├── proxy.ts                  # auth (заменяет middleware в Next 16)
@@ -615,6 +615,13 @@ make/
 │   │   ├── settings/ProviderList.tsx
 │   │   ├── studio/
 │   │   │   ├── Preview.tsx, Timeline.tsx, ContextPanel.tsx, RenderModePanel.tsx
+│   │   │   ├── editor/                 # редактор по слоям (см. 12.5)
+│   │   │   │   ├── EditorView.tsx, EditorModals.tsx
+│   │   │   │   ├── useEditorController.ts, useEditorProjectLoader.ts,
+│   │   │   │   ├── useEditorPersistence.ts, useEditorImages.ts,
+│   │   │   │   ├── useEditorAudioOps.ts, useEditorExport.ts, useEditorNle.ts,
+│   │   │   │   └── useEditorPlayback.ts, useEditorScenario.ts,
+│   │   │   │       useEditorSrtOps.ts, useEditorDialogue.ts
 │   │   │   └── modals/
 │   │   │       ├── AudioImportModal.tsx, ExportModal.tsx,
 │   │   │       ├── IntroOutroModal.tsx, ProjectHealthModal.tsx,
