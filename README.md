@@ -122,10 +122,13 @@ npm run desktop:build     # установщики/образы (AppImage, porta
 
 Сам редактор разложен по слоям в `src/components/studio/editor/`: `page.tsx` (16
 строк) только вызывает `useEditorController(id)` и рендерит `EditorView`; контроллер
-собирает независимые хуки — загрузка проекта (`useEditorProjectLoader`), автосейв
-(`useEditorPersistence`), озвучка (`useEditorAudioOps`), NLE (`useEditorNle`), экспорт
-(`useEditorExport`), плеер и хоткеи (`useEditorPlayback`), сценарий
-(`useEditorScenario`), SRT (`useEditorSrtOps`) и модалки (`EditorModals`).
+(338 строк, без единой бизнес-операции) собирает независимые модули — состояние
+(`useEditorState`) и производные значения (`useEditorDerived`), загрузка проекта
+(`useEditorProjectLoader`), автосейв (`useEditorPersistence`), озвучка
+(`useEditorAudioOps`), импорт аудио (`useEditorAudioImport`), NLE (`useEditorNle`),
+экспорт (`useEditorExport`), плеер и хоткеи (`useEditorPlayback`), сценарий
+(`useEditorScenario`), SRT (`useEditorSrtOps`); разметка — `EditorView`,
+`EditorWorkspace` и `EditorModals`. Ни один файл редактора не длиннее 400 строк.
 
 ## 🚀 Быстрый старт
 

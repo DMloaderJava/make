@@ -89,3 +89,11 @@ test('P1-4: новый запрос не оставляет предыдущий
   resolveConfirm(true);
   assert.equal(await second, true);
 });
+
+test('P1-4: resetFeedbackForTests сбрасывает и счётчик id', () => {
+  resetFeedbackForTests();
+  assert.equal(toast('Первый после сброса'), 1);
+  toast('Второй');
+  resetFeedbackForTests();
+  assert.equal(toast('Снова первый'), 1);
+});

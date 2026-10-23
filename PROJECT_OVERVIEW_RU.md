@@ -82,8 +82,8 @@
 | Иконки | `lucide-react` |
 | Desktop | Electron 33 + `electron-builder` |
 | E2E | `playwright-core` + `@sparticuz/chromium` |
-| Объём кода | `src/` ≈ **29 400 строк**, весь проект (src + electron + scripts + tests + supabase) ≈ **41 600 строк** |
-| Тесты | **40 файлов**, **396** тест-кейсов (`tsx --test`) |
+| Объём кода | `src/` ≈ **31 150 строк** |
+| Тесты | **40 файлов**, **398** тест-кейсов (`tsx --test`) |
 | CI | GitHub Actions, матрица `ubuntu-latest` + `windows-latest` |
 | Лицензия | MIT (`LICENSE`), поле `license` в `package.json` |
 
@@ -591,7 +591,7 @@ make/
 │   ├── smoke-audio.ts            # OfflineAudioContext → WAV
 │   └── smoke-tts.ts              # живая проверка TTS-провайдеров по ключам
 │
-├── tests/                        # 33 файла, ~350 тестов + fixtures/browserEnv
+├── tests/                        # 40 файлов, 398 тестов + fixtures/browserEnv
 │
 ├── artifacts/                    # скриншоты и видео smoke-прогонов (в git не попадают)
 │
@@ -616,10 +616,11 @@ make/
 │   │   ├── studio/
 │   │   │   ├── Preview.tsx, Timeline.tsx, ContextPanel.tsx, RenderModePanel.tsx
 │   │   │   ├── editor/                 # редактор по слоям (см. 12.5)
-│   │   │   │   ├── EditorView.tsx, EditorModals.tsx
-│   │   │   │   ├── useEditorController.ts, useEditorProjectLoader.ts,
-│   │   │   │   ├── useEditorPersistence.ts, useEditorImages.ts,
-│   │   │   │   ├── useEditorAudioOps.ts, useEditorExport.ts, useEditorNle.ts,
+│   │   │   │   ├── EditorView.tsx, EditorWorkspace.tsx, EditorModals.tsx
+│   │   │   │   ├── useEditorController.ts, useEditorState.ts, useEditorDerived.ts
+│   │   │   │   ├── useEditorProjectLoader.ts, useEditorPersistence.ts,
+│   │   │   │   ├── useEditorImages.ts, useEditorAudioOps.ts,
+│   │   │   │   ├── useEditorAudioImport.ts, useEditorExport.ts, useEditorNle.ts,
 │   │   │   │   └── useEditorPlayback.ts, useEditorScenario.ts,
 │   │   │   │       useEditorSrtOps.ts, useEditorDialogue.ts
 │   │   │   └── modals/
@@ -1305,40 +1306,31 @@ Perplexity) описана только в таблице ссылок и в л�
 
 `src/app/editor/[id]/page.tsx` — 16 строк: получает `id`, вызывает
 `useEditorController(id)` и рендерит `EditorView`. Вся логика живёт в
-`src/components/studio/editor/`:
+`src/components/studio/editor/`, ни один файл не превышает 400 строк:
 
 | Модуль | Строк | Ответственность |
 |---|---:|---|
-| `useEditorController.ts` | 534 | композиция хуков, состояние экрана, хоткеи-ссылки |
-| `EditorView.tsx` | 487 | разметка экрана: шапка, превью, таймлайн, панель контекста |
-| `EditorModals.tsx` | 204 | все шесть модалок, получают готовый контроллер |
+| `useEditorController.ts` | 338 | композиция: порядок хуков и один объект `EditorController` |
+| `useEditorState.ts` | 151 | 40+ `useState`/`useRef`: всё изменяемое состояние |
+| `useEditorDerived.ts` | 89 | `useMemo`: таймлайн, длительность, черновик SRT, стоимость, health |
+| `EditorView.tsx` | 251 | шапка, баннеры, подвал, подключение модалок |
+| `EditorWorkspace.tsx` | 275 | превью, режим рендера, таймлайн, инспектор панели |
+| `EditorModals.tsx` | 204 | шесть модалок редактора |
 | `useEditorProjectLoader.ts` | 205 | IndexedDB + OPFS + миграция схемы, ошибки загрузки |
 | `useEditorPersistence.ts` | 99 | автосейв (2 с дебаунс), `handleSave`, `updateProject` |
 | `useEditorImages.ts` | 69 | добавление изображений в существующий проект |
-| `useEditorAudioOps.ts` | 454 | озвучка панелей, интро/аутро, повторная генерация |
+| `useEditorAudioOps.ts` | 315 | генерация TTS, SEO, точечная переозвучка |
+| `useEditorAudioImport.ts` | 173 | план импорта, OPFS-журнал, слияние с таймлайном, откат |
 | `useEditorExport.ts` | 320 | рендер видео, ZIP проекта, диагностический JSON |
 | `useEditorNle.ts` | 298 | trim/split/mute/solo/ripple, undo/redo, блокировки дорожек |
-| `useEditorDialogue.ts` | 282 | правка реплик и голосов |
+| `useEditorDialogue.ts` | 282 | интро/аутро, озвучка, импорт аудио интро/аутро |
 | `useEditorPlayback.ts` | 210 | часы, плеер, seek, горячие клавиши |
 | `useEditorScenario.ts` | 153 | сценарий, перевод, применение к панелям |
 | `useEditorSrtOps.ts` | 78 | SRT в текст и обратно, пауза между репликами |
 
 Правило: новый код редактора попадает в тот модуль, который уже отвечает за
-эту область; `useEditorController` только соединяет их и отдаёт один объект
-`EditorController` в представление.
-
-### 12.4. Доступность и мелочи
-
-- Во встроенном превью (iframe) `alert`/`confirm` могут быть запрещены,
-  поэтому важные ошибки показываются **баннерами** и двухшаговыми кнопками
-  («вооружить → подтвердить»), а не блокирующими диалогами.
-- Хоткеи не перевешивают слушатель 30 раз в секунду — обработчики вынесены в
-  refs.
-- Мобильный layout вне рамок RC (L-6), но мастер проверяется на 375×667
-  в smoke-тесте.
-- Тёмная тема принудительная (`className="dark"`).
-
----
+эту область; `useEditorController` только соединяет их (в нём нет ни одной
+бизнес-операции) и отдаёт представлению один объект `EditorController`.
 
 ## 13. Аутентификация и безопасность
 
@@ -1514,9 +1506,17 @@ contextBridge.exposeInMainWorld('mangaStudio', {
 
 `.github/workflows/ci.yml`:
 
-- матрица `ubuntu-latest` + `windows-latest`, Node 22, `npm ci --ignore-scripts`;
-- шаги: `typecheck` → `test` → `lint` → `build` → `smoke:server` →
-  `smoke:editor` (только Linux) → `check:versions && check:launchers`.
+- job `verify`: матрица `ubuntu-latest` + `windows-latest` (`fail-fast: false`),
+  Node 22, `npm ci --ignore-scripts`, потолок 25 минут;
+- шаги: `check:versions` → `check:launchers` → `check:providers` → `check:tests`
+  → `typecheck` → `test` → `lint` → `build` → `smoke:server` → `smoke:editor`
+  на Linux и `smoke:editor --quick` на Windows (Chrome ставится через `choco`
+  с `continue-on-error`, чтобы сетевой сбой не ломал прогон);
+- `upload-artifact` с `artifacts/smoke-editor` и `artifacts/smoke-onboarding`,
+  `if: always()`, retention 14 дней — поэтому локальные артефакты в git не нужны;
+- job `desktop`: та же матрица, `npm ci` с postinstall (нужен бинарь Electron),
+  `next build` → `electron-builder --publish never` → выгрузка `*.AppImage`,
+  `*.exe` и `*-unpacked/**` с `if-no-files-found: warn`.
 
 ---
 
@@ -1527,7 +1527,7 @@ contextBridge.exposeInMainWorld('mangaStudio', {
 ```bash
 npm run typecheck       # tsc --noEmit
 npm run lint            # eslint
-npm test                # tsx --test, 33 файла
+npm test                # tsx --test, 40 файлов (число сверяет check:tests)
 npm run check:versions  # версия не разъехалась
 npm run check:launchers # структура .bat/.sh
 npm run smoke:server    # next start + живые маршруты
@@ -1544,19 +1544,21 @@ npm run verify:quick    # без npm test
 | Группа | Файлы |
 |---|---|
 | Звук | `wav`, `mime`, `audioMix`, `audioSignature`, `audioImport`, `audioImportV2AndFormats`, `voicePipeline`, `deepgram`, `cartesia`, `gemini`, `speechify`, `providerErrorMapping` |
-| Таймлайн/часы | `renderClock`, `pipelineScheduler`, `syncClockAndTimeline`, `nleStorageAndExport` |
+| Таймлайн/часы/NLE | `renderClock`, `pipelineScheduler`, `syncClockAndTimeline`, `nleStorageAndExport` (1 252 строки: revision, манифест, квоты, ZIP round-trip) |
+| Блокировки дорожек и схема v3 | `projectLocksV3` (миграция 2→3, `assertTrackUnlocked`, реальные NLE-операции с `locks`, передача `project.locks` из редактора) |
+| Квота OPFS | `opfsQuota` (нет `estimate`, нехватка места, предупреждение о запасе) |
 | Сценарий | `scenario`, `scenarioFormat`, `scenarioRanges`, `stripDialogueParity` |
 | Лента/камера | `mangaStrip`, `cameraStripAndGeometry`, `draw` |
-| Хранилище | `nleStorageAndExport` (1 251 строка: revision, манифест, квоты, ZIP round-trip) |
-| Провайдеры | `llmProviderCatalog`, `ttsProviderPolicy`, `voiceResolver`, `projectSettings` |
+| Провайдеры | `llmProviderCatalog`, `ttsProviderPolicy`, `providerRegistry` (43 записи, CORS-политика, ссылки), `voiceResolver`, `projectSettings` |
 | SRT/каналы | `srt`, `channel` |
-| Инфраструктура | `launcherChecks`, `loadImage`, `onboardingAndDemo`, `previewVsExportIntroOutro` |
+| UI/фидбек | `feedback` (баннеры вместо `alert`/`confirm`), `browserSupport` (предупреждение о неподдерживаемом браузере) |
+| Инфраструктура | `launcherChecks`, `desktopConfig` (main.js и electron-builder), `loadImage`, `onboardingAndDemo`, `previewVsExportIntroOutro`, `stripComments` (хелпер для структурных проверок) |
 
 Характерная черта: тесты проверяют **поведение**, а не поиск подстрок в файлах;
 там, где это возможно, — чистые функции. Для браузерных API есть
 `tests/fixtures/browserEnv.ts` (226 строк) — фейковое окружение.
 
-### 17.3. E2E smoke (`scripts/smoke-editor.mjs`, 784 строки)
+### 17.3. E2E smoke (`scripts/smoke-editor.mjs`, 855 строк)
 
 Поднимает Next на свободном порту, запускает headless Chromium и проверяет:
 
@@ -1768,16 +1770,27 @@ npm run desktop
 
 | Риск | Где | Комментарий |
 |---|---|---|
-| Огромный `editor/[id]/page.tsx` (2 326 строк, 46 `useState` + 10 `useEffect`) | редактор | сложно менять, высокий риск регрессий; просится разбиение на хуки/стор |
-| Дублирование списков провайдеров | `catalog.ts` ↔ `links.ts` ↔ `/api/llm` ↔ `/api/seo` ↔ `/api/tts` | добавили провайдера — проверь 5 мест |
-| Часть провайдеров «в README, но не в коде» | LLM | маркетинговые 25+ против 13 реализованных |
 | `Project` как «божественный объект» | `db.ts` | panel-поля, аудио, NLE, SEO, события в одной сущности |
 | Ручной ZIP-кодек | `projectArchive.ts` | нет сжатия (stored), но зато без зависимостей |
 | Оценка длительности по символам | `buildTimeline.ts` | черновой SRT и «прыгающая» длительность до озвучки |
-| `alert()` в ряде мест | главная, экспорт | во встроенном превью может не сработать |
-| Версия 1.3.17 / комментарии 1.3.18 | несколько файлов | расхождение версий в комментариях |
-| Тесты в основном unit | `tests/` | браузерное поведение покрыто одним Linux-only smoke |
-| Safari не поддерживается | — | осознанно, но ограничивает аудиторию |
+| Тесты в основном unit | `tests/` | браузерное поведение покрыто E2E, но полный `smoke:editor` идёт только на Linux (на Windows — `--quick`) |
+| Desktop-сборка проверяется только в CI | `electron-builder` | в песочнице без доступа к бинарю Electron локальная упаковка невозможна, поэтому `desktop`-job — единственная проверка артефактов |
+| `check-providers` запускает `tsx` подпроцессом | `scripts/check-providers.mjs` | стабильно, но лишняя точка отказа; кандидат на предгенерённый JSON |
+| Safari и мобильный layout | — | осознанно вне области стабилизации |
+
+#### 22.3.1. Что закрыто стабилизацией (v1.3.17)
+
+| Было | Стало |
+|---|---|
+| `page.tsx` — 2 326 строк монолита | 16 строк: `useEditorController` + `EditorView` + 16 модулей, каждый ≤ 400 строк (12.5) |
+| Дублирование списков провайдеров в 5 местах | `lib/providers/registry.ts` — единственный источник, остальное проекции; `check:providers` проверяет совпадение |
+| `alert()`/`confirm()` в 6 местах | баннеры и двухшаговые кнопки (`lib/ui/feedback.ts`), проверка `tests/feedback.test.ts` |
+| Расхождение версий в комментариях | `check:versions` ограничен серией 1.3.x и падает на любом `v1.3.*`-литерале в `src/` |
+| Число тестовых файлов в README «на честном слове» | `check:tests` сверяет маркеры README с диском |
+| Блокировки дорожек только в состоянии компонента | схема проекта v3, `locks` переживают перезагрузку |
+| `smoke`-артефакты в git | `.gitignore`, выгрузка в CI на 14 дней |
+| Нет лицензии | `LICENSE` (MIT) + поле `license` |
+| CI без Windows и без desktop | матрица `ubuntu+windows`, job `desktop` с артефактами |
 
 ### 22.4. Сильные стороны
 
@@ -1785,7 +1798,7 @@ npm run desktop
 - продуманная работа с хранилищем: TTL, revision, манифест SHA-256, журнал
   импорта, ZIP-round-trip;
 - единые источники времени, кадра, таймлайна, версии;
-- 350 тестов на чистых функциях;
+- 398 тестов (40 файлов) на чистых функциях и поведении;
 - реальные E2E-проверки с артефактами (скриншоты, видео, кадры сравнения);
 - кроссплатформенные лаунчеры и CI на Windows;
 - отсутствие обязательного бэкенда и ключей на сервере.
@@ -1812,9 +1825,9 @@ npm run desktop
 
 **Главные слабости:**
 
-- монолитный редактор на 2 326 строк — основной источник будущих регрессий;
-- рассинхронизация каталогов провайдеров и маркетинговых списков;
-- зависимость от одного Linux-only E2E для браузерного поведения;
+- полный браузерный E2E идёт только на Linux (на Windows — сокращённый `--quick`);
+- desktop-артефакты проверяются только в CI: локально electron-бинаръ
+  недоступен без сети;
 - отсутствие Safari и мобильного layout;
 - часть «бесплатных» тарифов провайдеров меняется быстрее, чем обновляется
   каталог.

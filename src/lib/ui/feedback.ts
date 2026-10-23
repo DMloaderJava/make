@@ -114,6 +114,7 @@ export function resolveConfirm(ok: boolean) {
 /** Только для тестов: сбросить состояние между кейсами. */
 export function resetFeedbackForTests() {
   toasts = [];
+  seq = 0;
   pendingConfirm = null;
   confirmResolvers.forEach((resolve) => resolve(false));
   confirmResolvers.clear();

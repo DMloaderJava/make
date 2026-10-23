@@ -1,7 +1,7 @@
 "use client";
 
-import { useMemo, type Dispatch, type SetStateAction } from 'react';
-import { appendProjectEvent, saveProject, type Project } from '@/lib/storage/db';
+import type { Dispatch, SetStateAction } from 'react';
+import { saveProject, type Project } from '@/lib/storage/db';
 import { getAllKeys, getSettings } from '@/lib/storage/local';
 import { rebuildSrt, roundMediaDuration } from '@/lib/pipeline/buildTimeline';
 import { resolveTTSProviderId } from '@/lib/pipeline/projectSettings';
@@ -9,17 +9,7 @@ import { getTTSProvider } from '@/lib/providers/tts/catalog';
 import { generateAllAudio } from '@/lib/pipeline/generateAudio';
 import { generateSEO, generateFallbackSEO } from '@/lib/pipeline/generateSEO';
 import { estimateTotalCost } from '@/lib/validators';
-import {
-  applyAudioImport,
-  createAudioImportUndoSnapshot,
-  createImportPersister,
-  mergeAppliedAudio,
-  settleImportRegeneration,
-  undoLastAudioImport,
-  type AudioImportPlan,
-  type LastAudioImportSnapshot,
-} from '@/lib/pipeline/audioImport';
-import type { AudioImportApplyControls } from '@/components/studio/modals/AudioImportModal';
+import { settleImportRegeneration } from '@/lib/pipeline/audioImport';
 import type { LLMProvider } from '@/lib/providers/llm/types';
 import { getAudioDuration } from '@/lib/editor/audioUtils';
 import { confirmAction } from '@/lib/ui/feedback';
@@ -38,8 +28,6 @@ export function useEditorAudioOps({
   panelGap,
   duration,
   voiceButton,
-  tl,
-  lastImportUndo,
   isGeneratingAudio,
   setGeneratingSEO,
   updateProject,
@@ -57,9 +45,7 @@ export function useEditorAudioOps({
   setAudioTotal,
   setAudioProgress,
   setAudioError,
-  setNotice,
   setSaveStatus,
-  setLastImportUndo,
 }: {
   project: Project | null;
   audioBlobs: Map<number, Blob>;
@@ -68,8 +54,6 @@ export function useEditorAudioOps({
   panelGap: number;
   duration: number;
   voiceButton: { label: string };
-  tl: Project['timeline'];
-  lastImportUndo: LastAudioImportSnapshot | null;
   isGeneratingAudio: boolean;
   setGeneratingSEO: Dispatch<SetStateAction<boolean>>;
   updateProject: (updates: Partial<Project>) => void;
@@ -87,9 +71,7 @@ export function useEditorAudioOps({
   setAudioTotal: Dispatch<SetStateAction<number>>;
   setAudioProgress: Dispatch<SetStateAction<string>>;
   setAudioError: Dispatch<SetStateAction<string | null>>;
-  setNotice: Dispatch<SetStateAction<string | null>>;
   setSaveStatus: Dispatch<SetStateAction<'saved' | 'saving' | 'unsaved'>>;
-  setLastImportUndo: Dispatch<SetStateAction<LastAudioImportSnapshot | null>>;
 }) {
   const runAudioGeneration = async (
     onlyPanelIds?: number[],
@@ -297,124 +279,6 @@ export function useEditorAudioOps({
     }
   };
 
-  /** id панелей, у которых сейчас есть аудио — «уже есть» для плана импорта. */
-  const existingAudioIds = useMemo(() => [...audioBlobs.keys()], [audioBlobs]);
-
-  /**
-   * Импорт аудио: applyAudioImport пишет файлы в OPFS по ключам
-   * панелей; после КАЖДОГО записанного файла отметка «импорт» сразу уходит в
-   * IDB (падение вкладки на 4-м файле оставит 3 видимых импорта, а не файлы без
-   * отметки, которые «Озвучить всё» приняло бы за устаревший TTS). Состояние
-   * редактора, таймлайн и SRT — один раз в конце.
-   */
-  const handleImportAudio = async (
-    plan: AudioImportPlan,
-    files: Map<string, File>,
-    controls: AudioImportApplyControls
-  ) => {
-    if (!project) throw new Error('Проект не загружен');
-    const snapshot = project;
-    const prevDurationsObj: Record<number, number> = {};
-    audioDurations.forEach((v, k) => { prevDurationsObj[k] = v; });
-    const undoSnap = await createAudioImportUndoSnapshot({
-      projectId: snapshot.id,
-      panels: snapshot.panels,
-      audioDurations: prevDurationsObj,
-      timeline: tl,
-      srt: snapshot.srt,
-      existingBlobs: audioBlobs,
-      targetPanelIds: plan.matches.map(m => m.target.id),
-    });
-
-    const persister = createImportPersister({
-      snapshot,
-      save: async (proj) => {
-        const saved = await saveProject(proj, { allowStale: true });
-        project.revision = saved.revision;
-      },
-      onSaveError: (e) => console.warn('Не удалось сохранить отметку импорта', e),
-    });
-
-    const report = await applyAudioImport(plan, files, {
-      projectId: snapshot.id,
-      currentPanelIds: snapshot.panels.map(p => p.id),
-      signal: controls.signal,
-      onProgress: controls.onProgress,
-      onApplied: persister.onApplied,
-    });
-    await persister.flush();
-    if (report.applied.length === 0) return report;
-
-    undoSnap.importedPanelIds = report.applied.map(a => a.panelId);
-    setLastImportUndo(undoSnap);
-
-    const merged = mergeAppliedAudio({
-      panels: snapshot.panels,
-      applied: report.applied,
-      files,
-      blobs: audioBlobs,
-      full: audioFull,
-      durations: audioDurations,
-    });
-    setAudioBlobs(merged.blobs);
-    setAudioFull(merged.full);
-    setAudioDurations(merged.durations);
-
-    const rebuilt = rebuildSrt({
-      panels: merged.panels,
-      audioDurations: merged.durations,
-      voiceAssignments: snapshot.voiceAssignments,
-      intro: snapshot.intro,
-      outro: snapshot.outro,
-      introDuration: snapshot.introDuration,
-      outroDuration: snapshot.outroDuration,
-      panelGap,
-      realDurations: merged.realDurations,
-    });
-    const eventLog = appendProjectEvent(snapshot.eventLog, {
-      type: 'import-audio',
-      summary: `Импортировано аудиофайлов: ${report.applied.length}`,
-    });
-    updateProject({
-      panels: merged.panels,
-      timeline: rebuilt.timeline,
-      srt: rebuilt.srt,
-      audioDurations: merged.durationsObj,
-      eventLog,
-    });
-    return report;
-  };
-
-  /** Отмена последнего импорта аудио (Этап 2 п. 20). */
-  const handleUndoLastAudioImport = async () => {
-    if (!project || !lastImportUndo) return;
-    const restored = await undoLastAudioImport(lastImportUndo);
-    const nextDurations = new Map<number, number>();
-    for (const [k, v] of Object.entries(restored.audioDurations)) {
-      nextDurations.set(Number(k), v);
-    }
-    const nextFull = new Map<number, { blob: Blob; duration: number }>();
-    for (const [id, blob] of restored.restoredBlobs.entries()) {
-      nextFull.set(id, { blob, duration: nextDurations.get(id) ?? 2 });
-    }
-    setAudioBlobs(restored.restoredBlobs);
-    setAudioDurations(nextDurations);
-    setAudioFull(nextFull);
-    setLastImportUndo(null);
-    const eventLog = appendProjectEvent(project.eventLog, {
-      type: 'undo-import-audio',
-      summary: 'Отменён последний импорт аудио',
-    });
-    updateProject({
-      panels: restored.panels,
-      audioDurations: restored.audioDurations,
-      timeline: restored.timeline,
-      srt: restored.srt,
-      eventLog,
-    });
-    setNotice('Последний импорт аудио отменён, прежние файлы и таймлайн восстановлены.');
-  };
-
   /**
    * Точечная переозвучка одной панели: чистим OPFS-аудио и синтезируем заново.
    * Импортированное аудио — только с подтверждением из карточки панели
@@ -446,9 +310,6 @@ export function useEditorAudioOps({
     runAudioGeneration,
     handleGenerateAudio,
     handleGenerateSEO,
-    existingAudioIds,
-    handleImportAudio,
-    handleUndoLastAudioImport,
     handleRegeneratePanel,
   };
 }

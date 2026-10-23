@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { migrateProjectSchema } from '../src/lib/storage/schemaMigration';
 import { CURRENT_PROJECT_SCHEMA_VERSION } from '../src/lib/storage/db';
+import { readEditorSource } from './helpers/editorSource';
 
 /**
  * P1-1: блокировки дорожек переживают перезагрузку (схема проекта v2 → v3).
@@ -66,12 +67,48 @@ test('P1-1: повторная миграция актуального прое�
   assert.deepEqual(second.project.locks, { videoTrackLocked: true, audioTrackLocked: false });
 });
 
-test('P1-1: NLE-операция уважает блокировку дорожки', async () => {
-  const { splitPanelAudioClip, assertTrackUnlocked } = await import('../src/lib/pipeline/nleOperations');
-  assert.throws(
-    () => assertTrackUnlocked({ audioTrackLocked: true }, 'audio'),
-    /заблокирована/i
-  );
+/**
+ * `assertTrackUnlocked` и проверка блокировок внутри NLE-операций живут в
+ * `src/lib/pipeline/nleOperations.ts` с базовой линии (b7fbd57) — этот файл
+ * с тех пор не менялся. Здесь проверяем не только саму функцию, но и то, что
+ * реальные операции редактора действительно её вызывают: если кто-то уберёт
+ * проверку из `setPanelAudioTrim`/`togglePanelMute`, тест упадёт.
+ */
+const lockPanels = [{
+  id: 1,
+  order: 0,
+  imageIndex: 0,
+  dialogue: 'Реплика для блокировки',
+  character: 'Тест',
+  emotion: 'neutral',
+  bbox: { x: 0, y: 0, width: 100, height: 100 },
+}] as any;
+
+test('P1-1: assertTrackUnlocked различает дорожки', async () => {
+  const { assertTrackUnlocked } = await import('../src/lib/pipeline/nleOperations');
+  assert.throws(() => assertTrackUnlocked({ audioTrackLocked: true }, 'audio'), /заблокирована/i);
+  assert.throws(() => assertTrackUnlocked({ videoTrackLocked: true }, 'video'), /заблокирована/i);
   assert.doesNotThrow(() => assertTrackUnlocked({ audioTrackLocked: false }, 'audio'));
-  assert.equal(typeof splitPanelAudioClip, 'function');
+  assert.doesNotThrow(() => assertTrackUnlocked(undefined, 'audio'));
+  // Блокировка видео не мешает аудио-операциям и наоборот.
+  assert.doesNotThrow(() => assertTrackUnlocked({ videoTrackLocked: true }, 'audio'));
+});
+
+test('P1-1: реальные NLE-операции уважают блокировку аудиодорожки', async () => {
+  const { setPanelAudioTrim, togglePanelMute, splitPanelAudioClip } =
+    await import('../src/lib/pipeline/nleOperations');
+  const durs = { 1: 4 };
+  const lockedAudio = { locks: { audioTrackLocked: true, videoTrackLocked: false } };
+
+  assert.throws(() => setPanelAudioTrim(lockPanels, durs, 1, 0.5, 0.5, lockedAudio), /заблокирована/i);
+  assert.throws(() => togglePanelMute(lockPanels, durs, 1, true, lockedAudio), /заблокирована/i);
+  assert.throws(() => splitPanelAudioClip(lockPanels, durs, 1, 2, lockedAudio), /заблокирована/i);
+
+  const unlocked = { locks: { audioTrackLocked: false, videoTrackLocked: true } };
+  assert.doesNotThrow(() => togglePanelMute(lockPanels, durs, 1, true, unlocked));
+});
+
+test('P1-1: редактор передаёт блокировки проекта в NLE-операции', () => {
+  const editor = readEditorSource();
+  assert.match(editor, /locks:\s*project\?\.locks/, 'getNleOptions должен брать locks из проекта');
 });
