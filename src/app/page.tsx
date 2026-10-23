@@ -5,6 +5,7 @@ import { ImageUploader } from '@/components/upload/ImageUploader';
 import { getAllProjects, createProject, Project } from '@/lib/storage/db';
 import { getAllKeys, getSettings } from '@/lib/storage/local';
 import { getLLMProvider, resolveLLMVisionModel } from '@/lib/providers/llm';
+import { confirmAction, toast } from '@/lib/ui/feedback';
 import { processAllImages, mergeVisionResults } from '@/lib/pipeline/extractPanels';
 import { OnboardingWizard, isOnboardingCompleted } from '@/components/onboarding/OnboardingWizard';
 import { createDemoProject } from '@/lib/pipeline/demoProject';
@@ -73,7 +74,7 @@ export default function HomePage() {
     }
 
     if (!model) {
-      alert(`${provider.name} не имеет доступной модели для анализа изображений. Выберите vision-провайдера в настройках.`);
+      toast(`${provider.name} не имеет доступной модели для анализа изображений. Выберите vision-провайдера в настройках.`, 'error');
       router.push('/settings');
       return;
     }
@@ -88,7 +89,7 @@ export default function HomePage() {
         const project = await createProject(`Проект ${new Date().toLocaleDateString('ru-RU')}`, files as any);
         router.push(`/editor/${project.id}`);
       } catch (e: any) {
-        alert(`Ошибка: ${e.message}`);
+        toast(`Ошибка: ${e.message}`, 'error');
       } finally {
         setIsProcessing(false);
         setProgress(null);
@@ -132,7 +133,7 @@ export default function HomePage() {
           await deleteProject(project.id);
         } catch {}
       }
-      alert(`Ошибка: ${e.message}`);
+      toast(`Ошибка: ${e.message}`, 'error');
     } finally {
       setIsProcessing(false);
       setProgress(null);
@@ -144,7 +145,7 @@ export default function HomePage() {
       const project = await createDemoProject();
       router.push(`/editor/${project.id}`);
     } catch (e: any) {
-      alert(`Демо ошибка: ${e.message}`);
+      toast(`Демо ошибка: ${e.message}`, 'error');
     }
   };
 
@@ -168,7 +169,7 @@ export default function HomePage() {
       const project = await createProject(`Сценарий · демо ${new Date().toLocaleDateString('ru-RU')}`, blobs as any);
       router.push(`/editor/${project.id}?scenario=1`);
     } catch (e: any) {
-      alert(`Демо ошибка: ${e.message}`);
+      toast(`Демо ошибка: ${e.message}`, 'error');
     } finally {
       setIsProcessing(false);
       setProgress(null);
@@ -178,7 +179,12 @@ export default function HomePage() {
   const handleDelete = async (e: React.MouseEvent, id: string) => {
     e.preventDefault();
     e.stopPropagation();
-    if (!confirm('Удалить проект?')) return;
+    const confirmed = await confirmAction({
+      message: 'Удалить проект?',
+      confirmLabel: 'Удалить',
+      danger: true,
+    });
+    if (!confirmed) return;
     const { deleteProject } = await import('@/lib/storage/db');
     await deleteProject(id);
     loadProjects();

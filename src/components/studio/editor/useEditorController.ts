@@ -18,26 +18,22 @@ import { useEditorPlayback } from '@/components/studio/editor/useEditorPlayback'
 import { useEditorSrtOps } from '@/components/studio/editor/useEditorSrtOps';
 import { getProjectWithImages, saveProject, Project } from '@/lib/storage/db';
 import { RENDER_DEFAULTS, type RenderSettings } from '@/components/studio/RenderModePanel';
-import { type AudioImportApplyControls } from '@/components/studio/modals/AudioImportModal';
 import { migrateProjectSchema } from '@/lib/storage/schemaMigration';
 import { recoverInterruptedImport } from '@/lib/storage/resourceIntegrity';
 import { getAllKeys, getSettings } from '@/lib/storage/local';
 import { getLLMProvider, resolveLLMVisionModel } from '@/lib/providers/llm';
 import { buildTimeline, DEFAULT_PANEL_GAP, calculateTotalDuration, roundMediaDuration } from '@/lib/pipeline/buildTimeline';
 import { ProjectClock } from '@/lib/pipeline/projectClock';
-import { type ScenarioLine } from '@/lib/pipeline/scenario';
 import type { LastAudioImportSnapshot } from '@/lib/pipeline/audioImport';
 import { loadPanelAudios } from '@/lib/pipeline/loadPanelAudio';
 import { resolveTTSProviderId } from '@/lib/pipeline/projectSettings';
 import { checkCapabilities, BackendCapabilities } from '@/lib/pipeline/videoEncoder';
-import { HistoryManager, type NleHistorySnapshot } from '@/lib/pipeline/historyManager';
+import { HistoryManager } from '@/lib/pipeline/historyManager';
+import { inspectProjectHealth } from '@/lib/pipeline/projectHealth';
 
 import { ObjectUrlRegistry } from '@/lib/pipeline/objectUrlRegistry';
 import { UnifiedAudioPlayer } from '@/lib/pipeline/audioPlayer';
-import {
-  inspectProjectHealth,
-  type ProjectHealthIssue,
-} from '@/lib/pipeline/projectHealth';
+
 import { loadProjectIntroAudio, loadProjectOutroAudio, isOPFSSupported, saveProjectImage } from '@/lib/storage/opfs';
 import { estimateTotalCost } from '@/lib/validators';
 import { getVoiceButtonState } from '@/lib/pipeline/voiceButtonState';

@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import { MigrationRunner } from "@/components/MigrationRunner";
+import { FeedbackHost } from "@/components/ui/FeedbackHost";
+import { BrowserWarningBanner } from "@/components/ui/BrowserWarningBanner";
 
 // Fonts: Inter + JetBrains Mono via next/font/google in prod.
 // In offline CI (fonts.googleapis.com blocked) we fall back to system stack
@@ -23,7 +25,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="ru" className="h-full antialiased dark" suppressHydrationWarning>
       <body className="min-h-full flex flex-col bg-[#0B0B0C] text-[#F5F5F7] font-sans" style={{ fontFamily: "Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif" }}>
         <MigrationRunner />
+        <BrowserWarningBanner />
         <main className="flex-1 flex flex-col min-h-0">{children}</main>
+        <FeedbackHost />
       </body>
     </html>
   );

@@ -22,6 +22,7 @@ import {
 import type { AudioImportApplyControls } from '@/components/studio/modals/AudioImportModal';
 import type { LLMProvider } from '@/lib/providers/llm/types';
 import { getAudioDuration } from '@/lib/editor/audioUtils';
+import { confirmAction } from '@/lib/ui/feedback';
 
 type LLMConfig = { provider: LLMProvider; llmId: string; model: string; baseUrl?: string; accountId?: string };
 
@@ -245,9 +246,10 @@ export function useEditorAudioOps({
     const importedNote = importedCount > 0
       ? `\nИмпортированное аудио (${importedCount}) не трогается — переозвучить его можно кнопкой «↻» у панели.`
       : '';
-    const confirmed = confirm(
-      `${voiceButton.label}?\nПровайдер: ${providerName} (${ttsId})\nСимволов: ${cost.characters}\nСтоимость: ${cost.estimatedCost}${importedNote}\n\nOPFS кэш — повтор бесплатно. Изменённый текст/голос озвучивается заново.`
-    );
+    const confirmed = await confirmAction({
+      message: `${voiceButton.label}?\nПровайдер: ${providerName} (${ttsId})\nСимволов: ${cost.characters}\nСтоимость: ${cost.estimatedCost}${importedNote}\n\nOPFS кэш — повтор бесплатно. Изменённый текст/голос озвучивается заново.`,
+      confirmLabel: 'Озвучить',
+    });
     if (!confirmed) return;
 
     try {
@@ -416,7 +418,7 @@ export function useEditorAudioOps({
   /**
    * Точечная переозвучка одной панели: чистим OPFS-аудио и синтезируем заново.
    * Импортированное аудио — только с подтверждением из карточки панели
-   * (двойной клик по кнопке, не confirm(): в iframe-превью он молча false).
+   * (двойной клик по кнопке, не нативный confirm: в iframe-превью он молча false).
    */
   const handleRegeneratePanel = async (panelId: number, opts?: { confirmedImportOverwrite?: boolean }) => {
     if (!project || isGeneratingAudio) return;

@@ -11,6 +11,7 @@ import { buildDiagnosticReportJson, renderExportAudioMixPreviewWav } from '@/lib
 import { exportProjectToZip, importProjectFromZip } from '@/lib/storage/projectArchive';
 import { loadProjectAudio, saveProjectAudio, saveProjectIntroAudio, saveProjectOutroAudio } from '@/lib/storage/opfs';
 import { downloadBlob } from '@/lib/utils';
+import { toast } from '@/lib/ui/feedback';
 import type { ObjectUrlRegistry } from '@/lib/pipeline/objectUrlRegistry';
 import type { RenderSettings } from '@/components/studio/RenderModePanel';
 
@@ -91,11 +92,11 @@ export function useEditorExport({
     try {
       if (type === 'srt' || type === 'all') {
         if (project.srt) downloadBlob(new Blob([project.srt], { type: 'text/plain' }), `${project.name}.srt`);
-        else if (type === 'srt') alert('Нет SRT, сначала озвучь');
+        else if (type === 'srt') toast('Нет SRT, сначала озвучь', 'error');
       }
       if (type === 'seo' || type === 'all') {
         if (project.seoPackage) downloadBlob(new Blob([formatSEOPackage(project.seoPackage)], { type: 'text/plain' }), `${project.name}-SEO.txt`);
-        else if (type === 'seo') alert('Нет SEO пакета');
+        else if (type === 'seo') toast('Нет SEO пакета', 'error');
       }
       if (type === 'mp3' || type === 'all') {
         const exportTimeline =
@@ -132,11 +133,11 @@ export function useEditorExport({
             const ext = merged.type.includes('wav') ? 'wav' : merged.type.includes('mpeg') ? 'mp3' : 'bin';
             downloadBlob(merged, `${project.name}.${ext}`);
           }
-        } else if (type === 'mp3') alert('Сначала озвучь');
+        } else if (type === 'mp3') toast('Сначала озвучь', 'error');
       }
       if (type === 'mp4') {
         if (images.length === 0) {
-          alert('Нет изображений для видео');
+          toast('Нет изображений для видео', 'error');
           return;
         }
         const tl = project.timeline.length > 0 ? project.timeline : buildTimeline(project.panels, audioDurations, project.voiceAssignments, project.introDuration, panelGap);
@@ -160,7 +161,7 @@ export function useEditorExport({
         });
 
         if (audioPlacements.length === 0) {
-          alert('Сначала озвучь — нет аудио для видео. Экспортирую без звука.');
+          toast('Сначала озвучь — нет аудио для видео. Экспортирую без звука.');
         }
 
         clearExportedFile();
@@ -212,7 +213,7 @@ export function useEditorExport({
       if (e?.name === 'AbortError') {
         setNotice('Экспорт видео отменён.');
       } else {
-        alert(`Ошибка экспорта: ${e.message}`);
+        toast(`Ошибка экспорта: ${e.message}`, 'error');
       }
     } finally {
       setIsExporting(false);
