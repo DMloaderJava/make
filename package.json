@@ -22,11 +22,13 @@
     "smoke:server": "node scripts/smoke-server.mjs",
     "smoke:editor": "node scripts/smoke-editor.mjs",
     "smoke:onboarding": "node scripts/smoke-onboarding.mjs",
-    "verify": "npm run check:versions && npm run check:launchers && npm run typecheck && npm run test && npm run lint && npm run build && npm run smoke:server",
-    "verify:quick": "npm run check:versions && npm run check:launchers && npm run typecheck && npm run lint && npm run build && npm run smoke:server",
+    "verify": "npm run check:versions && npm run check:launchers && npm run check:providers && npm run typecheck && npm run test && npm run lint && npm run build && npm run smoke:server",
+    "verify:quick": "npm run check:versions && npm run check:launchers && npm run check:providers && npm run typecheck && npm run lint && npm run build && npm run smoke:server",
     "desktop": "electron electron/main.js",
     "desktop:dev": "concurrently \"npm run dev -- -H 0.0.0.0 -p 3000\" \"wait-on http://localhost:3000 && electron electron/main.js\"",
-    "desktop:build": "next build && electron-builder"
+    "desktop:build": "next build && electron-builder",
+    "check:providers": "node scripts/check-providers.mjs",
+    "gen:providers": "node scripts/check-providers.mjs --write"
   },
   "dependencies": {
     "class-variance-authority": "^0.7.1",

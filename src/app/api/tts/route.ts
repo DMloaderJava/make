@@ -290,7 +290,7 @@ export async function POST(req: NextRequest) {
         // Здесь же ловим будущие провайдеры, которым прокси обязателен по политике:
         // молчаливая рекурсия «сервер → /api/tts → сервер» невозможна.
         const hint = mustUseProxy(providerId)
-          ? `Provider ${providerId} требует прокси, но серверной ветки нет — добавьте её в route.ts`
+          ? `Provider ${providerId} требует прокси, но серверной реализации нет — добавьте serverGenerate провайдеру (providers/tts/*.ts)`
           : `Provider ${providerId} not implemented in proxy, use client-side`;
         return NextResponse.json({ error: hint, code: mustUseProxy(providerId) ? 'no_server_branch' : 'not_implemented' }, { status: 400 });
       }
@@ -301,9 +301,12 @@ export async function POST(req: NextRequest) {
 }
 
 export async function GET() {
+  // Список выводится из реестра: раньше он дублировался руками и отставал от
+  // фактических веток маршрута.
+  const { getImplementedProviders } = await import('@/lib/providers/registry');
   return NextResponse.json({
     status: 'TTS proxy ready',
-    providers: ['elevenlabs', 'openai', 'gemini', 'polly', 'azure', 'google-cloud', 'cartesia', 'deepgram', 'qwen', 'playht', 'resemble', 'murf', 'fish', 'hume', 'speechify'],
+    providers: getImplementedProviders('tts').map(entry => entry.id),
     note: 'Gemini (raw PCM) оборачивается в WAV; Content-Type остальных определяется по сигнатуре полученного аудио'
   });
 }

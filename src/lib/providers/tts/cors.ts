@@ -1,21 +1,38 @@
 /**
- * Shared CORS logic — must stay in sync with /api/tts/route.ts implemented providers
- * /api/tts implements: elevenlabs, openai, gemini, polly, azure, google-cloud, cartesia, deepgram, qwen
- * These 5 are known to block CORS and need proxy:
+ * Политика проксирования TTS — проекция единого реестра.
+ *
+ * Реестр (`../registry.ts`) хранит для каждого TTS-провайдера `cors`:
+ * - `direct` — браузер может звать API напрямую (CORS разрешён);
+ * - `proxy`  — нужен серверный `/api/tts`.
+ *
+ * Раньше здесь было два руками поддерживаемых списка (`CORS_BLOCKED_PROVIDERS`
+ * и `CLIENT_PROXY_PROVIDERS`), которые надо было синхронизировать с каталогом
+ * и с `route.ts`. Теперь источник один, а наборы ниже — совместимые проекции
+ * для UI (`VoicesModal`).
  */
-export const CORS_BLOCKED_PROVIDERS = new Set([
-  'elevenlabs',
-  'openai',
-  'polly',
-  'azure',
-  'deepgram',
-]);
+
+import { getProxiedTTSProviderIds, getRegistryByKind } from '../registry';
 
 /**
- * Провайдеры без рабочей клиентской реализации: их синтез выполняется на
- * сервере (/api/tts). Это политика «откуда звать», а не «кто блокирует CORS».
+ * Провайдеры, которые блокируют CORS (браузер не может звать напрямую).
+ * Экспериментальные сюда не входят: у них другая причина проксирования
+ * (нет рабочей клиентской реализации), хотя политика та же — `proxy`.
  */
-export const CLIENT_PROXY_PROVIDERS = new Set(['playht', 'resemble', 'murf', 'fish', 'hume', 'speechify']);
+export const CORS_BLOCKED_PROVIDERS = new Set(
+  getRegistryByKind('tts')
+    .filter(entry => entry.cors === 'proxy' && !entry.experimental)
+    .map(entry => entry.id)
+);
+
+/**
+ * Провайдеры без рабочей клиентской реализации: синтез выполняется на сервере
+ * (/api/tts). Это политика «откуда звать», а не «кто блокирует CORS».
+ */
+export const CLIENT_PROXY_PROVIDERS = new Set(
+  getRegistryByKind('tts')
+    .filter(entry => entry.cors === 'proxy' && entry.experimental)
+    .map(entry => entry.id)
+);
 
 export function isCorsBlocked(providerId: string): boolean {
   return CORS_BLOCKED_PROVIDERS.has(providerId);
@@ -23,11 +40,10 @@ export function isCorsBlocked(providerId: string): boolean {
 
 /**
  * Единая политика проксирования: один источник правды и для клиентского
- * router.ts, и для серверного route.ts. Раньше список жил в router.ts, а
- * серверный guard — отдельным Set'ом с «известным плохим» провайдером.
+ * router.ts, и для серверного route.ts.
  */
 export function mustUseProxy(providerId: string): boolean {
-  return CORS_BLOCKED_PROVIDERS.has(providerId) || CLIENT_PROXY_PROVIDERS.has(providerId);
+  return getProxiedTTSProviderIds().includes(providerId);
 }
 
 export function getAudioMimeType(providerId: string, blobType?: string): string {
