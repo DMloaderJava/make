@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { stripComments } from './helpers/stripComments';
 import {
   confirmAction,
   dismissToast,
@@ -30,11 +31,13 @@ function collectSourceFiles(dir: string, acc: string[] = []): string[] {
   return acc;
 }
 
-test('P1-4: в src/ не осталось вызовов alert/confirm', () => {
+test('P1-4: в src/ не осталось вызовов alert/confirm (комментарии не в счёт)', () => {
   const files = collectSourceFiles(join(process.cwd(), 'src'));
   const offenders: string[] = [];
   for (const file of files) {
-    const text = readFileSync(file, 'utf8');
+    // Комментарии вырезаем: упоминание «не alert, а toast» — не вызов,
+    // и падать на нём структурная проверка не должна.
+    const text = stripComments(readFileSync(file, 'utf8'));
     const lines = text.split('\n');
     lines.forEach((line, index) => {
       if (/\balert\(|\bconfirm\(/.test(line)) {

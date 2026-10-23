@@ -48,6 +48,13 @@ jobs:
       - name: "Smoke — прод-сборка стартует"
         run: npm run smoke:server
 
+      # Windows-образ содержит Chrome и Edge, но это неявная зависимость от
+      # образа runner-а: ставим Chrome явно (если уже есть — choco скажет об этом).
+      - name: "Chrome для smoke (Windows)"
+        if: runner.os == 'Windows'
+        run: choco install googlechrome --no-progress -y
+        continue-on-error: true
+
       # Браузерный smoke на Chromium (Задача 3.1.2 / Н-3.2): загрузка 100×2000 PNG,
       # применение сценария с 2 панелями, импорт WAV, seek/Play/Pause и экспорт клипа.
       - name: "Smoke — редактор в Chromium (E2E)"
@@ -61,18 +68,36 @@ jobs:
         if: runner.os == 'Windows'
         run: npm run smoke:editor -- --quick
 
+      # Визуальное доказательство прогона: скриншоты Preview/Export, коллажи и
+      # экспортированный WebM. В git они не хранятся (регенерируемые бинарники),
+      # поэтому выгружаются артефактом — в том числе при падении smoke.
+      - name: "Артефакты smoke"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-${{ matrix.os }}
+          path: |
+            artifacts/smoke-editor
+            artifacts/smoke-onboarding
+          if-no-files-found: warn
+          retention-days: 14
+
       # Кроссплатформенные проверки (node, без pwsh): версия в package.json не
       # разъехалась по баннерам лаунчеров/README/electron-моста, таблицы
       # провайдеров в README совпадают с реестром, .bat соблюдают правила
       # npm-флагов, delayed expansion и %ERRORLEVEL% вне блоков.
       # На Windows шаг читает те же файлы с CRLF — это заодно проверка .gitattributes.
       - name: Проверки согласованности (версии, провайдеры, лаунчеры)
-        run: npm run check:versions && npm run check:providers && npm run check:launchers
+        run: npm run check:versions && npm run check:providers && npm run check:tests && npm run check:launchers
 
-  # Переносная desktop-сборка (Electron + Next standalone): артефакт AppImage.
-  # Код-подпись не выполняется — вне scope стабилизации.
+  # Переносная desktop-сборка (Electron + Next): AppImage на Linux, portable exe
+  # на Windows. Код-подпись не выполняется — вне scope стабилизации.
   desktop:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -89,14 +114,15 @@ jobs:
       - name: Сборка Next
         run: npm run build
 
-      - name: Упаковка desktop (AppImage)
-        run: npx electron-builder --linux AppImage --publish never
+      - name: Упаковка desktop
+        run: npx electron-builder --publish never
 
       - uses: actions/upload-artifact@v4
         with:
-          name: desktop-linux
+          name: desktop-${{ matrix.os }}
           path: |
             release/*.AppImage
-            release/latest-linux.yml
+            release/*.exe
+            release/*-unpacked/**
           if-no-files-found: error
           retention-days: 14

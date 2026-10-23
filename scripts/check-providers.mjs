@@ -14,9 +14,8 @@
  * Registry — TypeScript, поэтому дамп выполняется через tsx (кросс-платформенно,
  * без предположений о раскрытии glob оболочкой).
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 
@@ -29,24 +28,23 @@ const MARKERS = {
 };
 
 function loadRegistry() {
-  const dir = mkdtempSync(join(tmpdir(), 'mvs-providers-'));
-  const dumper = join(dir, 'dump.ts');
-  const registryPath = resolve('src/lib/providers/registry.ts').replace(/\\/g, '/');
-  writeFileSync(
-    dumper,
-    `import { PROVIDER_REGISTRY } from '${registryPath}';\n` +
-      `process.stdout.write(JSON.stringify(PROVIDER_REGISTRY));\n`
-  );
+  // Явный дампер вместо генерации временного файла: меньше точек отказа
+  // (нет записи в tmp, нет склейки путей под Windows) и никакого мусора в stdout.
+  const tsxCli = require.resolve('tsx/cli');
+  const dumper = resolve('scripts/dump-registry.ts');
+  const result = spawnSync(process.execPath, [tsxCli, dumper], {
+    encoding: 'utf8',
+    cwd: process.cwd(),
+  });
+  if (result.status !== 0) {
+    console.error('Не удалось импортировать реестр провайдеров:\n' + (result.stderr || result.stdout));
+    process.exit(1);
+  }
   try {
-    const tsxCli = require.resolve('tsx/cli');
-    const result = spawnSync(process.execPath, [tsxCli, dumper], { encoding: 'utf8' });
-    if (result.status !== 0) {
-      console.error('Не удалось импортировать реестр провайдеров:\n' + (result.stderr || result.stdout));
-      process.exit(1);
-    }
     return JSON.parse(result.stdout);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
+  } catch (error) {
+    console.error('Дамп реестра не является JSON: ' + String(error));
+    process.exit(1);
   }
 }
 

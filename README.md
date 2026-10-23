@@ -41,7 +41,8 @@ npm run verify
 
 # 3. Автоматический E2E браузерный smoke-тест редактора в headless Chromium
 # (проверяет загрузку 100×2000 PNG, сценарий, импорт WAV, pointer drag-and-drop и trim-ручки,
-#  seek/Play/Pause, сохраняет кадры Preview/Export в artifacts/smoke-editor/ и экспортирует WebM ≤ 3 с)
+#  seek/Play/Pause, сохраняет кадры Preview/Export в artifacts/smoke-editor/ (в git не попадают —
+#  их выгружает CI; локально дублируются в системный tmp) и экспортирует WebM ≤ 3 с)
 npm run smoke:editor
 
 # 4. Сокращённый браузерный smoke (Windows-CI, без pointer-тестов NLE и сравнения кадров)
@@ -559,14 +560,16 @@ npm run smoke:tts -- cartesia     # точечно по провайдеру
   проверяются только настоящим Chromium (Playwright), это отдельная задача.
 
 ### Тесты
-`npm test` (`node scripts/run-tests.mjs` → `tsx --test`) — **370+ тестов в 35 файлах**:
+`npm test` (`node scripts/run-tests.mjs` → `tsx --test`) — юнит-тесты в <!-- tests:files:start -->40<!-- tests:files:end --> файлах:
 WAV-обёртка, определение MIME, раскладка и подпись аудио, лента (включая прогон по
 сетке раскладок), политика проксирования TTS и голосов, тело Cartesia, часы рендера,
 планировщик Web Audio, реестр провайдеров (включая структурные guard-тесты),
 конфигурация desktop-сборки, `check-launchers` (структура `.bat`/`.sh`) и `.sh`-лаунчеры.
 
 Раннер сам находит `tests/**/*.test.ts` — новый файл подхватывается без правки
-скриптов (`npm test -- <подстрока>` фильтрует по имени файла).
+скриптов (`npm test -- <подстрока>` фильтрует по имени файла). Число файлов в
+этом абзаце сверяет `npm run check:tests` (входит в `verify` и CI), поэтому
+документация не расходится с реальностью.
 
 Полный прогон — `npm run verify`; то же самое CI делает на ubuntu и windows.
 Для локальной итерации «правлю — смотрю» есть `npm run verify:quick`:

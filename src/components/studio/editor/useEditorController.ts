@@ -16,38 +16,30 @@ import { useEditorExport } from '@/components/studio/editor/useEditorExport';
 import { useEditorNle } from '@/components/studio/editor/useEditorNle';
 import { useEditorPlayback } from '@/components/studio/editor/useEditorPlayback';
 import { useEditorSrtOps } from '@/components/studio/editor/useEditorSrtOps';
-import { getProjectWithImages, saveProject, Project } from '@/lib/storage/db';
 import { RENDER_DEFAULTS, type RenderSettings } from '@/components/studio/RenderModePanel';
-import { migrateProjectSchema } from '@/lib/storage/schemaMigration';
-import { recoverInterruptedImport } from '@/lib/storage/resourceIntegrity';
-import { getAllKeys, getSettings } from '@/lib/storage/local';
-import { getLLMProvider, resolveLLMVisionModel } from '@/lib/providers/llm';
-import { buildTimeline, DEFAULT_PANEL_GAP, calculateTotalDuration, roundMediaDuration } from '@/lib/pipeline/buildTimeline';
+import { buildTimeline, DEFAULT_PANEL_GAP, calculateTotalDuration } from '@/lib/pipeline/buildTimeline';
+import type { Project } from '@/lib/storage/db';
+import type { BackendCapabilities } from '@/lib/pipeline/videoEncoder';
+import { getSettings } from '@/lib/storage/local';
 import { ProjectClock } from '@/lib/pipeline/projectClock';
 import type { LastAudioImportSnapshot } from '@/lib/pipeline/audioImport';
-import { loadPanelAudios } from '@/lib/pipeline/loadPanelAudio';
 import { resolveTTSProviderId } from '@/lib/pipeline/projectSettings';
-import { checkCapabilities, BackendCapabilities } from '@/lib/pipeline/videoEncoder';
 import { HistoryManager } from '@/lib/pipeline/historyManager';
 import { inspectProjectHealth } from '@/lib/pipeline/projectHealth';
 
 import { ObjectUrlRegistry } from '@/lib/pipeline/objectUrlRegistry';
 import { UnifiedAudioPlayer } from '@/lib/pipeline/audioPlayer';
 
-import { loadProjectIntroAudio, loadProjectOutroAudio, isOPFSSupported, saveProjectImage } from '@/lib/storage/opfs';
 import { estimateTotalCost } from '@/lib/validators';
 import { getVoiceButtonState } from '@/lib/pipeline/voiceButtonState';
-import { syncProjectSnapshot } from '@/lib/cloud/projectSync';
 
-import { getAudioDuration } from '@/lib/editor/audioUtils';
+import { useEditorProjectLoader } from '@/components/studio/editor/useEditorProjectLoader';
+import { useEditorPersistence } from '@/components/studio/editor/useEditorPersistence';
+import { useEditorImages } from '@/components/studio/editor/useEditorImages';
 
 export function useEditorController(id: string) {
 
   const [project, setProject] = useState<Project | null>(null);
-  const [loadAttempt, setLoadAttempt] = useState(0);
-  const [loadResult, setLoadResult] = useState<{ id: string; attempt: number; error?: string } | null>(null);
-  const isProjectLoading = !loadResult || loadResult.id !== id || loadResult.attempt !== loadAttempt;
-  const projectLoadError = isProjectLoading ? null : loadResult.error ?? null;
   const [images, setImages] = useState<string[]>([]);
   const [currentPanelIdx, setCurrentPanelIdx] = useState(0);
   // Настройки режима рендера хранятся в проекте; значения по умолчанию — панели.
@@ -121,6 +113,27 @@ export function useEditorController(id: string) {
   const [preferredBackend, setPreferredBackend] = useState<'auto' | 'webcodecs' | 'canvas'>('auto');
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'unsaved'>('saved');
 
+  const { isProjectLoading, projectLoadError, reloadProject } = useEditorProjectLoader({
+    id,
+    clockRef,
+    setProject,
+    setImages,
+    setCurrentPanelIdx,
+    setSelectedId,
+    setAudioDurations,
+    setAudioBlobs,
+    setAudioFull,
+    setIntroAudio,
+    setOutroAudio,
+    setIntroAudioDuration,
+    setOutroAudioDuration,
+    setNotice,
+    setShowScenario,
+    setAudioProgress,
+    setOpfsActive,
+    setBackendCaps,
+  });
+
   const tl = useMemo(() => {
     if (!project) return [];
     return project.timeline.length > 0 ? project.timeline : buildTimeline(project.panels, audioDurations, project.voiceAssignments, project.introDuration, panelGap);
@@ -177,136 +190,6 @@ export function useEditorController(id: string) {
     });
   }, [project, tl, panelGap, images.length, audioBlobs, audioDurations]);
 
-  useEffect(() => {
-    let cancelled = false;
-    const attempt = loadAttempt;
-
-    const loadProject = async () => {
-      try {
-        if (!id) {
-          await Promise.resolve();
-          if (!cancelled) setLoadResult({ id, attempt, error: 'Не удалось определить ID проекта.' });
-          return;
-        }
-
-        const result = await getProjectWithImages(id);
-        if (cancelled) return;
-        if (!result) {
-          setLoadResult({
-            id,
-            attempt,
-            error: `Проект «${id}» не найден в локальном хранилище. Возможно, он был удалён или открыт в другом браузере/профиле.`,
-          });
-          return;
-        }
-
-        const { project: storedProject, imageDataUrls: urls } = result;
-        // Явная идемпотентная миграция схемы проекта и таймлайна (Этап 1 п. 5, Этап 8 п. 74)
-        const migration = migrateProjectSchema(storedProject);
-        const migratedProject = migration.project;
-
-        // Восстановление после незавершённого импорта (ImportJournal, Этап 8 п. 79)
-        const journalRecovery = recoverInterruptedImport(migratedProject.id);
-        if (journalRecovery.recovered && journalRecovery.message) {
-          setNotice(journalRecovery.message);
-        }
-
-        const settings = getSettings();
-        const storedLLMProvider = getLLMProvider(migratedProject.settings.llmProvider || settings.defaultLLMProvider)
-          || getLLMProvider('openrouter')!;
-        const safeVisionModel = resolveLLMVisionModel(
-          storedLLMProvider,
-          migratedProject.settings.visionModel || settings.defaultVisionModel,
-        ) || '';
-        const loadedProject = safeVisionModel === migratedProject.settings.visionModel
-          ? migratedProject
-          : { ...migratedProject, settings: { ...migratedProject.settings, visionModel: safeVisionModel } };
-        // Аудио панелей — по наличию файла, без фильтра по .sig (импорт без подписи).
-        const loadedAudio = await loadPanelAudios({
-          projectId: loadedProject.id,
-          panels: loadedProject.panels,
-          storedDurations: loadedProject.audioDurations,
-          decode: getAudioDuration,
-          isCancelled: () => cancelled,
-        });
-        if (!loadedAudio) return;
-        const { durations, blobs, full } = loadedAudio;
-
-        let loadedIntroAudio: Blob | null = null;
-        let loadedOutroAudio: Blob | null = null;
-        let loadedIntroAudioDur: number | null = null;
-        let loadedOutroAudioDur: number | null = null;
-        try {
-          loadedIntroAudio = await loadProjectIntroAudio(loadedProject.id);
-          loadedOutroAudio = await loadProjectOutroAudio(loadedProject.id);
-          if (loadedIntroAudio) {
-            loadedIntroAudioDur = roundMediaDuration(await getAudioDuration(loadedIntroAudio));
-          }
-          if (loadedOutroAudio) {
-            loadedOutroAudioDur = roundMediaDuration(await getAudioDuration(loadedOutroAudio));
-          }
-        } catch {}
-
-        if (cancelled) return;
-        setProject(loadedProject);
-        setImages(urls);
-        setAudioDurations(durations);
-        setAudioBlobs(blobs);
-        setAudioFull(full);
-        setIntroAudio(loadedIntroAudio);
-        setOutroAudio(loadedOutroAudio);
-        setIntroAudioDuration(loadedIntroAudioDur);
-        setOutroAudioDuration(loadedOutroAudioDur);
-        setCurrentPanelIdx(0);
-        clockRef.current.reset(0);
-        setAudioProgress('');
-
-        if (loadedProject.panels.length > 0) {
-          setSelectedId(loadedProject.panels[0].id);
-        } else {
-          setSelectedId('intro');
-        }
-        setLoadResult({ id, attempt });
-        // Без ключа провайдера vision-анализ не запустится — показываем это
-        // баннером (alert/confirm во встроенном превью блокируются). Для
-        // явного «Тест сценария» (?scenario=1) баннер не нужен: пользователь
-        // уже выбрал сценарный путь, и модалка откроется сама.
-        const isScenarioEntry = new URLSearchParams(window.location.search).get('scenario') === '1';
-        if (!isScenarioEntry) {
-          const keys = getAllKeys();
-          const hasLLMKey = !!keys[storedLLMProvider.id] || (storedLLMProvider.id === 'gemini' && !!keys['google-ai']);
-          // Только для «голого» проекта: если панели уже есть (ключ удалили
-          // после разбора), баннером не спамим.
-          if (!hasLLMKey && loadedProject.panels.length === 0) {
-            setNotice(`Ключ AI не добавлен — анализ изображений не запустится. Добавьте ключ в «Настройках» или используйте кнопку «Сценарий» — она работает без ключа.`);
-          }
-        }
-        // «Тест сценария» приходит с ?scenario=1 — сразу открываем модалку.
-        if (isScenarioEntry) {
-          setShowScenario(true);
-        }
-      } catch (error) {
-        if (!cancelled) {
-          const message = error instanceof Error ? error.message : String(error);
-          setLoadResult({ id, attempt, error: `Не удалось загрузить проект: ${message || 'неизвестная ошибка'}` });
-        }
-      }
-    };
-
-    void loadProject();
-    void isOPFSSupported()
-      .then(supported => { if (!cancelled) setOpfsActive(Boolean(supported)); })
-      .catch(() => { if (!cancelled) setOpfsActive(false); });
-    void checkCapabilities()
-      .then((capabilities) => {
-        if (!cancelled) setBackendCaps(capabilities);
-      })
-      .catch((error) => console.warn('Не удалось проверить возможности экспорта', error));
-
-    return () => {
-      cancelled = true;
-    };
-  }, [id, loadAttempt]);
 
   const {
     handleSeek,
@@ -335,78 +218,22 @@ export function useEditorController(id: string) {
     setSelectedId,
   });
 
-  // Автосейв: раньше в deps не было timeline/srt/audioDurations, из-за чего после
-  // перезагрузки страницы терялись субтитры и длительности озвучки.
-  useEffect(() => {
-    if (!project) return;
-    setSaveStatus('unsaved');
-    const t = setTimeout(() => {
-      handleSave();
-    }, 2000);
-    return () => clearTimeout(t);
-  }, [
-    project?.panels,
-    project?.intro,
-    project?.outro,
-    project?.voiceAssignments,
-    project?.name,
-    project?.timeline,
-    project?.srt,
-    project?.audioDurations,
-    project?.seoPackage,
-    project?.timelineVersion,
-    project?.settings?.visionModel,
-    project?.settings?.llmProvider,
-    project?.settings?.ttsProvider,
-    project?.settings?.ttsModel,
-    project?.settings?.ttsLanguage,
-    project?.settings?.ttsSpeed,
-    project?.settings?.renderMode,
-    project?.settings?.stripViewport,
-    project?.settings?.stripGap,
-    project?.settings?.panelGap,
-    project?.settings?.chatModel,
-    project?.settings?.backgroundMusic,
-    project?.settings?.musicVolume,
-  ]);
+  const { updateProject } = useEditorPersistence({
+    project,
+    audioDurations,
+    handleSaveRef,
+    setProject,
+    setSaveStatus,
+  });
 
-  // Синхронизируем длительность с ProjectClock и ведём воспроизведение через UnifiedAudioPlayer (Задачи 1, 9)
-  // в рендере-тайме (и в TDZ) больше не приходится.
-  const handleSave = async () => {
-    if (!project) return;
-    setSaveStatus('saving');
-    const obj: Record<number, number> = {};
-    audioDurations.forEach((v, k) => obj[k] = v);
-    const snapshot = { ...project, audioDurations: obj, updatedAt: Date.now() };
-    const saved = await saveProject(snapshot, { allowStale: true });
-    project.revision = saved.revision;
-    // Облако временное (TTL 24 ч); ошибка сети не ломает локальный режим.
-    void syncProjectSnapshot(saved);
-    setSaveStatus('saved');
-  };
-
-  // Хоткеи живут в эффекте без deps — держим актуальный handleSave в ref,
-  // иначе Ctrl+S сохраняет устаревший снимок проекта.
-  useEffect(() => {
-    handleSaveRef.current = handleSave;
-  }, [handleSave]);
-
-  const updateProject = (updates: Partial<Project>) => {
-    if (!project) return;
-    // Задача 2: любая пересборка timeline монотонно инкрементирует timelineVersion
-    const nextTimelineVersion =
-      updates.timelineVersion !== undefined
-        ? updates.timelineVersion
-        : updates.timeline !== undefined
-          ? (project.timelineVersion ?? 2) + 1
-          : project.timelineVersion;
-    setProject({
-      ...project,
-      ...updates,
-      ...(nextTimelineVersion !== undefined ? { timelineVersion: nextTimelineVersion } : {}),
-      updatedAt: Date.now(),
-    });
-  };
+  const { handleAddImages } = useEditorImages({
+    project,
+    images,
+    updateProject,
+    setImages,
+    setNotice,
+    setIsUploadingImages,
+  });
 
   const { currentScenarioText, handleGapChange, applyIntroOutroChange } = useEditorSrtOps({
     project,
@@ -493,45 +320,6 @@ export function useEditorController(id: string) {
     setShowScenario,
   });
 
-  const handleAddImages = async (fileList: FileList | File[]) => {
-    if (!project) return;
-    const files = Array.from(fileList).filter(file => file.type.startsWith('image/'));
-    if (files.length === 0) {
-      setNotice('Выберите файлы изображений.');
-      return;
-    }
-    setIsUploadingImages(true);
-    try {
-      const nextImages: string[] = [];
-      const nextFiles = [...(project.imageFiles || [])];
-      const useOPFS = project.useOPFS && await isOPFSSupported();
-      for (const [offset, file] of files.entries()) {
-        const index = images.length + offset;
-        if (useOPFS) {
-          nextFiles.push(await saveProjectImage(project.id, index, file));
-        } else {
-          nextImages.push(await new Promise<string>((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve(String(reader.result));
-            reader.onerror = () => reject(reader.error || new Error(`Не удалось прочитать ${file.name}`));
-            reader.readAsDataURL(file);
-          }));
-        }
-      }
-      const combinedImages = useOPFS ? images : [...images, ...nextImages];
-      setImages(combinedImages);
-      updateProject({
-        images: useOPFS ? project.images : [...project.images, ...nextImages],
-        imageFiles: useOPFS ? nextFiles : project.imageFiles,
-        useOPFS,
-      });
-      setNotice(`Добавлено изображений: ${files.length}. Всего в проекте: ${combinedImages.length}.`);
-    } catch (error) {
-      setNotice(`Не удалось добавить изображения: ${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      setIsUploadingImages(false);
-    }
-  };
 
   const {
     handleExport,
@@ -627,8 +415,6 @@ export function useEditorController(id: string) {
       : selectedPanel ? { type: 'panel' as const, data: selectedPanel, index: selectedIndex }
       : null;
   }, [project, selectedId, selectedPanel, selectedIndex]);
-  const reloadProject = () => setLoadAttempt((a) => a + 1);
-
   return {
     applyIntroOutroChange,
     audioBlobs,

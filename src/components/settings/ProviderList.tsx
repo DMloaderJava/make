@@ -63,7 +63,7 @@ function ProviderRow({
               <>
                 {llmProvider?.freeTier && <span className="text-[10px] px-1.5 py-0.5 rounded-[6px] bg-green-900/40 text-green-300 border border-green-800 font-medium">FREE</span>}
                 {llmProvider?.trialOnly && <span title={llmProvider.freeTierNote || 'Пробный период'} className="text-[10px] px-1.5 py-0.5 rounded-[6px] bg-yellow-900/40 text-yellow-300 border border-yellow-800 font-medium">TRIAL</span>}
-                {llmProvider?.supportsVision && <span className="text-[10px] px-1.5 py-0.5 rounded-[6px] bg-[#1E1E23] border border-[#26262C] text-[#8A8A93]">VISION</span>}
+                {llmProvider?.supportsVision && (llmProvider.visionModels?.length ?? 0) > 0 && <span className="text-[10px] px-1.5 py-0.5 rounded-[6px] bg-[#1E1E23] border border-[#26262C] text-[#8A8A93]">VISION</span>}
                 {llmProvider?.limitsUrl && <a href={llmProvider.limitsUrl} target="_blank" rel="noopener noreferrer" className="text-[11px] text-[#8A8A93] hover:text-[#E8B44C]">Лимиты</a>}
               </>
             ) : (

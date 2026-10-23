@@ -13,73 +13,41 @@ import { Preview } from '@/components/studio/Preview';
 import { Timeline } from '@/components/studio/Timeline';
 import { ContextPanel } from '@/components/studio/ContextPanel';
 import { RenderModePanel } from '@/components/studio/RenderModePanel';
-import { VoicesModal } from '@/components/studio/modals/VoicesModal';
-import { ExportModal } from '@/components/studio/modals/ExportModal';
-import { ScenarioModal } from '@/components/studio/modals/ScenarioModal';
-import { IntroOutroModal } from '@/components/studio/modals/IntroOutroModal';
-import { AudioImportModal } from '@/components/studio/modals/AudioImportModal';
-import { ProjectHealthModal } from '@/components/studio/modals/ProjectHealthModal';
 import { Input } from '@/components/ui/input';
-import { getSettings } from '@/lib/storage/local';
 import { rebuildSrt } from '@/lib/pipeline/buildTimeline';
 import { formatTime } from '@/lib/utils';
 import type { useEditorController } from './useEditorController';
+import { EditorModals } from './EditorModals';
 
 export type EditorController = ReturnType<typeof useEditorController>;
 
 export function EditorView({ c }: { c: EditorController }) {
   const {
-    clockInstance,
-    renderSettings,
     applyIntroOutroChange,
-    audioBlobs,
     audioDone,
     audioDurations,
     audioError,
     audioProgress,
     audioTotal,
     audioWarnings,
-    backendCaps,
     buildCurrentHistorySnapshot,
+    clockInstance,
     clockRef,
     contextValue,
     costEstimate,
     currentPanelIdx,
-    currentScenarioText,
     currentTime,
     duration,
     editorImageInputRef,
     existingAudioIds,
-    exportAbortController,
-    exportEta,
-    exportProgress,
-    exportStage,
-    exportedFile,
-    generatingSEO,
     handleAddImages,
-    handleApplyScenario,
-    handleClearIntroAudio,
-    handleClearIntroOutro,
-    handleClearOutroAudio,
     handleDeleteActiveClip,
-    handleDownloadDiagnosticJson,
     handleDuplicateActiveClip,
-    handleExport,
-    handleExportProjectZip,
     handleGapChange,
     handleGenerateAudio,
     handleGenerateIntro,
     handleGenerateOutro,
-    handleGenerateSEO,
-    handleImportAudio,
-    handleImportIntroAudio,
-    handleImportOutroAudio,
-    handleImportProjectZip,
-    handleIntroOutroAI,
-    handleJumpToHealthIssue,
-    handleToggleTrackLock,
     handleMoveActiveClip,
-    handlePreviewAudioMix,
     handleRedo,
     handleRegeneratePanel,
     handleReorderClip,
@@ -90,40 +58,32 @@ export function EditorView({ c }: { c: EditorController }) {
     handleSplitActiveClip,
     handleTogglePanelMute,
     handleTogglePanelSolo,
-    handleTranslateScenario,
+    handleToggleTrackLock,
     handleUndo,
-    handleUndoLastAudioImport,
-    handleVoiceIntroOutro,
     healthReport,
     historyAvail,
     historyRef,
     images,
-    introAudio,
     introAudioDuration,
-    isExporting,
     isGeneratingAudio,
     isGeneratingIntro,
     isPlaying,
     isProjectLoading,
     isUploadingImages,
-    lastImportUndo,
     notice,
     opfsActive,
-    outroAudio,
     outroAudioDuration,
     panelGap,
-    preferredBackend,
     project,
     projectLoadError,
     reloadProject,
+    renderSettings,
     saveStatus,
     selectedId,
     setAudioError,
     setAudioWarnings,
     setCurrentPanelIdx,
-    setExportedFile,
     setNotice,
-    setPreferredBackend,
     setSelectedId,
     setShowAudioImport,
     setShowExport,
@@ -131,19 +91,12 @@ export function EditorView({ c }: { c: EditorController }) {
     setShowIntroOutro,
     setShowScenario,
     setShowVoices,
-    showAudioImport,
-    showExport,
-    showHealthModal,
-    showIntroOutro,
-    showScenario,
-    showVoices,
-    srtDraft,
     syncHistoryAvail,
     tl,
     updateProject,
     voiceButton,
-    voicingIntroOutro,
   } = c;
+
 
   if (isProjectLoading) {
     return (
@@ -528,122 +481,7 @@ export function EditorView({ c }: { c: EditorController }) {
         </div>
       </div>
 
-      <ScenarioModal
-        open={showScenario}
-        onClose={() => setShowScenario(false)}
-        imagesCount={images.length}
-        existingPanels={project.panels.length}
-        ttsLanguage={project.settings.ttsLanguage || 'ru'}
-        currentScenario={currentScenarioText}
-        llmProviderId={project.settings.llmProvider || getSettings().defaultLLMProvider || 'openrouter'}
-        chatModel={project.settings.chatModel}
-        onSettingsChange={(patch) => updateProject({ settings: { ...project.settings, ...patch } })}
-        onApply={handleApplyScenario}
-        onTranslate={handleTranslateScenario}
-      />
-
-      {showAudioImport && <AudioImportModal
-        open
-        onClose={() => setShowAudioImport(false)}
-        panels={project.panels}
-        existingAudio={existingAudioIds}
-        onApply={handleImportAudio}
-        canUndoLastImport={Boolean(lastImportUndo)}
-        onUndoLastImport={() => void handleUndoLastAudioImport()}
-      />}
-
-      <IntroOutroModal
-        open={showIntroOutro}
-        onClose={() => setShowIntroOutro(false)}
-        intro={project.intro}
-        outro={project.outro}
-        introDuration={project.introDuration}
-        outroDuration={project.outroDuration}
-        introAudio={introAudio}
-        outroAudio={outroAudio}
-        onIntroAudioUpload={handleImportIntroAudio}
-        onOutroAudioUpload={handleImportOutroAudio}
-        onClearIntroAudio={handleClearIntroAudio}
-        onClearOutroAudio={handleClearOutroAudio}
-        onApply={(patch) => { applyIntroOutroChange(patch); setShowIntroOutro(false); }}
-        onGenerateAI={() => void handleIntroOutroAI()}
-        onVoice={() => void handleVoiceIntroOutro()}
-        onClear={handleClearIntroOutro}
-        generating={isGeneratingIntro}
-        voicing={voicingIntroOutro}
-      />
-
-      <VoicesModal
-        open={showVoices}
-        onClose={() => setShowVoices(false)}
-        characters={project.characters}
-        assignments={project.voiceAssignments}
-        onChange={(a) => updateProject({ voiceAssignments: a })}
-        onCharactersChange={(chars) => updateProject({ characters: chars as any })}
-        settings={project.settings}
-        onSettingsChange={(patch) => updateProject({ settings: { ...project.settings, ...patch } })}
-        onPanelsRename={(renameMap) => {
-          if (!project) return;
-          const newPanels = project.panels.map(p => renameMap[p.character] ? { ...p, character: renameMap[p.character] } : p);
-          const newAssignments: Record<string, string> = {};
-          for (const [oldName, newName] of Object.entries(renameMap)) {
-            if (project.voiceAssignments[oldName] && !newAssignments[newName]) newAssignments[newName] = project.voiceAssignments[oldName];
-          }
-          const mergedAssignments = { ...project.voiceAssignments, ...newAssignments };
-          // Clean old keys that were merged away
-          for (const oldName of Object.keys(renameMap)) {
-            if (renameMap[oldName] !== oldName) delete (mergedAssignments as any)[oldName];
-          }
-          updateProject({ panels: newPanels, voiceAssignments: mergedAssignments });
-        }}
-      />
-
-      <ExportModal
-        open={showExport}
-        onClose={() => {
-          if (!isExporting) {
-            if (exportedFile) {
-              try { URL.revokeObjectURL(exportedFile.url); } catch {}
-            }
-            setShowExport(false);
-            setExportedFile(null);
-          }
-        }}
-        onExport={handleExport}
-        hasAudio={audioBlobs.size > 0 || !!introAudio}
-        hasSRT={!!project.srt}
-        srtDraft={srtDraft}
-        hasSEO={!!project.seoPackage}
-        duration={duration}
-        backendCaps={backendCaps}
-        preferredBackend={preferredBackend}
-        onBackendChange={setPreferredBackend}
-        isExporting={isExporting}
-        exportProgress={exportProgress}
-        exportStage={exportStage}
-        exportEta={exportEta}
-        onCancelExport={() => exportAbortController?.abort()}
-        exportedFile={exportedFile}
-        costEstimate={costEstimate}
-        onGenerateSEO={handleGenerateSEO}
-        generatingSEO={generatingSEO}
-        healthReport={healthReport ?? undefined}
-        onPreviewAudioMix={handlePreviewAudioMix}
-        onDownloadDiagnosticJson={handleDownloadDiagnosticJson}
-      />
-
-      {showHealthModal && healthReport && (
-        <ProjectHealthModal
-          healthReport={healthReport}
-          eventLog={project.eventLog ?? []}
-          storageBackendLabel={project.useOPFS && opfsActive ? 'OPFS + IDB' : 'IDB fallback'}
-          onClose={() => setShowHealthModal(false)}
-          onJumpToIssue={handleJumpToHealthIssue}
-          onDownloadDiagnosticJson={handleDownloadDiagnosticJson}
-          onExportProjectZip={() => void handleExportProjectZip()}
-          onImportProjectZip={(file) => void handleImportProjectZip(file)}
-        />
-      )}
+      <EditorModals c={c} />
     </div>
   );
 }

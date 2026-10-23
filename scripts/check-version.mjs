@@ -66,7 +66,11 @@ if (pkg.license !== EXPECTED_LICENSE) {
 // --- Версии в исходниках ----------------------------------------------------
 // Хардкод номера версии в комментариях уже приводил к расхождению 1.3.17 /
 // 1.3.18. Единственный источник — package.json (src/lib/version.ts).
-const VERSION_LITERAL = /\bv\d+\.\d+\.\d+\b/g;
+// Сканируем только «свою» серию (1.3.x): `v20.9.0` в комментарии про Node или
+// фикстура «проект версии v1.2.0» — не хардкод версии приложения и не должны
+// валить проверку. Смена минорной версии автоматически расширяет шаблон.
+const APP_SERIES = current.split('.').slice(0, 2).join('\\.');
+const VERSION_LITERAL = new RegExp(`\\bv?${APP_SERIES}\\.\\d+\\b`, 'g');
 function walk(dir) {
   const out = [];
   for (const entry of readdirSync(dir)) {
