@@ -8,69 +8,42 @@
  * «контроллер → разметка», а логику можно было читать и менять отдельно от JSX.
  */
 
-import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
-import { getProjectWithImages, saveProject, Project, appendProjectEvent } from '@/lib/storage/db';
+import { useEffect, useState, useMemo, useRef } from 'react';
+import { useEditorDialogue } from '@/components/studio/editor/useEditorDialogue';
+import { useEditorScenario } from '@/components/studio/editor/useEditorScenario';
+import { useEditorAudioOps } from '@/components/studio/editor/useEditorAudioOps';
+import { useEditorExport } from '@/components/studio/editor/useEditorExport';
+import { useEditorNle } from '@/components/studio/editor/useEditorNle';
+import { useEditorPlayback } from '@/components/studio/editor/useEditorPlayback';
+import { useEditorSrtOps } from '@/components/studio/editor/useEditorSrtOps';
+import { getProjectWithImages, saveProject, Project } from '@/lib/storage/db';
 import { RENDER_DEFAULTS, type RenderSettings } from '@/components/studio/RenderModePanel';
 import { type AudioImportApplyControls } from '@/components/studio/modals/AudioImportModal';
-import { downloadBlob } from '@/lib/utils';
 import { migrateProjectSchema } from '@/lib/storage/schemaMigration';
 import { recoverInterruptedImport } from '@/lib/storage/resourceIntegrity';
-import { exportProjectToZip, importProjectFromZip } from '@/lib/storage/projectArchive';
 import { getAllKeys, getSettings } from '@/lib/storage/local';
 import { getLLMProvider, resolveLLMVisionModel } from '@/lib/providers/llm';
-import { buildTimeline, DEFAULT_PANEL_GAP, calculateTotalDuration, rebuildSrt, roundMediaDuration } from '@/lib/pipeline/buildTimeline';
+import { buildTimeline, DEFAULT_PANEL_GAP, calculateTotalDuration, roundMediaDuration } from '@/lib/pipeline/buildTimeline';
 import { ProjectClock } from '@/lib/pipeline/projectClock';
-import { applyScenarioToProject, serializeScenario, SCENARIO_GAP_SECONDS, type ScenarioLine } from '@/lib/pipeline/scenario';
-import { translateScenarioLines, isTranslatableLanguage } from '@/lib/pipeline/translateScenario';
-import { generateIntro, generateOutro, generateFallbackIntro, generateFallbackOutro, resolveChannelName } from '@/lib/pipeline/generateIntro';
-import { formatSEOPackage, generateSEO, generateFallbackSEO } from '@/lib/pipeline/generateSEO';
-import { generateAllAudio } from '@/lib/pipeline/generateAudio';
-import {
-  applyAudioImport,
-  createAudioImportUndoSnapshot,
-  createImportPersister,
-  mergeAppliedAudio,
-  settleImportRegeneration,
-  undoLastAudioImport,
-  type AudioImportPlan,
-  type LastAudioImportSnapshot,
-} from '@/lib/pipeline/audioImport';
+import { type ScenarioLine } from '@/lib/pipeline/scenario';
+import type { LastAudioImportSnapshot } from '@/lib/pipeline/audioImport';
 import { loadPanelAudios } from '@/lib/pipeline/loadPanelAudio';
 import { resolveTTSProviderId } from '@/lib/pipeline/projectSettings';
-import { getTTSProvider } from '@/lib/providers/tts/catalog';
-import { concatenateAudioBlobs } from '@/lib/pipeline/assembleVideo';
-import { renderVideo, checkCapabilities, BackendCapabilities } from '@/lib/pipeline/videoEncoder';
-import { buildTimelineAudioPlacements, type AudioPlacement } from '@/lib/pipeline/audioMix';
+import { checkCapabilities, BackendCapabilities } from '@/lib/pipeline/videoEncoder';
 import { HistoryManager, type NleHistorySnapshot } from '@/lib/pipeline/historyManager';
-import {
-  reorderPanelClips,
-  setPanelAudioGainAndFades,
-  setPanelAudioTrim,
-  setPanelDurationOverride,
-  splitPanelAudioClip,
-  togglePanelMute,
-  togglePanelSolo,
-  deletePanelClipWithRipple,
-  duplicatePanelClip,
-  type NleMutationResult,
-} from '@/lib/pipeline/nleOperations';
+
 import { ObjectUrlRegistry } from '@/lib/pipeline/objectUrlRegistry';
 import { UnifiedAudioPlayer } from '@/lib/pipeline/audioPlayer';
 import {
-  buildDiagnosticReportJson,
   inspectProjectHealth,
-  renderExportAudioMixPreviewWav,
   type ProjectHealthIssue,
 } from '@/lib/pipeline/projectHealth';
-import { loadProjectAudio, loadProjectIntroAudio, loadProjectOutroAudio, deleteProjectAudio, isOPFSSupported, saveProjectAudio, saveProjectImage, saveProjectIntroAudio, saveProjectOutroAudio } from '@/lib/storage/opfs';
+import { loadProjectIntroAudio, loadProjectOutroAudio, isOPFSSupported, saveProjectImage } from '@/lib/storage/opfs';
 import { estimateTotalCost } from '@/lib/validators';
 import { getVoiceButtonState } from '@/lib/pipeline/voiceButtonState';
 import { syncProjectSnapshot } from '@/lib/cloud/projectSync';
 
-import {
-  getAudioDuration,
-  getImportedAudioDuration,
-} from '@/lib/editor/audioUtils';
+import { getAudioDuration } from '@/lib/editor/audioUtils';
 
 export function useEditorController(id: string) {
 
@@ -93,11 +66,6 @@ export function useEditorController(id: string) {
 
   const [currentTime, setCurrentTime] = useState(0);
   const currentTimeRef = useRef(0);
-  // синхронизируем ref в эффекте (объявлен выше playback-эффекта, поэтому
-  // к моменту старта воспроизведения значение уже актуально)
-  useEffect(() => {
-    currentTimeRef.current = currentTime;
-  }, [currentTime]);
   const [audioDurations, setAudioDurations] = useState<Map<number, number>>(new Map());
   const [audioBlobs, setAudioBlobs] = useState<Map<number, Blob>>(new Map());
   const [audioFull, setAudioFull] = useState<Map<number, { blob: Blob; duration: number }>>(new Map());
@@ -157,49 +125,6 @@ export function useEditorController(id: string) {
   const [preferredBackend, setPreferredBackend] = useState<'auto' | 'webcodecs' | 'canvas'>('auto');
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'unsaved'>('saved');
 
-  // Единая подписка на ProjectClock (Задача 1: единственный вызов setCurrentTime в EditorPage;
-  // P1 п. 14: rAF-тики троттлятся для React-дерева EditorPage до ~20 Гц, в то время как Preview
-  // читает clock.getTime() напрямую в своём Canvas rAF на полных 60 fps)
-  useEffect(() => {
-    const clock = clockRef.current;
-    const player = new UnifiedAudioPlayer({
-      clock,
-      registry: urlRegistryRef.current,
-      onError: (formatted) => {
-        if (formatted.kind === 'aborted') return;
-        setAudioError(formatted.message);
-      },
-    });
-    playerRef.current = player;
-
-    let lastReactSyncWallMs = 0;
-    let lastPlayingState = clock.getIsPlaying();
-
-    const unsubscribe = clock.subscribe((snap) => {
-      if (snap.isPlaying !== lastPlayingState) {
-        lastPlayingState = snap.isPlaying;
-        setIsPlaying(snap.isPlaying);
-      }
-      const nowMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
-      if (snap.reason === 'raf' && nowMs - lastReactSyncWallMs < 45) {
-        return;
-      }
-      lastReactSyncWallMs = nowMs;
-      setCurrentTime(snap.currentTime);
-    });
-
-    return () => {
-      unsubscribe();
-      player.dispose();
-      playerRef.current = null;
-      urlRegistryRef.current.revokeAll();
-    };
-  }, []);
-
-  // ЕДИНЫЙ источник времени превью: таймлайн, по которому считаются и
-  // длительность (clock), и сегменты Timeline, и траектория скролла ленты.
-  // Раньше duration строился ОТДЕЛЬНО (fresh buildTimeline), а tl брал
-  // сохранённый project.timeline — при рассинхроне часы и лента разъезжались.
   const tl = useMemo(() => {
     if (!project) return [];
     return project.timeline.length > 0 ? project.timeline : buildTimeline(project.panels, audioDurations, project.voiceAssignments, project.introDuration, panelGap);
@@ -387,6 +312,33 @@ export function useEditorController(id: string) {
     };
   }, [id, loadAttempt]);
 
+  const {
+    handleSeek,
+    handleSaveRef,
+    handleUndoRef,
+    handleRedoRef,
+    handleSplitRef,
+  } = useEditorPlayback({
+    project,
+    tl,
+    duration,
+    audioBlobs,
+    introAudio,
+    outroAudio,
+    isPlaying,
+    currentTime,
+    currentTimeRef,
+    clockRef,
+    playerRef,
+    urlRegistryRef,
+    setCurrentTime,
+    setIsPlaying,
+    setAudioError,
+    setShowExport,
+    setCurrentPanelIdx,
+    setSelectedId,
+  });
+
   // Автосейв: раньше в deps не было timeline/srt/audioDurations, из-за чего после
   // перезагрузки страницы терялись субтитры и длительности озвучки.
   useEffect(() => {
@@ -423,86 +375,7 @@ export function useEditorController(id: string) {
   ]);
 
   // Синхронизируем длительность с ProjectClock и ведём воспроизведение через UnifiedAudioPlayer (Задачи 1, 9)
-  useEffect(() => {
-    clockRef.current.setDuration(duration);
-  }, [duration]);
-
-  useEffect(() => {
-    const player = playerRef.current;
-    if (!player || !project) return;
-    if (!isPlaying) {
-      player.pause();
-      return;
-    }
-    if (!duration || duration <= 0 || !isFinite(duration)) {
-      clockRef.current.pause('pause');
-      return;
-    }
-
-    const effectiveBlobs = new Map<number, Blob>(audioBlobs);
-    for (const p of project.panels) {
-      if (!effectiveBlobs.has(p.id) && p.sourceAudioPanelId !== undefined) {
-        const parentBlob = audioBlobs.get(p.sourceAudioPanelId);
-        if (parentBlob) effectiveBlobs.set(p.id, parentBlob);
-      }
-    }
-
-    void player.syncPlayback({
-      timeline: tl,
-      introDuration: project.introDuration,
-      outroDuration: project.outroDuration,
-      introAudio,
-      outroAudio,
-      panelBlobs: effectiveBlobs,
-    });
-  }, [isPlaying, duration, tl, introAudio, outroAudio, audioBlobs, project]);
-
-  // Актуальный handleSave для хоткеев: эффект ниже намеренно без deps,
-  // поэтому состояние берём из ref. Ref объявлен до эффекта — читать его
   // в рендере-тайме (и в TDZ) больше не приходится.
-  const handleSaveRef = useRef<() => Promise<void>>(async () => {});
-  const handleUndoRef = useRef<() => void>(() => {});
-  const handleRedoRef = useRef<() => void>(() => {});
-  const handleSplitRef = useRef<() => void>(() => {});
-
-  // Hotkeys with input guard (Space, J/K/L, arrows, S for split, Ctrl+Z / Ctrl+Shift+Z, Этап 10 п. 95; Задача 1)
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement;
-      const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable;
-      if (isInput) {
-        if (!((e.metaKey || e.ctrlKey) && (e.key === 's' || e.key === 'e'))) return;
-      }
-      if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
-        e.preventDefault();
-        if (e.shiftKey) handleRedoRef.current();
-        else handleUndoRef.current();
-        return;
-      }
-      if (e.code === 'Space' || (!e.metaKey && !e.ctrlKey && e.key.toLowerCase() === 'k')) {
-        e.preventDefault();
-        clockRef.current.togglePlayPause();
-      } else if (e.code === 'ArrowLeft' || (!e.metaKey && !e.ctrlKey && e.key.toLowerCase() === 'j')) {
-        e.preventDefault();
-        clockRef.current.seek(Math.max(0, clockRef.current.getTime() - 5), 'seek');
-      } else if (e.code === 'ArrowRight' || (!e.metaKey && !e.ctrlKey && e.key.toLowerCase() === 'l')) {
-        e.preventDefault();
-        clockRef.current.seek(Math.min(duration, clockRef.current.getTime() + 5), 'seek');
-      } else if (!e.metaKey && !e.ctrlKey && e.key.toLowerCase() === 's') {
-        e.preventDefault();
-        handleSplitRef.current();
-      } else if ((e.metaKey || e.ctrlKey) && e.key === 's') {
-        e.preventDefault();
-        void handleSaveRef.current();
-      } else if ((e.metaKey || e.ctrlKey) && e.key === 'e') {
-        e.preventDefault();
-        setShowExport(true);
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [duration]);
-
   const handleSave = async () => {
     if (!project) return;
     setSaveStatus('saving');
@@ -538,6 +411,92 @@ export function useEditorController(id: string) {
       updatedAt: Date.now(),
     });
   };
+
+  const { currentScenarioText, handleGapChange, applyIntroOutroChange } = useEditorSrtOps({
+    project,
+    audioDurations,
+    updateProject,
+  });
+
+  const {
+    resolveLLMConfig,
+    targetPreviousTexts,
+    handleGenerateIntro,
+    handleGenerateOutro,
+    handleIntroOutroAI,
+    handleVoiceIntroOutro,
+    handleClearIntroOutro,
+    handleImportIntroAudio,
+    handleImportOutroAudio,
+    handleClearIntroAudio,
+    handleClearOutroAudio,
+  } = useEditorDialogue({
+    project,
+    applyIntroOutroChange,
+    setNotice,
+    setAudioError,
+    setAudioProgress,
+    setIsGeneratingIntro,
+    setVoicingIntroOutro,
+    setIntroAudio,
+    setIntroAudioDuration,
+    setOutroAudio,
+    setOutroAudioDuration,
+  });
+
+  const {
+    handleGenerateAudio,
+    handleGenerateSEO,
+    existingAudioIds,
+    handleImportAudio,
+    handleUndoLastAudioImport,
+    handleRegeneratePanel,
+  } = useEditorAudioOps({
+    project,
+    audioBlobs,
+    audioFull,
+    audioDurations,
+    panelGap,
+    duration,
+    voiceButton,
+    tl,
+    lastImportUndo,
+    isGeneratingAudio,
+    setGeneratingSEO,
+    updateProject,
+    resolveLLMConfig,
+    targetPreviousTexts,
+    setAudioBlobs,
+    setAudioFull,
+    setAudioDurations,
+    setIntroAudio,
+    setIntroAudioDuration,
+    setOutroAudio,
+    setOutroAudioDuration,
+    setIsGeneratingAudio,
+    setAudioDone,
+    setAudioTotal,
+    setAudioProgress,
+    setAudioError,
+    setNotice,
+    setSaveStatus,
+    setLastImportUndo,
+  });
+
+  const { handleTranslateScenario, handleApplyScenario } = useEditorScenario({
+    project,
+    images,
+    updateProject,
+    resolveLLMConfig,
+    setNotice,
+    setAudioBlobs,
+    setAudioFull,
+    setAudioDurations,
+    setSelectedId,
+    setCurrentPanelIdx,
+    setShowScenario,
+  });
+
   const handleAddImages = async (fileList: FileList | File[]) => {
     if (!project) return;
     const files = Array.from(fileList).filter(file => file.type.startsWith('image/'));
@@ -578,1199 +537,84 @@ export function useEditorController(id: string) {
     }
   };
 
-  const resolveLLMConfig = () => {
-    const settings = getSettings();
-    const requestedId = project?.settings.llmProvider || settings.defaultLLMProvider || 'openrouter';
-    const provider = getLLMProvider(requestedId)
-      || getLLMProvider(settings.defaultLLMProvider)
-      || getLLMProvider('openrouter')!;
-    const llmId = provider.id;
-    const customRaw = typeof window !== 'undefined' ? (localStorage.getItem('mvs-info:custom-llm-config') || localStorage.getItem('custom-llm-config')) : null;
-    let baseUrl: string | undefined;
-    const requestedModel = project?.settings.visionModel || settings.defaultVisionModel;
-    let model = resolveLLMVisionModel(provider, requestedModel) || provider.defaultModel;
-    if (customRaw && llmId === 'custom') {
-      try {
-        const cfg = JSON.parse(customRaw);
-        baseUrl = cfg.baseUrl || baseUrl;
-        model = cfg.model || model;
-      } catch {}
-    }
-    return { provider, llmId, baseUrl, model, accountId: settings.cloudflareAccountId, settings };
-  };
-
-  /** Имя канала для fallback-текстов: project.settings.channelName →
-   *  настройки приложения → siteName → 'Manga Voice Studio'. */
-  const resolveChannel = () => {
-    if (!project) return undefined;
-    return resolveChannelName(project, getSettings());
-  };
-
-  const handleGenerateIntro = async () => {
-    if (!project) return;
-    const keys = getAllKeys();
-    const { provider, llmId, baseUrl, model, accountId } = resolveLLMConfig();
-    const apiKey = keys[llmId] || keys[provider?.id || ''] || (llmId === 'gemini' ? keys['google-ai'] : '');
-    if (!provider || !apiKey) {
-      applyIntroOutroChange({ intro: generateFallbackIntro(project.panels, resolveChannel()) });
-      return;
-    }
-    setIsGeneratingIntro(true);
-    try {
-      const text = await generateIntro(project.sceneDescription || project.panels.map(p => p.dialogue).join(' '), project.characters.map(c => c.name), provider, { apiKey, model, baseUrl, accountId, temperature: 0.8 });
-      applyIntroOutroChange({ intro: text });
-    } catch {
-      applyIntroOutroChange({ intro: generateFallbackIntro(project.panels, resolveChannel()) });
-    } finally {
-      setIsGeneratingIntro(false);
-    }
-  };
-
-  const handleGenerateOutro = async () => {
-    if (!project) return;
-    const keys = getAllKeys();
-    const { provider, llmId, baseUrl, model, accountId, settings } = resolveLLMConfig();
-    const apiKey = keys[llmId] || keys[provider?.id || ''] || (llmId === 'gemini' ? keys['google-ai'] : '');
-    if (!provider || !apiKey) {
-      applyIntroOutroChange({ outro: generateFallbackOutro(project.panels, resolveChannel()) });
-      return;
-    }
-    setIsGeneratingIntro(true);
-    try {
-      const text = await generateOutro(resolveChannel() || settings.siteName, settings.ctaType, provider, { apiKey, model, baseUrl, accountId });
-      applyIntroOutroChange({ outro: text });
-    } catch {
-      applyIntroOutroChange({ outro: generateFallbackOutro(project.panels, resolveChannel()) });
-    } finally {
-      setIsGeneratingIntro(false);
-    }
-  };
-
-  /**
-   * Модалка «Интро/Аутро» → «Сгенерировать AI»: оба текста по панелям.
-   * Без ключа — без alert: пустые поля заполняются шаблоном (с именем
-   * канала), заполненные — notice о причине.
-   */
-  const handleIntroOutroAI = async () => {
-    if (!project) return;
-    const keys = getAllKeys();
-    const { provider, llmId, baseUrl, model, accountId, settings } = resolveLLMConfig();
-    const apiKey = keys[llmId] || keys[provider?.id || ''] || (llmId === 'gemini' ? keys['google-ai'] : '');
-    const channel = resolveChannel();
-    if (!provider || !apiKey) {
-      const patch: { intro?: string; outro?: string } = {};
-      if (!project.intro.trim()) { patch.intro = generateFallbackIntro(project.panels, channel); }
-      if (!project.outro.trim()) { patch.outro = generateFallbackOutro(project.panels, channel); }
-      if (patch.intro || patch.outro) {
-        applyIntroOutroChange(patch);
-        setNotice('Ключ AI не добавлен — пустым интро/аутро поставлен шаблон. Для генерации по панелям добавьте ключ в «Настройках».');
-      } else {
-        setNotice('Ключ AI не добавлен — сгенерировать текст интро/аутро нельзя. Добавьте ключ в «Настройках» или введите текст вручную.');
-      }
-      return;
-    }
-    setIsGeneratingIntro(true);
-    try {
-      const [introText, outroText] = await Promise.all([
-        generateIntro(project.sceneDescription || project.panels.map(p => p.dialogue).join(' '), project.characters.map(c => c.name), provider, { apiKey, model, baseUrl, accountId, temperature: 0.8 }),
-        generateOutro(channel || settings.siteName, settings.ctaType, provider, { apiKey, model, baseUrl, accountId }),
-      ]);
-      applyIntroOutroChange({ intro: introText, outro: outroText });
-    } catch {
-      applyIntroOutroChange({
-        intro: project.intro.trim() ? project.intro : generateFallbackIntro(project.panels, channel),
-        outro: project.outro.trim() ? project.outro : generateFallbackOutro(project.panels, channel),
-      });
-      setNotice('Не удалось сгенерировать текст интро/аутро — пустым полям поставлен шаблон.');
-    } finally {
-      setIsGeneratingIntro(false);
-    }
-  };
-
-  /** Модалка «Интро/Аутро» → «Озвучить»: TTS только для intro/outro. */
-  const handleVoiceIntroOutro = async () => {
-    if (!project) return;
-    if (!project.intro.trim() && !project.outro.trim()) {
-      setNotice('Озвучивать нечего: тексты интро и аутро пустые.');
-      return;
-    }
-    const ttsId = resolveTTSProviderId(project.settings.ttsProvider, getSettings().defaultTTSProvider);
-    if (!ttsId) {
-      setNotice('Не выбран TTS-провайдер. Откройте «Голоса» и выберите его.');
-      return;
-    }
-    setVoicingIntroOutro(true);
-    setAudioProgress('Озвучка интро/аутро…');
-    try {
-      const result = await generateAllAudio({
-        projectId: project.id,
-        panels: [],
-        voiceAssignments: project.voiceAssignments,
-        intro: project.intro,
-        outro: project.outro,
-        ttsProviderId: ttsId,
-        model: project.settings.ttsModel || undefined,
-        language: project.settings.ttsLanguage || 'ru',
-        speed: project.settings.ttsSpeed,
-        previousTexts: {},
-      });
-      const durationPatch: { introDuration?: number; outroDuration?: number } = {};
-      if (result.introAudio) {
-        setIntroAudio(result.introAudio);
-        const dur = roundMediaDuration(await getAudioDuration(result.introAudio));
-        setIntroAudioDuration(dur);
-        durationPatch.introDuration = dur;
-      }
-      if (result.outroAudio) {
-        setOutroAudio(result.outroAudio);
-        const dur = roundMediaDuration(await getAudioDuration(result.outroAudio));
-        setOutroAudioDuration(dur);
-        durationPatch.outroDuration = dur;
-      }
-      if (Object.keys(durationPatch).length > 0) {
-        applyIntroOutroChange(durationPatch);
-      }
-      if (result.errors.length > 0) {
-        setAudioError(result.errors[0] + (result.errors.length > 1 ? `\nЕщё ошибок: ${result.errors.length - 1}.` : ''));
-      } else {
-        setAudioProgress('Интро/аутро озвучены, сохранено в OPFS.');
-        setTimeout(() => setAudioProgress(''), 3000);
-      }
-    } catch (e: unknown) {
-      setAudioError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setVoicingIntroOutro(false);
-    }
-  };
-
-  /** Модалка «Интро/Аутро» → «Очистить»: тексты в ноль, длительности — дефолт. */
-  const handleClearIntroOutro = () => {
-    applyIntroOutroChange({ intro: '', outro: '', introDuration: 8, outroDuration: 5 });
-  };
-  const handleImportIntroAudio = async (file: File) => {
-    if (!project) return;
-    const rawDuration = await getImportedAudioDuration(file);
-    const duration = roundMediaDuration(rawDuration);
-    await saveProjectIntroAudio(project.id, file);
-    setIntroAudio(file);
-    setIntroAudioDuration(duration);
-    applyIntroOutroChange({ introDuration: duration });
-    setNotice(`Аудио интро загружено: ${duration.toFixed(2)} с.`);
-  };
-  const handleImportOutroAudio = async (file: File) => {
-    if (!project) return;
-    const rawDuration = await getImportedAudioDuration(file);
-    const duration = roundMediaDuration(rawDuration);
-    await saveProjectOutroAudio(project.id, file);
-    setOutroAudio(file);
-    setOutroAudioDuration(duration);
-    applyIntroOutroChange({ outroDuration: duration });
-    setNotice(`Аудио аутро загружено: ${duration.toFixed(2)} с.`);
-  };
-  const handleClearIntroAudio = async () => {
-    if (!project) return;
-    await deleteProjectAudio(project.id, 'intro');
-    setIntroAudio(null);
-    setIntroAudioDuration(null);
-    setNotice('Аудио интро удалено.');
-  };
-  const handleClearOutroAudio = async () => {
-    if (!project) return;
-    await deleteProjectAudio(project.id, 'outro');
-    setOutroAudio(null);
-    setOutroAudioDuration(null);
-    setNotice('Аудио аутро удалено.');
-  };
-
-  /**
-   * Снимок текстов для мягкой миграции. Панели, которые сейчас переозвучиваются,
-   * исключаем, чтобы «Переозвучить» не вернуло старый файл без подписи.
-   */
-  const targetPreviousTexts = (excludeIds?: number[]): Record<number, string> | undefined => {
-    if (!project) return undefined;
-    const snapshot = project.audioTexts;
-    if (!snapshot) return undefined;
-    if (!excludeIds?.length) return snapshot;
-    const filtered: Record<number, string> = {};
-    for (const [id, text] of Object.entries(snapshot)) {
-      if (!excludeIds.includes(Number(id))) filtered[Number(id)] = text;
-    }
-    return filtered;
-  };
-
-  /** Общий путь: генерация (всех панелей или только выбранных) + обновление таймлайна. */
-  const runAudioGeneration = async (
-    onlyPanelIds?: number[],
-    options?: { forceRegenerate?: boolean; providerId?: string }
-  ) => {
-    if (!project) return;
-    setAudioError(null);
-    const ttsId = resolveTTSProviderId(
-      project.settings.ttsProvider,
-      getSettings().defaultTTSProvider,
-      options?.providerId
-    );
-    if (!ttsId) {
-      setAudioError('Не выбран TTS-провайдер. Откройте «Голоса» и выберите его.');
-      return;
-    }
-    const panels = onlyPanelIds
-      ? project.panels.filter(p => onlyPanelIds.includes(p.id))
-      : project.panels;
-
-    setIsGeneratingAudio(true);
-    setAudioDone(0);
-    setAudioTotal(panels.length || project.panels.length);
-    setAudioProgress('0/' + (panels.length || project.panels.length));
-
-    try {
-      const result = await generateAllAudio({
-        projectId: project.id,
-        panels: project.panels,
-        voiceAssignments: project.voiceAssignments,
-        intro: onlyPanelIds ? undefined : project.intro,
-        outro: onlyPanelIds ? undefined : project.outro,
-        ttsProviderId: ttsId,
-        model: project.settings.ttsModel || undefined,
-        language: project.settings.ttsLanguage || 'ru',
-        speed: project.settings.ttsSpeed,
-        onlyPanelIds,
-        // Явная переозвучка игнорирует и OPFS-файл, и общий TTS-кэш.
-        forceRegenerate: options?.forceRegenerate,
-        // Снимок текстов прошлой генерации: аудио без .sig используется, только
-        // если текст не менялся. Для переозвучиваемых панелей снимок не даём —
-        // иначе «Переозвучить» вернуло бы старый файл из кэша.
-        previousTexts: targetPreviousTexts(onlyPanelIds),
-        onProgress: (c, t) => {
-          setAudioDone(c);
-          setAudioTotal(t);
-          setAudioProgress(`${c}/${t}`);
-        }
-      });
-
-      // Мержим с уже имеющимся аудио, чтобы точечная переозвучка не стирала остальное
-      const blobsOnly = new Map<number, Blob>(audioBlobs);
-      const fullMap = new Map<number, { blob: Blob; duration: number }>(audioFull);
-      const newDur = new Map<number, number>(audioDurations);
-      result.panelAudios.forEach((v, k) => {
-        blobsOnly.set(k, v.blob);
-        fullMap.set(k, v);
-        newDur.set(k, v.duration);
-      });
-      result.durations.forEach((v, k) => { if (!newDur.has(k)) newDur.set(k, v); });
-
-      setAudioBlobs(blobsOnly);
-      setAudioFull(fullMap);
-      setAudioDurations(newDur);
-      let nextIntroDuration = project.introDuration;
-      let nextOutroDuration = project.outroDuration;
-      if (result.introAudio) {
-        setIntroAudio(result.introAudio);
-        const introDur = roundMediaDuration(await getAudioDuration(result.introAudio));
-        setIntroAudioDuration(introDur);
-        nextIntroDuration = introDur;
-      }
-      if (result.outroAudio) {
-        setOutroAudio(result.outroAudio);
-        const outroDur = roundMediaDuration(await getAudioDuration(result.outroAudio));
-        setOutroAudioDuration(outroDur);
-        nextOutroDuration = outroDur;
-      }
-
-      const obj: Record<number, number> = {};
-      newDur.forEach((v, k) => obj[k] = v);
-      // Финальный SRT: реальные длительности озвучки + интро/аутро проекта (Задача 12).
-      const rebuilt = rebuildSrt({
-        panels: project.panels,
-        audioDurations: newDur,
-        voiceAssignments: project.voiceAssignments,
-        intro: project.intro,
-        outro: project.outro,
-        introDuration: nextIntroDuration,
-        outroDuration: nextOutroDuration,
-        panelGap,
-        realDurations: obj,
-      });
-      const tl = rebuilt.timeline;
-      const srt = rebuilt.srt;
-      // Обновляем снимок текстов для всех озвученных панелей (включая старые,
-      // которые остались в кэше) — это база для следующей мягкой миграции.
-      const audioTexts: Record<number, string> = { ...(project.audioTexts || {}) };
-      for (const panel of project.panels) audioTexts[panel.id] = panel.dialogue;
-      // Явная переозвучка (forceRegenerate): отметка «импорт» снимается только
-      // там, где TTS записал новый файл. Импортированный файл заранее не
-      // удаляется (см. handleRegeneratePanel), так что при упавшем синтезе он
-      // цел — и сообщение об ошибке это говорит. Панели, до которых синтез не
-      // дошёл, и упавшие неотличимы для отметки: обе остаются «импортом».
-      const regeneratedIds = options?.forceRegenerate ? (onlyPanelIds ?? project.panels.map(p => p.id)) : [];
-      const settled = settleImportRegeneration({
-        panels: project.panels,
-        regeneratedIds,
-        succeededIds: result.panelAudios.keys(),
-        errors: result.errors,
-      });
-      const panelsAfter = settled.panels;
-      updateProject({
-        timeline: tl,
-        srt,
-        introDuration: nextIntroDuration,
-        outroDuration: nextOutroDuration,
-        audioDurations: obj,
-        audioTexts,
-        timelineVersion: (project.timelineVersion ?? 2) + 1,
-        ...(panelsAfter !== project.panels ? { panels: panelsAfter } : {}),
-      });
-
-      if (settled.errors.length > 0) {
-        const [firstError, ...otherErrors] = settled.errors;
-        setAudioError(otherErrors.length > 0
-          ? `${firstError}\nЕщё ошибок: ${otherErrors.length}.`
-          : firstError);
-      }
-      setAudioProgress('Готово! Сохранено в OPFS.');
-      setTimeout(() => setAudioProgress(''), 3000);
-    } catch (e: unknown) {
-      setAudioError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setIsGeneratingAudio(false);
-    }
-  };
-
-  const handleGenerateAudio = async () => {
-    if (!project) return;
-    const ttsId = resolveTTSProviderId(project.settings.ttsProvider, getSettings().defaultTTSProvider);
-    if (!ttsId) {
-      setAudioError('Не выбран TTS-провайдер. Откройте «Голоса» и выберите его.');
-      return;
-    }
-    // Импортированные панели TTS не трогает (generateAllAudio их пропускает) —
-    // и в стоимость они не входят.
-    const ttsPanels = project.panels.filter(p => p.audioSource !== 'import');
-    const importedCount = project.panels.length - ttsPanels.length;
-    const cost = estimateTotalCost(ttsPanels, project.intro, project.outro, ttsId);
-    const providerName = getTTSProvider(ttsId)?.name || ttsId;
-    // Первая строка диалога — та же, что на кнопке: «Озвучить все N панелей»,
-    // «Озвучить оставшиеся N» или «Переозвучить всё».
-    const importedNote = importedCount > 0
-      ? `\nИмпортированное аудио (${importedCount}) не трогается — переозвучить его можно кнопкой «↻» у панели.`
-      : '';
-    const confirmed = confirm(
-      `${voiceButton.label}?\nПровайдер: ${providerName} (${ttsId})\nСимволов: ${cost.characters}\nСтоимость: ${cost.estimatedCost}${importedNote}\n\nOPFS кэш — повтор бесплатно. Изменённый текст/голос озвучивается заново.`
-    );
-    if (!confirmed) return;
-
-    try {
-      const saved = await saveProject(project, { allowStale: true });
-      project.revision = saved.revision;
-      setSaveStatus('saved');
-    } catch (error) {
-      setSaveStatus('unsaved');
-      setAudioError(`Не удалось сохранить настройки проекта перед озвучкой: ${error instanceof Error ? error.message : String(error)}`);
-      return;
-    }
-    await runAudioGeneration(undefined, { providerId: ttsId });
-  };
-
-  /**
-   * Генерация SEO-пакета (раньше кнопки не было вообще, а generateSEO нигде не вызывался).
-   * Если LLM недоступна — кладём шаблонный фолбэк, чтобы экспорт не был пустым.
-   */
-  const handleGenerateSEO = async () => {
-    if (!project) return;
-    const { provider, llmId, baseUrl, model, accountId } = resolveLLMConfig();
-    const keys = getAllKeys();
-    const apiKey = keys[llmId] || (provider ? keys[provider.id] : '') || (llmId === 'gemini' ? keys['google-ai'] : '');
-    const scene = project.sceneDescription || project.panels.map(p => p.dialogue).join(' ');
-
-    setGeneratingSEO(true);
-    try {
-      if (!provider || !apiKey) {
-        updateProject({ seoPackage: generateFallbackSEO(scene, project.characters.map(c => c.name), duration) });
-        return;
-      }
-      const seo = await generateSEO(scene, project.characters.map(c => c.name), duration, provider, {
-        apiKey,
-        model: model || provider.defaultModel,
-        baseUrl,
-        accountId,
-        temperature: 0.7,
-      });
-      updateProject({ seoPackage: seo });
-    } catch (e) {
-      console.warn('SEO generation failed, using fallback', e);
-      updateProject({ seoPackage: generateFallbackSEO(scene, project.characters.map(c => c.name), duration) });
-    } finally {
-      setGeneratingSEO(false);
-    }
-  };
-
-  /** id панелей, у которых сейчас есть аудио — «уже есть» для плана импорта. */
-  const existingAudioIds = useMemo(() => [...audioBlobs.keys()], [audioBlobs]);
-
-  /**
-   * Импорт аудио: applyAudioImport пишет файлы в OPFS по ключам
-   * панелей; после КАЖДОГО записанного файла отметка «импорт» сразу уходит в
-   * IDB (падение вкладки на 4-м файле оставит 3 видимых импорта, а не файлы без
-   * отметки, которые «Озвучить всё» приняло бы за устаревший TTS). Состояние
-   * редактора, таймлайн и SRT — один раз в конце.
-   */
-  const handleImportAudio = async (
-    plan: AudioImportPlan,
-    files: Map<string, File>,
-    controls: AudioImportApplyControls
-  ) => {
-    if (!project) throw new Error('Проект не загружен');
-    const snapshot = project;
-    const prevDurationsObj: Record<number, number> = {};
-    audioDurations.forEach((v, k) => { prevDurationsObj[k] = v; });
-    const undoSnap = await createAudioImportUndoSnapshot({
-      projectId: snapshot.id,
-      panels: snapshot.panels,
-      audioDurations: prevDurationsObj,
-      timeline: tl,
-      srt: snapshot.srt,
-      existingBlobs: audioBlobs,
-      targetPanelIds: plan.matches.map(m => m.target.id),
-    });
-
-    const persister = createImportPersister({
-      snapshot,
-      save: async (proj) => {
-        const saved = await saveProject(proj, { allowStale: true });
-        project.revision = saved.revision;
-      },
-      onSaveError: (e) => console.warn('Не удалось сохранить отметку импорта', e),
-    });
-
-    const report = await applyAudioImport(plan, files, {
-      projectId: snapshot.id,
-      currentPanelIds: snapshot.panels.map(p => p.id),
-      signal: controls.signal,
-      onProgress: controls.onProgress,
-      onApplied: persister.onApplied,
-    });
-    await persister.flush();
-    if (report.applied.length === 0) return report;
-
-    undoSnap.importedPanelIds = report.applied.map(a => a.panelId);
-    setLastImportUndo(undoSnap);
-
-    const merged = mergeAppliedAudio({
-      panels: snapshot.panels,
-      applied: report.applied,
-      files,
-      blobs: audioBlobs,
-      full: audioFull,
-      durations: audioDurations,
-    });
-    setAudioBlobs(merged.blobs);
-    setAudioFull(merged.full);
-    setAudioDurations(merged.durations);
-
-    const rebuilt = rebuildSrt({
-      panels: merged.panels,
-      audioDurations: merged.durations,
-      voiceAssignments: snapshot.voiceAssignments,
-      intro: snapshot.intro,
-      outro: snapshot.outro,
-      introDuration: snapshot.introDuration,
-      outroDuration: snapshot.outroDuration,
-      panelGap,
-      realDurations: merged.realDurations,
-    });
-    const eventLog = appendProjectEvent(snapshot.eventLog, {
-      type: 'import-audio',
-      summary: `Импортировано аудиофайлов: ${report.applied.length}`,
-    });
-    updateProject({
-      panels: merged.panels,
-      timeline: rebuilt.timeline,
-      srt: rebuilt.srt,
-      audioDurations: merged.durationsObj,
-      eventLog,
-    });
-    return report;
-  };
-
-  /** Отмена последнего импорта аудио (Этап 2 п. 20). */
-  const handleUndoLastAudioImport = async () => {
-    if (!project || !lastImportUndo) return;
-    const restored = await undoLastAudioImport(lastImportUndo);
-    const nextDurations = new Map<number, number>();
-    for (const [k, v] of Object.entries(restored.audioDurations)) {
-      nextDurations.set(Number(k), v);
-    }
-    const nextFull = new Map<number, { blob: Blob; duration: number }>();
-    for (const [id, blob] of restored.restoredBlobs.entries()) {
-      nextFull.set(id, { blob, duration: nextDurations.get(id) ?? 2 });
-    }
-    setAudioBlobs(restored.restoredBlobs);
-    setAudioDurations(nextDurations);
-    setAudioFull(nextFull);
-    setLastImportUndo(null);
-    const eventLog = appendProjectEvent(project.eventLog, {
-      type: 'undo-import-audio',
-      summary: 'Отменён последний импорт аудио',
-    });
-    updateProject({
-      panels: restored.panels,
-      audioDurations: restored.audioDurations,
-      timeline: restored.timeline,
-      srt: restored.srt,
-      eventLog,
-    });
-    setNotice('Последний импорт аудио отменён, прежние файлы и таймлайн восстановлены.');
-  };
-
-  /**
-   * Точечная переозвучка одной панели: чистим OPFS-аудио и синтезируем заново.
-   * Импортированное аудио — только с подтверждением из карточки панели
-   * (двойной клик по кнопке, не confirm(): в iframe-превью он молча false).
-   */
-  const handleRegeneratePanel = async (panelId: number, opts?: { confirmedImportOverwrite?: boolean }) => {
-    if (!project || isGeneratingAudio) return;
-    const panel = project.panels.find(p => p.id === panelId);
-    const imported = panel?.audioSource === 'import';
-    if (imported && !opts?.confirmedImportOverwrite) return;
-    // Импортированный файл заранее не удаляем: forceRegenerate его не читает,
-    // успешный синтез перезапишет, а упавший оставит запись пользователя целой.
-    if (!imported) {
-      try {
-        const { deleteProjectAudio } = await import('@/lib/storage/opfs');
-        await deleteProjectAudio(project.id, panelId);
-      } catch {}
-      setAudioBlobs(prev => {
-        const next = new Map(prev);
-        next.delete(panelId);
-        return next;
-      });
-    }
-    // forceRegenerate: без него при неизменном тексте и голосе генерация
-    // возвращала тот же файл из общего TTS-кэша — кнопка «Переозвучить» врала.
-    await runAudioGeneration([panelId], { forceRegenerate: true });
-  };
-
-  /**
-   * Сценарий, правило 2: реплики переводятся на язык озвучки проекта.
-   * Бросает ошибку, если провайдер/ключ недоступны — модалка применит
-   * сценарий без перевода и покажет причину баннером.
-   */
-  const handleTranslateScenario = async (texts: string[]): Promise<string[]> => {
-    if (!project) throw new Error('Проект не загружен');
-    const { provider, llmId, baseUrl, model, accountId } = resolveLLMConfig();
-    const keys = getAllKeys();
-    const apiKey = keys[llmId] || (provider ? keys[provider.id] : '') || (llmId === 'gemini' ? keys['google-ai'] : '');
-    if (!provider || !apiKey) {
-      throw new Error(`Провайдер «${provider?.name || llmId}» не настроен: добавьте его ключ в «Настройки → Провайдеры»`);
-    }
-    const language = project.settings.ttsLanguage || 'ru';
-    if (!isTranslatableLanguage(language)) {
-      throw new Error(`Перевод недоступен для языка «${language}» — выберите конкретный язык озвучки в «Голоса».`);
-    }
-    // Приоритет: модель, выбранная в модалке «Сценарий» (chatModel),
-    // затем дефолт провайдера, и лишь потом vision-модель из resolveLLMConfig.
-    const chatModel = project.settings.chatModel || provider.defaultModel || model;
-    return translateScenarioLines(texts, language, provider, { apiKey, model: chatModel, baseUrl, accountId });
-  };
-
-  /**
-   * Применение сценария к проекту:
-   * — каждая реплика становится панелью на своём изображении («Изображение N»);
-   * — пол (Жен.)/(Муж.) сохраняется на персонаже и используется для автоподбора голоса;
-   * — пауза между репликами = 0,6 с (правило 3): после чтения — переход к следующему изображению;
-   * — без лишнего текста (правило 5): сценарий управляет только панелями,
-   *   интро/аутро проекта СОХРАНЯЮТСЯ — это отдельные сущности.
-   * Старое аудио панелей удаляется — иначе в экспорт попала бы чужая озвучка.
-   */
-  const handleApplyScenario = async (lines: ScenarioLine[], translatedTexts: string[] | null, notice?: string) => {
-    if (!project) return;
-    // Без изображений индекс изображения некуда класть: clamp в
-    // scenarioToPanels не сработает, а Preview упадёт на images[-1].
-    if (images.length === 0) {
-      setNotice('Сначала загрузите хотя бы одно изображение — без картинки сценарий применить нельзя (нечему сопоставлять реплики).');
-      return;
-    }
-    const appliedLines = lines.map((line, i) =>
-      translatedTexts?.[i] ? { ...line, text: translatedTexts[i] } : line
-    );
-
-    // Голоса: у персонажа с известным полом и без назначенного голоса подбираем по полу.
-    // Персонажи берём из чистого слияния (applyScenarioToProject) — там же
-    // считается остальное; вызов дешёвый, второй проход ниже — с финальными голосами.
-    const prePatch = applyScenarioToProject(project, appliedLines, {
-      imagesCount: images.length,
-      panelGap: SCENARIO_GAP_SECONDS,
-      voiceAssignments: project.voiceAssignments,
-    });
-    const voiceAssignments = { ...project.voiceAssignments };
-    try {
-      const ttsId = resolveTTSProviderId(project.settings.ttsProvider, getSettings().defaultTTSProvider);
-      const provider = ttsId ? getTTSProvider(ttsId) : undefined;
-      const keys = getAllKeys();
-      if (provider && keys[ttsId]) {
-        const voices = await provider.getVoices(keys[ttsId]);
-        for (const char of prePatch.characters) {
-          if (!char.gender || voiceAssignments[char.name]) continue;
-          const match = voices.find(v => v.gender === char.gender) || voices.find(v => v.gender === 'neutral');
-          if (match) voiceAssignments[char.name] = match.id;
-        }
-      }
-    } catch (error) {
-      console.warn('Не удалось подобрать голоса по полу', error);
-    }
-
-    // Старое аудио больше не соответствует тексту — удаляем (OPFS + память)
-    for (const panel of project.panels) {
-      try {
-        await deleteProjectAudio(project.id, panel.id);
-      } catch {}
-    }
-    setAudioBlobs(new Map());
-    setAudioFull(new Map());
-    setAudioDurations(new Map());
-
-    // Итоговое обновление: панели + таймлайн/SRT из ТЕКУЩИХ интро/аутро
-    // проекта (они не очищаются).
-    const patch = applyScenarioToProject(project, appliedLines, {
-      imagesCount: images.length,
-      panelGap: SCENARIO_GAP_SECONDS,
-      voiceAssignments,
-    });
-    const settings = { ...project.settings, panelGap: SCENARIO_GAP_SECONDS };
-
-    updateProject({
-      panels: patch.panels,
-      characters: patch.characters,
-      voiceAssignments,
-      settings,
-      timeline: patch.timeline,
-      srt: patch.srt,
-      timelineVersion: patch.timelineVersion,
-      audioDurations: {},
-      audioTexts: {},
-    });
-    if (patch.panels.length > 0) {
-      setSelectedId(patch.panels[0].id);
-      setCurrentPanelIdx(0);
-    }
-    setShowScenario(false);
-    // Без alert: в встроенном превью диалоги могут быть запрещены браузером.
-    const messages = [notice, ...patch.warnings].filter(Boolean);
-    // Связка «сценарий → озвучка»: аудио удалено, следующий шаг — «Озвучить всё»
-    // (кнопка при этом подсвечена и показывает «Озвучить все N панелей»).
-    if (patch.panels.length > 0) {
-      messages.push('Аудио удалено. Нажмите «Озвучить всё» — сгенерируется озвучка, SRT станет финальным.');
-    }
-    const noticeText = messages.join('\n');
-    if (noticeText) setNotice(noticeText);
-  };
-
-  const handleExport = async (type: 'mp4' | 'mp3' | 'srt' | 'seo' | 'all') => {
-    if (!project) return;
-    setIsExporting(true);
-    try {
-      if (type === 'srt' || type === 'all') {
-        if (project.srt) downloadBlob(new Blob([project.srt], { type: 'text/plain' }), `${project.name}.srt`);
-        else if (type === 'srt') alert('Нет SRT, сначала озвучь');
-      }
-      if (type === 'seo' || type === 'all') {
-        if (project.seoPackage) downloadBlob(new Blob([formatSEOPackage(project.seoPackage)], { type: 'text/plain' }), `${project.name}-SEO.txt`);
-        else if (type === 'seo') alert('Нет SEO пакета');
-      }
-      if (type === 'mp3' || type === 'all') {
-        const exportTimeline =
-          project.timeline.length > 0
-            ? project.timeline
-            : buildTimeline(project.panels, audioDurations, project.voiceAssignments, project.introDuration, panelGap);
-        const resolvedPanelBlobs = new Map<number, Blob>(audioBlobs);
-        for (const p of project.panels) {
-          if (!resolvedPanelBlobs.has(p.id)) {
-            const fromOpfs = await loadProjectAudio(project.id, p.id);
-            if (fromOpfs) resolvedPanelBlobs.set(p.id, fromOpfs);
-          }
-        }
-        const placements = buildTimelineAudioPlacements({
-          timeline: exportTimeline,
-          panels: project.panels,
-          panelBlobs: resolvedPanelBlobs,
-          introAudio,
-          outroAudio,
-          introDuration: project.introDuration,
-          outroDuration: project.outroDuration,
-        });
-        if (placements.length > 0) {
-          const totalExportDuration = calculateTotalDuration(
-            exportTimeline,
-            project.introDuration,
-            project.outroDuration
-          );
-          const mixedWav = await renderExportAudioMixPreviewWav(placements, totalExportDuration);
-          if (mixedWav) {
-            downloadBlob(mixedWav, `${project.name}.wav`);
-          } else {
-            const merged = await concatenateAudioBlobs(placements.map(item => item.blob));
-            const ext = merged.type.includes('wav') ? 'wav' : merged.type.includes('mpeg') ? 'mp3' : 'bin';
-            downloadBlob(merged, `${project.name}.${ext}`);
-          }
-        } else if (type === 'mp3') alert('Сначала озвучь');
-      }
-      if (type === 'mp4') {
-        if (images.length === 0) {
-          alert('Нет изображений для видео');
-          return;
-        }
-        const tl = project.timeline.length > 0 ? project.timeline : buildTimeline(project.panels, audioDurations, project.voiceAssignments, project.introDuration, panelGap);
-
-        // Точные позиции аудио на таймлайне с учётом trimIn/trimOut, gain, fadeIn/fadeOut и mute/solo (Этап 9 п. 82, 83)
-        const resolvedPanelBlobs = new Map<number, Blob>(audioBlobs);
-        for (const p of project.panels) {
-          if (!resolvedPanelBlobs.has(p.id)) {
-            const fromOpfs = await loadProjectAudio(project.id, p.id);
-            if (fromOpfs) resolvedPanelBlobs.set(p.id, fromOpfs);
-          }
-        }
-        const audioPlacements: AudioPlacement[] = buildTimelineAudioPlacements({
-          timeline: tl,
-          panels: project.panels,
-          panelBlobs: resolvedPanelBlobs,
-          introAudio,
-          outroAudio,
-          introDuration: project.introDuration,
-          outroDuration: project.outroDuration,
-        });
-
-        if (audioPlacements.length === 0) {
-          alert('Сначала озвучь — нет аудио для видео. Экспортирую без звука.');
-        }
-
-        clearExportedFile();
-        setExportProgress(0);
-        setExportStage('Подготовка...');
-        setExportEta(null);
-        const controller = new AbortController();
-        setExportAbortController(controller);
-
-        const startTime = Date.now();
-        const { blob, mimeType } = await renderVideo({
-          images,
-          audioBlobs: audioPlacements.map(a => a.blob),
-          audioPlacements,
-          timeline: tl,
-          introText: project.intro,
-          outroText: project.outro,
-          introDuration: project.introDuration,
-          outroDuration: project.outroDuration,
-          introAudioDuration,
-          outroAudioDuration,
-          srtContent: project.srt,
-          width: 1920,
-          height: 1080,
-          fps: 30,
-          renderMode: renderSettings.renderMode,
-          stripViewport: renderSettings.stripViewport,
-          stripGap: renderSettings.stripGap,
-          panels: project.panels.map(p => ({ id: p.id, imageIndex: p.imageIndex, bbox: p.bbox, fullFrame: p.fullFrame })),
-          onAudioTrimmed: (messages) => setAudioWarnings(messages),
-          onProgress: (p, stage) => {
-            setExportProgress(p);
-            if (stage) setExportStage(stage);
-            const elapsed = (Date.now() - startTime) / 1000;
-            if (p > 0.01) {
-              setExportEta(Math.max(0, Math.round((elapsed / p) * (1 - p))));
-            }
-          },
-          signal: controller.signal,
-          preferredBackend: preferredBackend === 'auto' ? undefined : preferredBackend
-        });
-
-        const ext = mimeType.includes('mp4') ? 'mp4' : 'webm';
-        const url = URL.createObjectURL(blob);
-        setExportedFile({ blob, filename: `${project.name}.${ext}`, url });
-      }
-    } catch (e: any) {
-      clearExportedFile();
-      if (e?.name === 'AbortError') {
-        setNotice('Экспорт видео отменён.');
-      } else {
-        alert(`Ошибка экспорта: ${e.message}`);
-      }
-    } finally {
-      setIsExporting(false);
-      setExportProgress(0);
-      setExportStage('');
-      setExportEta(null);
-      setExportAbortController(null);
-    }
-  };
-
-  /** Предпрослушивание финального аудиомикса перед экспортом видео (Этап 9 п. 87). */
-  const handlePreviewAudioMix = async (): Promise<string | null> => {
-    if (!project) return null;
-    const resolvedPanelBlobs = new Map<number, Blob>(audioBlobs);
-    for (const p of project.panels) {
-      if (!resolvedPanelBlobs.has(p.id)) {
-        const fromOpfs = await loadProjectAudio(project.id, p.id);
-        if (fromOpfs) resolvedPanelBlobs.set(p.id, fromOpfs);
-      }
-    }
-    const placements = buildTimelineAudioPlacements({
-      timeline: tl,
-      panels: project.panels,
-      panelBlobs: resolvedPanelBlobs,
-      introAudio,
-      outroAudio,
-      introDuration: project.introDuration,
-      outroDuration: project.outroDuration,
-    });
-    const wavBlob = await renderExportAudioMixPreviewWav(placements, duration);
-    if (!wavBlob) return null;
-    return urlRegistryRef.current.acquire('export:mix-preview', wavBlob).url;
-  };
-
-  /** Скачивание диагностического JSON-отчёта о проекте и синхронизации (Этап 9 п. 88). */
-  const handleDownloadDiagnosticJson = () => {
-    if (!project || !healthReport) return;
-    const json = buildDiagnosticReportJson(project, healthReport);
-    downloadBlob(
-      new Blob([json], { type: 'application/json;charset=utf-8' }),
-      `${project.name || project.id}-diagnostics.json`
-    );
-  };
-
-  /** Полный экспорт проекта в .zip с проверкой контрольных сумм (Этап 8 п. 76). */
-  const handleExportProjectZip = async () => {
-    if (!project) return;
-    try {
-      const audioMap = new Map<number | 'intro' | 'outro', Blob>();
-      for (const [idKey, blob] of audioBlobs.entries()) audioMap.set(idKey, blob);
-      if (introAudio) audioMap.set('intro', introAudio);
-      if (outroAudio) audioMap.set('outro', outroAudio);
-      const { blob } = await exportProjectToZip(project, {
-        images,
-        audio: audioMap,
-      });
-      downloadBlob(blob, `${project.name || project.id}.zip`);
-    } catch (e) {
-      setNotice(`Не удалось экспортировать архив проекта: ${e instanceof Error ? e.message : String(e)}`);
-    }
-  };
-
-  /** Восстановление проекта из .zip с верификацией SHA-256 (Этап 8 п. 77). */
-  const handleImportProjectZip = async (file: File) => {
-    try {
-      const restored = await importProjectFromZip(file);
-      const nextBlobs = new Map<number, Blob>();
-      const nextDurations = new Map<number, number>();
-      for (const [slotKey, blob] of restored.audio.entries()) {
-        if (slotKey === 'intro') {
-          setIntroAudio(blob);
-          try { await saveProjectIntroAudio(restored.project.id, blob); } catch {}
-        } else if (slotKey === 'outro') {
-          setOutroAudio(blob);
-          try { await saveProjectOutroAudio(restored.project.id, blob); } catch {}
-        } else {
-          nextBlobs.set(slotKey, blob);
-          try { await saveProjectAudio(restored.project.id, slotKey, blob); } catch {}
-        }
-      }
-      for (const [k, v] of Object.entries(restored.project.audioDurations ?? {})) {
-        nextDurations.set(Number(k), v);
-      }
-      setProject(restored.project);
-      setImages(restored.imageDataUrls);
-      setAudioBlobs(nextBlobs);
-      setAudioDurations(nextDurations);
-      setShowHealthModal(false);
-      setNotice(`Проект успешно восстановлен из архива (проверено ресурсов: ${restored.verifiedCount}).`);
-    } catch (e) {
-      setNotice(`Ошибка восстановления из архива: ${e instanceof Error ? e.message : String(e)}`);
-    }
-  };
-
-  // Memoize timeline to avoid recalculating on every render (perf fix for 30+ panels)
-  /** Сценарий текущего проекта текстом: модалка открывается с этим содержимым. */
-  const currentScenarioText = useMemo(() => {
-    if (!project || project.panels.length === 0) return '';
-    const genders: Record<string, 'female' | 'male'> = {};
-    for (const c of project.characters) {
-      if (c.gender) genders[c.name] = c.gender;
-    }
-    return serializeScenario(project.panels, genders);
-  }, [project?.panels, project?.characters]);
-
-  /**
-   * Единая пересборка таймлайна + SRT (rebuildSrt): реальными длительностями
-   * там, где озвучка готова, оценкой — нет; интро/аутро с их длительностями.
-   * Вызывается из всех мест, где время/тексты меняются (пауза, интро/аутро,
-   * сценарий, озвучка) — SRT больше не «застревает» в старом состоянии.
-   */
-  const rebuildProjectSrt = (
-    patch: Partial<Pick<Project, 'intro' | 'outro' | 'introDuration' | 'outroDuration'>> & { panelGap?: number }
-  ) => {
-    if (!project) return null;
-    const merged = { ...project, ...patch };
-    const panelGap = patch.panelGap ?? project.settings.panelGap ?? DEFAULT_PANEL_GAP;
-    return rebuildSrt({
-      panels: merged.panels,
-      audioDurations,
-      voiceAssignments: merged.voiceAssignments,
-      intro: merged.intro,
-      outro: merged.outro,
-      introDuration: merged.introDuration,
-      outroDuration: merged.outroDuration,
-      panelGap,
-      realDurations: merged.audioDurations,
-    });
-  };
-
-  /**
-   * Смена паузы между репликами (ползунок в таймлайне): пересобираем
-   * сохранённый таймлайн сразу, чтобы превью и длительность отреагировали
-   * до переозвучки.
-   */
-  const handleGapChange = (gap: number) => {
-    if (!project) return;
-    const rebuilt = rebuildProjectSrt({ panelGap: gap });
-    if (!rebuilt) return;
-    updateProject({ settings: { ...project.settings, panelGap: gap }, timeline: rebuilt.timeline, srt: rebuilt.srt });
-  };
-
-  /** Смена интро/аутро (текст или длительность) → SRT пересобирается сразу. */
-  const applyIntroOutroChange = (patch: { intro?: string; outro?: string; introDuration?: number; outroDuration?: number }) => {
-    if (!project) return;
-    const rebuilt = rebuildProjectSrt(patch);
-    if (!rebuilt) return;
-    updateProject({ ...patch, timeline: rebuilt.timeline, srt: rebuilt.srt });
-  };
-
-  // --- NLE операции и стек истории Undo/Redo (Этап 6 п. 51–60) ---
-  const buildCurrentHistorySnapshot = (label: string): NleHistorySnapshot | null => {
-    if (!project) return null;
-    const durObj: Record<number, number> = {};
-    audioDurations.forEach((v, k) => { durObj[k] = v; });
-    return {
-      label,
-      timestamp: Date.now(),
-      panels: project.panels.map(p => ({ ...p, bbox: { ...p.bbox } })),
-      audioDurations: durObj,
-      timeline: tl.map(s => ({ ...s })),
-      srt: project.srt,
-      panelGap,
-    };
-  };
-
-  const applyHistorySnapshot = (snap: NleHistorySnapshot) => {
-    if (!project) return;
-    const nextDurs = new Map<number, number>();
-    for (const [k, v] of Object.entries(snap.audioDurations)) {
-      nextDurs.set(Number(k), v);
-    }
-    setAudioDurations(nextDurs);
-    updateProject({
-      panels: snap.panels,
-      audioDurations: snap.audioDurations,
-      timeline: snap.timeline,
-      srt: snap.srt,
-      ...(snap.panelGap !== undefined ? { settings: { ...project.settings, panelGap: snap.panelGap } } : {}),
-    });
-    syncHistoryAvail();
-  };
-
-  const handleUndo = () => {
-    const cur = buildCurrentHistorySnapshot('current');
-    if (!cur) return;
-    const prev = historyRef.current.undo(cur);
-    if (prev) applyHistorySnapshot(prev);
-  };
-
-  const handleRedo = () => {
-    const cur = buildCurrentHistorySnapshot('current');
-    if (!cur) return;
-    const next = historyRef.current.redo(cur);
-    if (next) applyHistorySnapshot(next);
-  };
-
-  const getNleOptions = () => ({
-    voiceAssignments: project?.voiceAssignments ?? {},
-    intro: project?.intro ?? '',
-    outro: project?.outro ?? '',
-    introDuration: project?.introDuration ?? 0,
-    outroDuration: project?.outroDuration ?? 0,
+  const {
+    handleExport,
+    handlePreviewAudioMix,
+    handleDownloadDiagnosticJson,
+    handleExportProjectZip,
+    handleImportProjectZip,
+  } = useEditorExport({
+    project,
+    audioDurations,
+    audioBlobs,
+    introAudio,
+    outroAudio,
+    images,
     panelGap,
-    currentTimelineVersion: project?.timelineVersion,
+    tl,
+    duration,
+    renderSettings,
+    introAudioDuration,
+    outroAudioDuration,
+    healthReport,
+    preferredBackend,
+    clearExportedFile,
+    urlRegistryRef,
+    setProject,
+    setImages,
+    setNotice,
+    setAudioWarnings,
+    setIsExporting,
+    setExportProgress,
+    setExportStage,
+    setExportEta,
+    setExportAbortController,
+    setExportedFile,
+    setIntroAudio,
+    setOutroAudio,
+    setAudioBlobs,
+    setAudioDurations,
+    setShowHealthModal,
   });
 
-  // Единый обработчик применения результата NLE-операций (Задача 6):
-  // все 7 NLE-операций обновляют setAudioDurations и передают одинаковый набор полей в updateProject.
-  const applyNleResult = (res: NleMutationResult) => {
-    const nextDurs = new Map<number, number>();
-    for (const [k, v] of Object.entries(res.audioDurations)) {
-      nextDurs.set(Number(k), v);
-    }
-    setAudioDurations(nextDurs);
-    updateProject({
-      panels: res.panels,
-      audioDurations: res.audioDurations,
-      timeline: res.timeline,
-      srt: res.srt,
-      timelineVersion: res.timelineVersion,
-    });
-    syncHistoryAvail();
-  };
-
-  const handleSplitActiveClip = () => {
-    if (!project) return;
-    const targetPanelId = typeof selectedId === 'number'
-      ? selectedId
-      : tl.find(s => currentTime >= s.audioStart && currentTime < s.audioEnd)?.panelId ?? null;
-    if (targetPanelId === null) return;
-    const seg = tl.find(s => s.panelId === targetPanelId);
-    if (!seg) return;
-    const segDur = Math.max(0.2, seg.audioEnd - seg.audioStart);
-    const offset = currentTime > seg.audioStart + 0.05 && currentTime < seg.audioEnd - 0.05
-      ? currentTime - seg.audioStart
-      : segDur / 2;
-
-    try {
-      const snap = buildCurrentHistorySnapshot(`Разрезание панели #${targetPanelId}`);
-      if (snap) historyRef.current.record(snap);
-      const durObj: Record<number, number> = {};
-      audioDurations.forEach((v, k) => { durObj[k] = v; });
-      const res = splitPanelAudioClip(project.panels, durObj, targetPanelId, offset, getNleOptions());
-      applyNleResult(res);
-    } catch (e) {
-      setNotice(e instanceof Error ? e.message : String(e));
-    }
-  };
-
-  const handleDeleteActiveClip = () => {
-    if (!project || typeof selectedId !== 'number') return;
-    const snap = buildCurrentHistorySnapshot(`Удаление панели #${selectedId}`);
-    if (snap) historyRef.current.record(snap);
-    const durObj: Record<number, number> = {};
-    audioDurations.forEach((v, k) => { durObj[k] = v; });
-    const res = deletePanelClipWithRipple(project.panels, durObj, selectedId, getNleOptions());
-    applyNleResult(res);
-    setSelectedId(null);
-  };
-
-  const handleDuplicateActiveClip = () => {
-    if (!project || typeof selectedId !== 'number') return;
-    const snap = buildCurrentHistorySnapshot(`Дублирование панели #${selectedId}`);
-    if (snap) historyRef.current.record(snap);
-    const durObj: Record<number, number> = {};
-    audioDurations.forEach((v, k) => { durObj[k] = v; });
-    const res = duplicatePanelClip(project.panels, durObj, selectedId, getNleOptions());
-    applyNleResult(res);
-  };
-
-  const handleReorderClip = (panelId: number, targetIdx: number) => {
-    if (!project) return;
-    const sorted = [...project.panels].sort((a, b) => a.order - b.order || a.id - b.id);
-    if (targetIdx < 0 || targetIdx >= sorted.length) return;
-    const snap = buildCurrentHistorySnapshot(`Перемещение панели #${panelId}`);
-    if (snap) historyRef.current.record(snap);
-    const durObj: Record<number, number> = {};
-    audioDurations.forEach((v, k) => { durObj[k] = v; });
-    const res = reorderPanelClips(project.panels, durObj, panelId, targetIdx, getNleOptions());
-    applyNleResult(res);
-  };
-
-  const handleMoveActiveClip = (delta: -1 | 1) => {
-    if (!project || typeof selectedId !== 'number') return;
-    const sorted = [...project.panels].sort((a, b) => a.order - b.order || a.id - b.id);
-    const fromIdx = sorted.findIndex(p => p.id === selectedId);
-    if (fromIdx < 0) return;
-    handleReorderClip(selectedId, fromIdx + delta);
-  };
-
-  const handleTogglePanelMute = (panelId: number) => {
-    if (!project) return;
-    const snap = buildCurrentHistorySnapshot(`Mute панели #${panelId}`);
-    if (snap) historyRef.current.record(snap);
-    const durObj: Record<number, number> = {};
-    audioDurations.forEach((v, k) => { durObj[k] = v; });
-    const res = togglePanelMute(project.panels, durObj, panelId, undefined, getNleOptions());
-    applyNleResult(res);
-  };
-
-  const handleTogglePanelSolo = (panelId: number) => {
-    if (!project) return;
-    const snap = buildCurrentHistorySnapshot(`Solo панели #${panelId}`);
-    if (snap) historyRef.current.record(snap);
-    const durObj: Record<number, number> = {};
-    audioDurations.forEach((v, k) => { durObj[k] = v; });
-    const res = togglePanelSolo(project.panels, durObj, panelId, undefined, getNleOptions());
-    applyNleResult(res);
-  };
-
-  const handleSetPanelAudioTrim = (panelId: number, trimIn: number, trimOut: number) => {
-    if (!project) return;
-    const snap = buildCurrentHistorySnapshot(`Trim панели #${panelId}`);
-    if (snap) historyRef.current.record(snap);
-    const durObj: Record<number, number> = {};
-    audioDurations.forEach((v, k) => { durObj[k] = v; });
-    const res = setPanelAudioTrim(project.panels, durObj, panelId, trimIn, trimOut, getNleOptions());
-    applyNleResult(res);
-  };
-
-  const handleSetPanelDurationOverride = (panelId: number, durationOverride: number | null | undefined) => {
-    if (!project) return;
-    const snap = buildCurrentHistorySnapshot(`Длительность панели #${panelId}`);
-    if (snap) historyRef.current.record(snap);
-    const durObj: Record<number, number> = {};
-    audioDurations.forEach((v, k) => { durObj[k] = v; });
-    const res = setPanelDurationOverride(project.panels, durObj, panelId, durationOverride, getNleOptions());
-    applyNleResult(res);
-  };
-
-  const handleSetPanelAudioGainAndFades = (
-    panelId: number,
-    params: { gain?: number; fadeIn?: number; fadeOut?: number }
-  ) => {
-    if (!project) return;
-    const snap = buildCurrentHistorySnapshot(`Громкость/Fade панели #${panelId}`);
-    if (snap) historyRef.current.record(snap);
-    const durObj: Record<number, number> = {};
-    audioDurations.forEach((v, k) => { durObj[k] = v; });
-    const res = setPanelAudioGainAndFades(project.panels, durObj, panelId, params, getNleOptions());
-    applyNleResult(res);
-  };
-
-  const handleJumpToHealthIssue = (issue: ProjectHealthIssue) => {
-    if (issue.panelId !== undefined && project) {
-      setSelectedId(issue.panelId);
-      const idx = project.panels.findIndex(p => p.id === issue.panelId);
-      if (idx !== -1) setCurrentPanelIdx(idx);
-    }
-    if (issue.seekTime !== undefined) {
-      handleSeek(issue.seekTime);
-    }
-    setShowHealthModal(false);
-  };
+  const {
+    buildCurrentHistorySnapshot,
+    handleUndo,
+    handleRedo,
+    handleSplitActiveClip,
+    handleDeleteActiveClip,
+    handleDuplicateActiveClip,
+    handleReorderClip,
+    handleMoveActiveClip,
+    handleTogglePanelMute,
+    handleTogglePanelSolo,
+    handleSetPanelAudioTrim,
+    handleSetPanelDurationOverride,
+    handleSetPanelAudioGainAndFades,
+    handleJumpToHealthIssue,
+  } = useEditorNle({
+    project,
+    tl,
+    panelGap,
+    audioDurations,
+    selectedId,
+    currentTime,
+    updateProject,
+    handleSeek,
+    historyRef,
+    syncHistoryAvail,
+    setSelectedId,
+    setCurrentPanelIdx,
+    setAudioDurations,
+    setShowHealthModal,
+    setNotice,
+  });
 
   useEffect(() => {
     handleUndoRef.current = handleUndo;
     handleRedoRef.current = handleRedo;
     handleSplitRef.current = handleSplitActiveClip;
   });
-
-  const handleSeek = useCallback((t: number) => {
-    if (!isFinite(t)) return;
-    playerRef.current?.pause();
-    clockRef.current.pause('pause');
-    clockRef.current.seek(t, 'seek');
-    if (!project) return;
-    const seg = tl.find(s => t >= s.audioStart && t < s.audioEnd);
-    if (seg) {
-      const idx = project.panels.findIndex(p => p.id === seg.panelId);
-      if (idx !== -1) {
-        setCurrentPanelIdx(idx);
-        setSelectedId(seg.panelId);
-      }
-    }
-  }, [project, tl]);
-
   const selectedPanel = project && selectedId !== null && typeof selectedId === 'number'
     ? project.panels.find(p => p.id === selectedId) ?? null
     : null;
