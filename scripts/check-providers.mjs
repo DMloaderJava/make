@@ -162,7 +162,10 @@ const rendered = {
 };
 
 const write = process.argv.includes('--write');
-let readme = readFileSync(README, 'utf8');
+// Переводы строк нормализуем к LF: `.gitattributes` объявляет `* text=auto`,
+// поэтому на Windows README выкладывается с CRLF, а блоки рендерятся с `\n`.
+// Без нормализации сверка падала на Windows при побайтно совпадающем тексте.
+let readme = readFileSync(README, 'utf8').replace(/\r\n?/g, '\n');
 const problems = [];
 
 for (const kind of Object.keys(MARKERS)) {

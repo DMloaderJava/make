@@ -45,7 +45,10 @@ test('desktop: main-процесс не зависит от npm в упаков�
   // не подходит («в упакованном приложении npm может отсутствовать»), и это
   // объяснение не должно ронять проверку. Строки не трогаются, поэтому
   // `spawn('npm', …)` в dev-ветке по-прежнему виден.
-  const main = stripComments(readFileSync(join(root, 'electron/main.js'), 'utf8'));
+  // Переводы строк нормализуем: `.gitattributes` объявляет `* text=auto`, поэтому
+  // на Windows-раннере файл выкладывается с CRLF, и поиск подстроки с `\n`
+  // не находил прод-бранч (тест падал только в CI, локально на Linux — нет).
+  const main = stripComments(readFileSync(join(root, 'electron/main.js'), 'utf8')).replace(/\r\n?/g, '\n');
   const branchStart = main.indexOf('} else {\n    let nextBin');
   assert.notEqual(branchStart, -1, 'не найден прод-бранч запуска Next');
   const prodBranch = main.slice(branchStart);
