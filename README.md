@@ -120,6 +120,13 @@ npm run desktop:build     # установщики/образы (AppImage, porta
   ↓ MP4/WEBM + MP3 + SRT + SEO
 ```
 
+Сам редактор разложен по слоям в `src/components/studio/editor/`: `page.tsx` (16
+строк) только вызывает `useEditorController(id)` и рендерит `EditorView`; контроллер
+собирает независимые хуки — загрузка проекта (`useEditorProjectLoader`), автосейв
+(`useEditorPersistence`), озвучка (`useEditorAudioOps`), NLE (`useEditorNle`), экспорт
+(`useEditorExport`), плеер и хоткеи (`useEditorPlayback`), сценарий
+(`useEditorScenario`), SRT (`useEditorSrtOps`) и модалки (`EditorModals`).
+
 ## 🚀 Быстрый старт
 
 ```bash
