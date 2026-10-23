@@ -12,7 +12,7 @@ Self-hosted веб-инструмент для автоматической ге
 ### 1. Что работает (функциональное ядро RC)
 - **Создание проекта и импорт изображений:** загрузка страниц манги и длинных webtoon-полос (PNG/JPEG/WebP) в локальное хранилище OPFS + IndexedDB (`DB_VERSION = 3`) без дублирования base64 в памяти.
 - **Сценарий и Vision-разметка:** парсер и сериализатор сценариев (`Изображение N [X..Y%]`, пол персонажа, валидация Y-диапазонов `validateYRange`), авто-перевод реплик на целевой язык озвучки.
-- **Импорт аудио v2 и TTS:** пакетный импорт `.mp3`/`.wav`/`.ogg`/`.opus`/`.m4a`/`.aac`/`.flac` (по манифесту, якорю в имени, номеру или порядку) с проверкой сигнатур, SHA-256 дедупликацией, проверкой квоты хранилища и откатом последнего импорта; генерация озвучки через 15+ TTS-провайдеров с OPFS-кэшированием.
+- **Импорт аудио v2 и TTS:** пакетный импорт `.mp3`/`.wav`/`.ogg`/`.opus`/`.m4a`/`.aac`/`.flac` (по манифесту, якорю в имени, номеру или порядку) с проверкой сигнатур, SHA-256 дедупликацией, проверкой квоты хранилища и откатом последнего импорта; генерация озвучки через 15 TTS-провайдеров реестра с OPFS-кэшированием.
 - **Единый таймлайн и NLE-операции:** канонический расчёт `SyncTimeline` и `SRT` (`invalidateAndRebuildTimeline`) с монотонным `timelineVersion`, единый источник времени `ProjectClock`, перетаскивание клипов (`drag-and-drop` с магнитной привязкой `snapTimeToTargets`), визуальные ручки обрезки `trimIn`/`trimOut`, `split`, `mute`/`solo`, `gain`/`fadeIn`/`fadeOut` и стек `Undo/Redo` (`HistoryManager`).
 - **Синхронное превью (`panels` и `strip`):** единое ядро камеры `sampleCameraFrame` для постраничного режима (`panels`) и вертикальной ленты (`strip`, `gapMode: 'hold'`), двусторонняя подсветка связанных видео- и аудиоклипов (`selected`), селектор шапки через `useSyncExternalStore`.
 - **Экспорт:** рендер видео 1920×1080 в MP4 (`WebCodecs` + `mediabunny` H.264/AAC) или WebM (`Canvas` + `MediaRecorder` VP8/VP9 + Opus) с побитовым совпадением команд отрисовки с `Preview`, предпрослушивание финального аудиомикса (`renderExportAudioMixPreviewWav`), выгрузка `.wav`/`.mp3`, `.srt` и SEO-пакета.
@@ -342,8 +342,8 @@ STT-провайдеры доступны как справка и как опц
 ## 🔧 Что в коде для провайдеров
 
 - `lib/providers/links.ts` — 40+ провайдеров с keyUrl, docsUrl, limits, freeTier
-- `lib/providers/llm/catalog.ts` — 25+ LLM (OpenRouter, NVIDIA, Google, Groq, Mistral, GitHub, Cloudflare, Cohere, HF, DeepSeek, Together, Fireworks, DeepInfra, Novita, SiliconFlow, Zhipu, Moonshot, 01.AI, Perplexity, Custom...)
-- `lib/providers/tts/catalog.ts` — 15+ TTS (Gemini, ElevenLabs, Azure, Google Cloud, Speechify, OpenAI, Polly, Qwen, Cartesia, Hume, Deepgram, PlayHT, Resemble, Murf, Fish)
+- `lib/providers/registry.ts` — **единственный источник правды** о провайдерах (43 записи: 25 LLM, 15 TTS, 3 STT) с моделями, CORS-политикой, free-tier и ссылками на ключи; `lib/providers/llm/catalog.ts` (13 реализованных LLM) и `lib/providers/tts/catalog.ts` (15 TTS) — его проекции
+- таблицы провайдеров ниже генерируются из реестра (`npm run gen:providers`), их совпадение проверяет `npm run check:providers`
 - `components/settings/ProviderList.tsx` — строки вместо карточек, тест, ссылка на ключ, graphite+amber
 - `app/settings/page.tsx` — minimal header + ProviderList
 
