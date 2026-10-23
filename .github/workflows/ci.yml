@@ -5,6 +5,10 @@ on:
     branches: ['**']
   pull_request:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify:
     # Windows проверяем отдельно: пути, npm-скрипты и .bat-лаунчеры ломаются
@@ -14,6 +18,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -49,11 +54,49 @@ jobs:
         if: runner.os == 'Linux'
         run: npm run smoke:editor
 
+      # Windows: сокращённый сценарий (загрузка → сценарий → импорт WAV → экспорт).
+      # Pointer-тесты NLE и попиксельное сравнение кадров на headless Windows
+      # нестабильны из-за синтетических pointer-событий, а не из-за продукта.
+      - name: "Smoke — редактор в Chromium (сокращённый, Windows)"
+        if: runner.os == 'Windows'
+        run: npm run smoke:editor -- --quick
+
       # Кроссплатформенные проверки (node, без pwsh): версия в package.json не
-      # разъехалась по баннерам лаунчеров/README/electron-моста, а .bat соблюдают
-      # правила npm-флагов, delayed expansion и %ERRORLEVEL% вне блоков.
+      # разъехалась по баннерам лаунчеров/README/electron-моста, таблицы
+      # провайдеров в README совпадают с реестром, .bat соблюдают правила
+      # npm-флагов, delayed expansion и %ERRORLEVEL% вне блоков.
       # На Windows шаг читает те же файлы с CRLF — это заодно проверка .gitattributes.
-      - name: Проверки согласованности (версии, лаунчеры)
-        run: npm run check:versions && npm run check:launchers
+      - name: Проверки согласованности (версии, провайдеры, лаунчеры)
+        run: npm run check:versions && npm run check:providers && npm run check:launchers
 
+  # Переносная desktop-сборка (Electron + Next standalone): артефакт AppImage.
+  # Код-подпись не выполняется — вне scope стабилизации.
+  desktop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Здесь postinstall Electron нужен: electron-builder упаковывает бинарь.
+      - name: Установка зависимостей
+        run: npm ci --no-audit --no-fund
+
+      - name: Сборка Next
+        run: npm run build
+
+      - name: Упаковка desktop (AppImage)
+        run: npx electron-builder --linux AppImage --publish never
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-linux
+          path: |
+            release/*.AppImage
+            release/latest-linux.yml
+          if-no-files-found: error
+          retention-days: 14

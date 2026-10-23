@@ -104,13 +104,13 @@
 
 ---
 
-## L-11. Автоматический браузерный smoke-тест (`npm run smoke:editor`) выполняется только на Chromium и только на Linux-CI (`if: runner.os == 'Linux'`)
+## L-11. Браузерный smoke-тест (`npm run smoke:editor`) выполняется только на Chromium: полный — на Linux-CI, сокращённый — на Windows-CI
 
-- **Что не работает:** E2E браузерный smoke-тест `npm run smoke:editor` (`scripts/smoke-editor.mjs`) запускает и проверяет полный цикл редактора только в headless Chromium (`playwright-core` + `@sparticuz/chromium`) и в GitHub Actions выполняется только на Linux-раннере (`if: runner.os == 'Linux'`), но не прогоняется автоматически в Safari (WebKit), Firefox (Gecko) и на `windows-latest`.
-- **Почему:** Chromium является единственным браузером с полной поддержкой OPFS (`createWritable`), WebCodecs (`VideoEncoder`/`AudioEncoder`) и предсказуемой работой `MediaRecorder` (`video/webm;codecs=vp8,opus` / `vp9,opus`), а пакет `@sparticuz/chromium` поставляет предсобранный бинарник Chromium только под Linux x86_64/arm64.
-- **Обход:** При изменениях в аудио- или канвас-пайплайне проверять Firefox вручную согласно матрице поддерживаемых браузеров в `README.md`; на Windows для локального прогона `smoke:editor` задать переменную окружения `CHROMIUM_PATH` с путём к установленному `chrome.exe` / `msedge.exe`.
+- **Что не работает:** E2E браузерный smoke-тест `npm run smoke:editor` (`scripts/smoke-editor.mjs`) запускает и проверяет полный цикл редактора только в headless Chromium. На `ubuntu-latest` прогоняется полный сценарий, на `windows-latest` — сокращённый (`npm run smoke:editor -- --quick`). В Safari (WebKit) и Firefox (Gecko) тест не прогоняется автоматически.
+- **Почему:** Chromium является единственным браузером с полной поддержкой OPFS (`createWritable`), WebCodecs (`VideoEncoder`/`AudioEncoder`) и предсказуемой работой `MediaRecorder` (`video/webm;codecs=vp8,opus` / `vp9,opus`). На headless Windows синтетические pointer-события и попиксельное сравнение кадров Preview/Export дают ложные падения, не связанные с продуктом, поэтому `--quick` оставляет загрузку PNG, применение сценария, импорт WAV, seek/Play и экспорт WebM ≤ 3 с, но пропускает pointer-тесты NLE и снятие кадров.
+- **Обход:** Браузер ищется автоматически: `CHROMIUM_PATH` → системный Chrome/Chromium/Edge (Linux, macOS, Windows) → `@sparticuz/chromium` (только Linux). Для ручной проверки Firefox — по матрице поддерживаемых браузеров в `README.md`.
 - **Планируется ли фикс:** Неизвестно (зависит от появления кроссбраузерного WebCodecs в Firefox/Safari).
-- **Как воспроизвести:** Выполнить `npm run smoke:editor` на Linux (или проверить условие `if: runner.os == 'Linux'` в `.github/workflows/ci.yml`) — скрипт запускает headless Chromium и проверяет загрузку PNG, сценарий, импорт WAV, pointer-события drag-and-drop и trim-ручек, seek/Play/Pause и экспорт WebM ≤ 3 с.
+- **Как воспроизвести:** `npm run smoke:editor` (полный, Linux) или `npm run smoke:editor -- --quick` (сокращённый, Windows/macOS) — скрипт находит браузер, поднимает `next start` и проверяет соответствующий набор шагов.
 
 ---
 

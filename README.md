@@ -30,7 +30,7 @@ Self-hosted веб-инструмент для автоматической ге
 | **Safari (macOS / iOS)** | **Не поддерживается** | Нестабильная работа `OfflineAudioContext` на длинных дорожках и ограничения OPFS/MediaRecorder (см. `L-2`, `L-11` в [`known-limits.md`](./known-limits.md)) |
 
 ### 4. Как проверить локально
-> Для запуска `npm run smoke:editor` через `@sparticuz/chromium` на Linux рекомендуется **Node.js ≥ 22.17** (или **24+**, как в `.github/workflows/ci.yml`), либо установленный системный Chromium с переменной `CHROMIUM_PATH` (см. `L-13` в [`known-limits.md`](./known-limits.md)).
+> `npm run smoke:editor` сам находит браузер: `CHROMIUM_PATH` → системный Chrome/Chromium/Edge (Linux, macOS, Windows) → `@sparticuz/chromium` (только Linux; рекомендуется **Node.js ≥ 22.17**, см. `L-13` в [`known-limits.md`](./known-limits.md)). На headless Windows используйте сокращённый прогон `npm run smoke:editor -- --quick`: он оставляет загрузку, сценарий, импорт WAV, seek/Play и экспорт, но пропускает pointer-тесты NLE и попиксельное сравнение кадров, которые нестабильны из-за синтетических pointer-событий, а не из-за продукта.
 
 ```bash
 # 1. Установка зависимостей (с пропуском скачивания бинарника Electron при работе в веб-режиме)
@@ -44,8 +44,15 @@ npm run verify
 #  seek/Play/Pause, сохраняет кадры Preview/Export в artifacts/smoke-editor/ и экспортирует WebM ≤ 3 с)
 npm run smoke:editor
 
-# 4. Опциональный автономный smoke-тест микширования WebAudio OfflineAudioContext -> WAV
+# 4. Сокращённый браузерный smoke (Windows-CI, без pointer-тестов NLE и сравнения кадров)
+npm run smoke:editor -- --quick
+
+# 5. Опциональный автономный smoke-тест микширования WebAudio OfflineAudioContext -> WAV
 npm run smoke:audio
+
+# 6. Переносимая desktop-сборка (Electron + Next): каталог release/
+npm run desktop:pack      # только распаковка (быстрая проверка конфигурации)
+npm run desktop:build     # установщики/образы (AppImage, portable exe, dmg)
 ```
 
 ### 5. Как сообщить о проблеме (шаблон Issue)
@@ -202,9 +209,23 @@ Electron. Для веб-режима Electron не требуется, для д
 
 CI (`.github/workflows/ci.yml`) гоняет typecheck/test/lint/build на
 **ubuntu-latest и windows-latest**, поэтому Windows-регрессии не доживают до релиза.
-Плюс кроссплатформенные node-проверки (`npm run check:versions`, `npm run check:launchers`):
-версия в `package.json` не разъехалась по баннерам лаунчеров/README/electron-моста,
+Плюс кроссплатформенные node-проверки (`npm run check:versions`, `npm run check:providers`,
+`npm run check:launchers`): версия в `package.json` не разъехалась по баннерам
+лаунчеров/README/electron-моста, таблицы провайдеров в README совпадают с реестром,
 а `.bat` соблюдают правила npm-флагов, delayed expansion и `%ERRORLEVEL%` вне блоков.
+
+Браузерный e2e входит в CI на обеих ОС: полный `smoke:editor` на Linux и
+сокращённый (`--quick`) на Windows. Отдельная job **desktop** собирает AppImage
+(`electron-builder --linux AppImage`) и выкладывает его артефактом — код-подпись
+намеренно не выполняется.
+
+### Desktop-сборка (Electron)
+
+`electron/main.js` в упакованном режиме запускает Next **напрямую**
+(`ELECTRON_RUN_AS_NODE` + `next/dist/bin/next`), а не через `npm run start`:
+в переносимой сборке npm может отсутствовать. Пакет собирается с `asar: false`,
+потому что серверу нужно читать `.next` с диска. Артефакты складываются в
+`release/` (в git не попадают):
 
 `/settings` → добавь ключи (см таблицы ниже). Все в localStorage, прямые запросы из браузера для CORS-friendly.
 
@@ -538,10 +559,14 @@ npm run smoke:tts -- cartesia     # точечно по провайдеру
   проверяются только настоящим Chromium (Playwright), это отдельная задача.
 
 ### Тесты
-`npm test` (`tsx --test`) — 93 теста в 11 файлах: WAV-обёртка, определение MIME,
-раскладка и подпись аудио, лента (включая прогон по сетке раскладок), политика
-проксирования TTS и голосов, тело Cartesia, часы рендера, планировщик Web Audio,
-`check-launchers` (структура `.bat`/`.sh`) и `.sh`-лаунчеры.
+`npm test` (`node scripts/run-tests.mjs` → `tsx --test`) — **370+ тестов в 35 файлах**:
+WAV-обёртка, определение MIME, раскладка и подпись аудио, лента (включая прогон по
+сетке раскладок), политика проксирования TTS и голосов, тело Cartesia, часы рендера,
+планировщик Web Audio, реестр провайдеров (включая структурные guard-тесты),
+конфигурация desktop-сборки, `check-launchers` (структура `.bat`/`.sh`) и `.sh`-лаунчеры.
+
+Раннер сам находит `tests/**/*.test.ts` — новый файл подхватывается без правки
+скриптов (`npm test -- <подстрока>` фильтрует по имени файла).
 
 Полный прогон — `npm run verify`; то же самое CI делает на ubuntu и windows.
 Для локальной итерации «правлю — смотрю» есть `npm run verify:quick`:
@@ -809,7 +834,7 @@ npm run smoke:tts -- cartesia     # точечно по провайдеру
   для TLS), модели TTS берутся из каталога провайдеров (`defaultModel`) вместо второй карты
   хардкодов, `handleSaveRef` объявлен до эффекта хоткеев, убраны лишние `as any`,
   Cartesia умеет `ru`.
-- **Тесты**: `npm test` (`tsx --test`) — WAV-обёртка, определение MIME, раскладка аудио
+- **Тесты**: `npm test` (`scripts/run-tests.mjs` → `tsx --test`) — WAV-обёртка, определение MIME, раскладка аудио
   (`packStarts`), подпись аудио, лента и политика проксирования TTS; `npm run verify`
   теперь включает тесты **и** сборку. `tsx` — единственная dev-зависимость ради тестов:
   в проекте Node >= 20.9, а тесты импортируют TS без расширений и через `@/`-алиасы,

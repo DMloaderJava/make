@@ -24,10 +24,19 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileS
 import { createServer } from 'node:net';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 import { deflateSync } from 'node:zlib';
 
 const require = createRequire(import.meta.url);
 
+/**
+ * --quick (или SMOKE_EDITOR_QUICK=1) — сокращённый прогон для Windows-CI:
+ * остаются загрузка, сценарий, интро/аутро, импорт WAV, seek/Play и экспорт.
+ * Пропускаются pointer-тесты NLE (trim, drag-and-drop), проверка подсветки и
+ * попиксельное сравнение кадров Preview/Export: на headless Windows они
+ * нестабильны из-за синтетических pointer-событий, а не из-за продукта.
+ */
+const QUICK = process.argv.includes('--quick') || process.env.SMOKE_EDITOR_QUICK === '1';
 if (!existsSync('.next/BUILD_ID')) {
   console.error('smoke:editor — сначала выполните `npm run build` (.next/BUILD_ID не найден)');
   process.exit(1);
@@ -186,9 +195,62 @@ function stopServer() {
   });
 }
 
+
+/**
+ * Путь к Chromium/Chrome для Playwright.
+ *
+ * Linux-CI использует @sparticuz/chromium (самодостаточная сборка), Windows —
+ * установленный на runner-е Chrome/Edge; на macOS — Chrome.app. Порядок:
+ * CHROMIUM_PATH → системные пути платформы → @sparticuz (только Linux).
+ */
+async function resolveChromiumExecutable() {
+  if (process.env.CHROMIUM_PATH && existsSync(process.env.CHROMIUM_PATH)) {
+    return process.env.CHROMIUM_PATH;
+  }
+
+  const candidates = [];
+  if (process.platform === 'win32') {
+    const programFiles = process.env['PROGRAMFILES'] || 'C:\\Program Files';
+    const programFilesX86 = process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)';
+    const localAppData = process.env['LOCALAPPDATA'] || '';
+    candidates.push(
+      join(programFiles, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      join(programFilesX86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      ...(localAppData ? [join(localAppData, 'Google', 'Chrome', 'Application', 'chrome.exe')] : []),
+      join(programFilesX86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+      join(programFiles, 'Microsoft', 'Edge', 'Application', 'msedge.exe')
+    );
+  } else if (process.platform === 'darwin') {
+    candidates.push(
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      '/Applications/Chromium.app/Contents/MacOS/Chromium',
+      '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge'
+    );
+  } else {
+    candidates.push('/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome');
+  }
+
+  for (const candidate of candidates) {
+    if (candidate && existsSync(candidate)) {
+      console.log(`smoke:editor — браузер: ${candidate}`);
+      return candidate;
+    }
+  }
+
+  if (process.platform === 'linux') {
+    const chromiumMod = require('@sparticuz/chromium');
+    const sparticuzChromium = chromiumMod.default || chromiumMod;
+    return await sparticuzChromium.executablePath();
+  }
+
+  throw new Error(
+    `Chromium не найден (${process.platform}). Установите Chrome/Edge или задайте CHROMIUM_PATH.`
+  );
+}
+
 // Артефакты сохраняются внутри репозитория (`artifacts/smoke-editor`) и дублируются в `/tmp/smoke-editor-artifacts`
 const artifactsDir = resolve(process.cwd(), 'artifacts/smoke-editor');
-const tmpArtifactsDir = resolve('/tmp/smoke-editor-artifacts');
+const tmpArtifactsDir = resolve(tmpdir(), 'smoke-editor-artifacts');
 mkdirSync(artifactsDir, { recursive: true });
 mkdirSync(tmpArtifactsDir, { recursive: true });
 
@@ -209,12 +271,8 @@ try {
   if (!process.env.AWS_EXECUTION_ENV) {
     process.env.AWS_EXECUTION_ENV = 'AWS_Lambda_nodejs20.x';
   }
-  const chromiumMod = require('@sparticuz/chromium');
-  const sparticuzChromium = chromiumMod.default || chromiumMod;
   const { chromium: pwChromium } = require('playwright-core');
-
-  const executablePath =
-    process.env.CHROMIUM_PATH || (await sparticuzChromium.executablePath());
+  const executablePath = await resolveChromiumExecutable(pwChromium);
 
   browser = await pwChromium.launch({
     executablePath,
@@ -332,99 +390,108 @@ try {
   );
 
   // 6. Проверяем п. 62 (Задача 3.3.1: подсветка аудио-клипа .selected при выборе панели)
-  await page.locator('[data-video-clip-id="1"]').click();
-  const audioClip1Class = await page.locator('[data-audio-clip-id="1"]').getAttribute('class');
-  if (!audioClip1Class || !audioClip1Class.split(/\s+/).includes('selected')) {
-    throw new Error(`Ожидался класс 'selected' на [data-audio-clip-id="1"], получено: ${audioClip1Class}`);
+  if (!QUICK) {
+    await page.locator('[data-video-clip-id="1"]').click();
+    const audioClip1Class = await page.locator('[data-audio-clip-id="1"]').getAttribute('class');
+    if (!audioClip1Class || !audioClip1Class.split(/\s+/).includes('selected')) {
+      throw new Error(`Ожидался класс 'selected' на [data-audio-clip-id="1"], получено: ${audioClip1Class}`);
+    }
+    const linkedBadgeVisible = await page.locator('[data-linked-clip-highlight="1"]').isVisible();
+    if (!linkedBadgeVisible) {
+      throw new Error('Индикатор [data-linked-clip-highlight="1"] в Preview не отобразился при выборе панели #1');
+    }
+    const highlightShotPath = join(artifactsDir, 'task-3-3-1-linked-highlight.png');
+    await page.screenshot({ path: highlightShotPath, fullPage: true });
+    copyFileSync(highlightShotPath, join(tmpArtifactsDir, 'task-3-3-1-linked-highlight.png'));
+    console.log(`smoke:editor — Задача 3.3.1 (п. 62) проверена: .selected + бейдж связи (${highlightShotPath})`);
+
   }
-  const linkedBadgeVisible = await page.locator('[data-linked-clip-highlight="1"]').isVisible();
-  if (!linkedBadgeVisible) {
-    throw new Error('Индикатор [data-linked-clip-highlight="1"] в Preview не отобразился при выборе панели #1');
-  }
-  const highlightShotPath = join(artifactsDir, 'task-3-3-1-linked-highlight.png');
-  await page.screenshot({ path: highlightShotPath, fullPage: true });
-  copyFileSync(highlightShotPath, join(tmpArtifactsDir, 'task-3-3-1-linked-highlight.png'));
-  console.log(`smoke:editor — Задача 3.3.1 (п. 62) проверена: .selected + бейдж связи (${highlightShotPath})`);
 
   // 7. Проверяем Задачу 3.2.2 (п. 52): pointer-события на ручке [data-trim-handle="in"] -> trimIn и timelineVersion растут
-  await page.locator('[data-audio-clip-id="0"]').click();
-  const trimInHandle = page.locator('[data-audio-clip-id="0"] [data-trim-handle="in"]');
-  await trimInHandle.waitFor({ state: 'visible', timeout: 5_000 });
-  const versionBeforeTrim = Number(
-    await page.getByTestId('editor-root').getAttribute('data-timeline-version')
-  );
-  const trimBefore = Number(
-    await page.locator('[data-audio-clip-id="0"]').getAttribute('data-clip-trim-in')
-  );
-  const handleBox = await trimInHandle.boundingBox();
-  if (!handleBox) throw new Error('Не удалось получить boundingBox для [data-trim-handle="in"]');
-  const handleCenterX = handleBox.x + handleBox.width / 2;
-  const handleCenterY = handleBox.y + handleBox.height / 2;
-  await page.mouse.move(handleCenterX, handleCenterY);
-  await page.mouse.down();
-  await page.mouse.move(handleCenterX + 42, handleCenterY, { steps: 5 });
-  await page.mouse.up();
-  await page.waitForTimeout(100);
-
-  const versionAfterTrim = Number(
-    await page.getByTestId('editor-root').getAttribute('data-timeline-version')
-  );
-  const trimAfter = Number(
-    await page.locator('[data-audio-clip-id="0"]').getAttribute('data-clip-trim-in')
-  );
-  if (!(trimAfter > trimBefore) || !(versionAfterTrim > versionBeforeTrim)) {
-    throw new Error(
-      `Задача 3.2.2 (pointer trim): ожидался рост trimIn (${trimBefore} -> ${trimAfter}) и timelineVersion (${versionBeforeTrim} -> ${versionAfterTrim})`
+  if (!QUICK) {
+    await page.locator('[data-audio-clip-id="0"]').click();
+    const trimInHandle = page.locator('[data-audio-clip-id="0"] [data-trim-handle="in"]');
+    await trimInHandle.waitFor({ state: 'visible', timeout: 5_000 });
+    const versionBeforeTrim = Number(
+      await page.getByTestId('editor-root').getAttribute('data-timeline-version')
     );
+    const trimBefore = Number(
+      await page.locator('[data-audio-clip-id="0"]').getAttribute('data-clip-trim-in')
+    );
+    const handleBox = await trimInHandle.boundingBox();
+    if (!handleBox) throw new Error('Не удалось получить boundingBox для [data-trim-handle="in"]');
+    const handleCenterX = handleBox.x + handleBox.width / 2;
+    const handleCenterY = handleBox.y + handleBox.height / 2;
+    await page.mouse.move(handleCenterX, handleCenterY);
+    await page.mouse.down();
+    await page.mouse.move(handleCenterX + 42, handleCenterY, { steps: 5 });
+    await page.mouse.up();
+    await page.waitForTimeout(100);
+
+    const versionAfterTrim = Number(
+      await page.getByTestId('editor-root').getAttribute('data-timeline-version')
+    );
+    const trimAfter = Number(
+      await page.locator('[data-audio-clip-id="0"]').getAttribute('data-clip-trim-in')
+    );
+    if (!(trimAfter > trimBefore) || !(versionAfterTrim > versionBeforeTrim)) {
+      throw new Error(
+        `Задача 3.2.2 (pointer trim): ожидался рост trimIn (${trimBefore} -> ${trimAfter}) и timelineVersion (${versionBeforeTrim} -> ${versionAfterTrim})`
+      );
+    }
+    const trimShotPath = join(artifactsDir, 'task-3-2-2-trim-handles.png');
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.waitForTimeout(50);
+    await page.screenshot({ path: trimShotPath, fullPage: true });
+    copyFileSync(trimShotPath, join(tmpArtifactsDir, 'task-3-2-2-trim-handles.png'));
+    console.log(
+      `smoke:editor — Задача 3.2.2 (п. 52) проверена pointer-событиями: trimIn ${trimBefore} -> ${trimAfter}, timelineVersion ${versionBeforeTrim} -> ${versionAfterTrim}`
+    );
+    // Возвращаем trimIn через Undo, чтобы сохранить ровную сетку таймкодов 2.20 с
+    await page.locator('button[aria-label="Отменить действие"]').click();
+    await page.waitForTimeout(100);
+
   }
-  const trimShotPath = join(artifactsDir, 'task-3-2-2-trim-handles.png');
-  await page.evaluate(() => window.scrollTo(0, 0));
-  await page.waitForTimeout(50);
-  await page.screenshot({ path: trimShotPath, fullPage: true });
-  copyFileSync(trimShotPath, join(tmpArtifactsDir, 'task-3-2-2-trim-handles.png'));
-  console.log(
-    `smoke:editor — Задача 3.2.2 (п. 52) проверена pointer-событиями: trimIn ${trimBefore} -> ${trimAfter}, timelineVersion ${versionBeforeTrim} -> ${versionAfterTrim}`
-  );
-  // Возвращаем trimIn через Undo, чтобы сохранить ровную сетку таймкодов 2.20 с
-  await page.locator('button[aria-label="Отменить действие"]').click();
-  await page.waitForTimeout(100);
 
   // 8. Проверяем Задачу 3.2.1 (п. 51): pointer drag-and-drop клипа [data-video-clip-id="0"] на позицию #1 -> рост timelineVersion
-  const versionBeforeDrag = Number(
-    await page.getByTestId('editor-root').getAttribute('data-timeline-version')
-  );
-  const clip0Box = await page.locator('[data-video-clip-id="0"]').boundingBox();
-  const clip1Box = await page.locator('[data-video-clip-id="1"]').boundingBox();
-  if (!clip0Box || !clip1Box) throw new Error('Не найдены boundingBox видеоклипов 0 и 1');
-  await page.mouse.move(clip0Box.x + clip0Box.width / 2, clip0Box.y + clip0Box.height / 2);
-  await page.mouse.down();
-  await page.mouse.move(clip1Box.x + clip1Box.width / 2, clip1Box.y + clip1Box.height / 2, {
-    steps: 6,
-  });
-  await page.mouse.up();
-  await page.waitForTimeout(120);
-
-  const versionAfterDrag = Number(
-    await page.getByTestId('editor-root').getAttribute('data-timeline-version')
-  );
-  const clipOrderAfterDrag = await page
-    .locator('[data-video-clip-id]')
-    .evaluateAll(els => els.map(el => el.getAttribute('data-video-clip-id')));
-  if (!(versionAfterDrag > versionBeforeDrag) || clipOrderAfterDrag[0] !== '1') {
-    throw new Error(
-      `Задача 3.2.1 (pointer drag-and-drop): ожидался порядок ['1','0'] и рост timelineVersion (${versionBeforeDrag} -> ${versionAfterDrag}), получено order=${JSON.stringify(
-        clipOrderAfterDrag
-      )}`
+  if (!QUICK) {
+    const versionBeforeDrag = Number(
+      await page.getByTestId('editor-root').getAttribute('data-timeline-version')
     );
+    const clip0Box = await page.locator('[data-video-clip-id="0"]').boundingBox();
+    const clip1Box = await page.locator('[data-video-clip-id="1"]').boundingBox();
+    if (!clip0Box || !clip1Box) throw new Error('Не найдены boundingBox видеоклипов 0 и 1');
+    await page.mouse.move(clip0Box.x + clip0Box.width / 2, clip0Box.y + clip0Box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(clip1Box.x + clip1Box.width / 2, clip1Box.y + clip1Box.height / 2, {
+      steps: 6,
+    });
+    await page.mouse.up();
+    await page.waitForTimeout(120);
+
+    const versionAfterDrag = Number(
+      await page.getByTestId('editor-root').getAttribute('data-timeline-version')
+    );
+    const clipOrderAfterDrag = await page
+      .locator('[data-video-clip-id]')
+      .evaluateAll(els => els.map(el => el.getAttribute('data-video-clip-id')));
+    if (!(versionAfterDrag > versionBeforeDrag) || clipOrderAfterDrag[0] !== '1') {
+      throw new Error(
+        `Задача 3.2.1 (pointer drag-and-drop): ожидался порядок ['1','0'] и рост timelineVersion (${versionBeforeDrag} -> ${versionAfterDrag}), получено order=${JSON.stringify(
+          clipOrderAfterDrag
+        )}`
+      );
+    }
+    console.log(
+      `smoke:editor — Задача 3.2.1 (п. 51) проверена pointer-событиями: порядок ['0','1'] -> ${JSON.stringify(
+        clipOrderAfterDrag
+      )}, timelineVersion ${versionBeforeDrag} -> ${versionAfterDrag}`
+    );
+    // Возвращаем исходный порядок ['0', '1'] через Undo
+    await page.locator('button[aria-label="Отменить действие"]').click();
+    await page.waitForTimeout(100);
+
   }
-  console.log(
-    `smoke:editor — Задача 3.2.1 (п. 51) проверена pointer-событиями: порядок ['0','1'] -> ${JSON.stringify(
-      clipOrderAfterDrag
-    )}, timelineVersion ${versionBeforeDrag} -> ${versionAfterDrag}`
-  );
-  // Возвращаем исходный порядок ['0', '1'] через Undo
-  await page.locator('button[aria-label="Отменить действие"]').click();
-  await page.waitForTimeout(100);
 
   // 9. Делаем seek и Play/Pause через границу Панель 1 -> Пауза -> Панель 2 — явно ассертим рост currentTime и отсутствие ошибки AbortError ("Озвучка не удалась")
   await page.locator('[data-video-clip-id="0"]').click(); // seek к началу 1-й панели (0.400 с)
@@ -464,115 +531,119 @@ try {
     )} с -> после=${timeAfterPlay.toFixed(3)} с, ошибок=0`
   );
 
-  // 10. Задача 3.1.1: сохраняем скриншоты Preview И Export на 4 контрольных точках (intro, panel, gap, outro) в режимах panels и strip
-  const controlPoints = [
-    { name: 'intro', t: 0.2 },
-    { name: 'panel', t: 0.7 },
-    { name: 'gap', t: 1.1 },
-    { name: 'outro', t: 2.0 },
-  ];
+  if (!QUICK) {
 
-  for (const mode of ['panels', 'strip']) {
-    const modeBtnName = mode === 'strip' ? /^Лента$/i : /^Панели$/i;
-    const modeBtn = page.getByRole('button', { name: modeBtnName }).first();
-    if (await modeBtn.isVisible()) {
-      await modeBtn.click();
-      await page.waitForTimeout(150);
-    }
+    // 10. Задача 3.1.1: сохраняем скриншоты Preview И Export на 4 контрольных точках (intro, panel, gap, outro) в режимах panels и strip
+    const controlPoints = [
+      { name: 'intro', t: 0.2 },
+      { name: 'panel', t: 0.7 },
+      { name: 'gap', t: 1.1 },
+      { name: 'outro', t: 2.0 },
+    ];
 
-    const pairsForComposite = [];
-    for (const pt of controlPoints) {
-      const frames = await page.getByTestId('preview-canvas').evaluate((canvasEl, args) => {
-        const previewDataUrl =
-          typeof canvasEl.__renderPreviewFrameDataUrl === 'function'
-            ? canvasEl.__renderPreviewFrameDataUrl(args.time, args.mode)
-            : canvasEl.toDataURL('image/png');
-        const exportDataUrl =
-          typeof canvasEl.__renderExportFrameDataUrl === 'function'
-            ? canvasEl.__renderExportFrameDataUrl(args.time, args.mode)
-            : previewDataUrl;
-        return { previewDataUrl, exportDataUrl };
-      }, { time: pt.t, mode });
+    for (const mode of ['panels', 'strip']) {
+      const modeBtnName = mode === 'strip' ? /^Лента$/i : /^Панели$/i;
+      const modeBtn = page.getByRole('button', { name: modeBtnName }).first();
+      if (await modeBtn.isVisible()) {
+        await modeBtn.click();
+        await page.waitForTimeout(150);
+      }
 
-      const prevFile = join(artifactsDir, `task-3-1-1-preview-${mode}-${pt.name}.png`);
-      const expFile = join(artifactsDir, `task-3-1-1-export-${mode}-${pt.name}.png`);
-      saveDataUrlPng(frames.previewDataUrl, prevFile, tmpArtifactsDir);
-      saveDataUrlPng(frames.exportDataUrl, expFile, tmpArtifactsDir);
-      pairsForComposite.push({
-        label: `${pt.name.toUpperCase()} (t=${pt.t.toFixed(2)}s)`,
-        previewDataUrl: frames.previewDataUrl,
-        exportDataUrl: frames.exportDataUrl,
-      });
-    }
+      const pairsForComposite = [];
+      for (const pt of controlPoints) {
+        const frames = await page.getByTestId('preview-canvas').evaluate((canvasEl, args) => {
+          const previewDataUrl =
+            typeof canvasEl.__renderPreviewFrameDataUrl === 'function'
+              ? canvasEl.__renderPreviewFrameDataUrl(args.time, args.mode)
+              : canvasEl.toDataURL('image/png');
+          const exportDataUrl =
+            typeof canvasEl.__renderExportFrameDataUrl === 'function'
+              ? canvasEl.__renderExportFrameDataUrl(args.time, args.mode)
+              : previewDataUrl;
+          return { previewDataUrl, exportDataUrl };
+        }, { time: pt.t, mode });
 
-    // Сохраняем также одиночный скриншот превью для обратной совместимости и сводный коллаж Preview vs Export (4 фазы)
-    const legacyPreviewPath = join(artifactsDir, `task-3-1-1-preview-${mode}.png`);
-    await page.getByTestId('preview-canvas').screenshot({ path: legacyPreviewPath });
-    copyFileSync(legacyPreviewPath, join(tmpArtifactsDir, `task-3-1-1-preview-${mode}.png`));
-
-    const compositeDataUrl = await page.evaluate(async ({ modeName, rows }) => {
-      const cellW = 640;
-      const cellH = 360;
-      const pad = 20;
-      const headerH = 48;
-      const sheet = document.createElement('canvas');
-      sheet.width = cellW * 2 + pad * 3;
-      sheet.height = headerH + rows.length * (cellH + 34) + pad;
-      const ctx = sheet.getContext('2d');
-      ctx.fillStyle = '#0B0B0C';
-      ctx.fillRect(0, 0, sheet.width, sheet.height);
-      ctx.fillStyle = '#E8B44C';
-      ctx.font = 'bold 20px sans-serif';
-      ctx.fillText(
-        `Задача 3.1.1 — Паритет Preview (слева) и Export (справа) · режим: ${modeName}`,
-        pad,
-        32
-      );
-
-      async function loadImg(src) {
-        const im = new Image();
-        im.src = src;
-        await new Promise(r => {
-          im.onload = r;
-          im.onerror = r;
+        const prevFile = join(artifactsDir, `task-3-1-1-preview-${mode}-${pt.name}.png`);
+        const expFile = join(artifactsDir, `task-3-1-1-export-${mode}-${pt.name}.png`);
+        saveDataUrlPng(frames.previewDataUrl, prevFile, tmpArtifactsDir);
+        saveDataUrlPng(frames.exportDataUrl, expFile, tmpArtifactsDir);
+        pairsForComposite.push({
+          label: `${pt.name.toUpperCase()} (t=${pt.t.toFixed(2)}s)`,
+          previewDataUrl: frames.previewDataUrl,
+          exportDataUrl: frames.exportDataUrl,
         });
-        return im;
       }
 
-      for (let i = 0; i < rows.length; i++) {
-        const row = rows[i];
-        const yTop = headerH + i * (cellH + 34);
-        ctx.fillStyle = '#F5F5F7';
-        ctx.font = '14px monospace';
-        ctx.fillText(`Preview · ${row.label}`, pad, yTop + 18);
-        ctx.fillText(`Export · ${row.label}`, pad * 2 + cellW, yTop + 18);
+      // Сохраняем также одиночный скриншот превью для обратной совместимости и сводный коллаж Preview vs Export (4 фазы)
+      const legacyPreviewPath = join(artifactsDir, `task-3-1-1-preview-${mode}.png`);
+      await page.getByTestId('preview-canvas').screenshot({ path: legacyPreviewPath });
+      copyFileSync(legacyPreviewPath, join(tmpArtifactsDir, `task-3-1-1-preview-${mode}.png`));
 
-        const [pImg, eImg] = await Promise.all([
-          loadImg(row.previewDataUrl),
-          loadImg(row.exportDataUrl),
-        ]);
-        ctx.drawImage(pImg, pad, yTop + 24, cellW, cellH);
-        ctx.drawImage(eImg, pad * 2 + cellW, yTop + 24, cellW, cellH);
-      }
-      return sheet.toDataURL('image/png');
-    }, { modeName: mode, rows: pairsForComposite });
+      const compositeDataUrl = await page.evaluate(async ({ modeName, rows }) => {
+        const cellW = 640;
+        const cellH = 360;
+        const pad = 20;
+        const headerH = 48;
+        const sheet = document.createElement('canvas');
+        sheet.width = cellW * 2 + pad * 3;
+        sheet.height = headerH + rows.length * (cellH + 34) + pad;
+        const ctx = sheet.getContext('2d');
+        ctx.fillStyle = '#0B0B0C';
+        ctx.fillRect(0, 0, sheet.width, sheet.height);
+        ctx.fillStyle = '#E8B44C';
+        ctx.font = 'bold 20px sans-serif';
+        ctx.fillText(
+          `Задача 3.1.1 — Паритет Preview (слева) и Export (справа) · режим: ${modeName}`,
+          pad,
+          32
+        );
 
-    const compPath = join(artifactsDir, `task-3-1-1-comparison-${mode}.png`);
-    saveDataUrlPng(compositeDataUrl, compPath, tmpArtifactsDir);
-    console.log(`smoke:editor — Задача 3.1.1 (${mode}): сохранены 4 пары Preview/Export и коллаж ${compPath}`);
+        async function loadImg(src) {
+          const im = new Image();
+          im.src = src;
+          await new Promise(r => {
+            im.onload = r;
+            im.onerror = r;
+          });
+          return im;
+        }
+
+        for (let i = 0; i < rows.length; i++) {
+          const row = rows[i];
+          const yTop = headerH + i * (cellH + 34);
+          ctx.fillStyle = '#F5F5F7';
+          ctx.font = '14px monospace';
+          ctx.fillText(`Preview · ${row.label}`, pad, yTop + 18);
+          ctx.fillText(`Export · ${row.label}`, pad * 2 + cellW, yTop + 18);
+
+          const [pImg, eImg] = await Promise.all([
+            loadImg(row.previewDataUrl),
+            loadImg(row.exportDataUrl),
+          ]);
+          ctx.drawImage(pImg, pad, yTop + 24, cellW, cellH);
+          ctx.drawImage(eImg, pad * 2 + cellW, yTop + 24, cellW, cellH);
+        }
+        return sheet.toDataURL('image/png');
+      }, { modeName: mode, rows: pairsForComposite });
+
+      const compPath = join(artifactsDir, `task-3-1-1-comparison-${mode}.png`);
+      saveDataUrlPng(compositeDataUrl, compPath, tmpArtifactsDir);
+      console.log(`smoke:editor — Задача 3.1.1 (${mode}): сохранены 4 пары Preview/Export и коллаж ${compPath}`);
+    }
+
+    // Возвращаем режим panels и сохраняем финальный скриншот редактора
+    const panelsModeBtn = page.getByRole('button', { name: /^Панели$/i }).first();
+    if (await panelsModeBtn.isVisible()) {
+      await panelsModeBtn.click();
+      await page.waitForTimeout(100);
+    }
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.waitForTimeout(50);
+    const finalShotPath = join(artifactsDir, 'smoke-editor-final.png');
+    await page.screenshot({ path: finalShotPath, fullPage: true });
+    copyFileSync(finalShotPath, join(tmpArtifactsDir, 'smoke-editor-final.png'));
+
   }
-
-  // Возвращаем режим panels и сохраняем финальный скриншот редактора
-  const panelsModeBtn = page.getByRole('button', { name: /^Панели$/i }).first();
-  if (await panelsModeBtn.isVisible()) {
-    await panelsModeBtn.click();
-    await page.waitForTimeout(100);
-  }
-  await page.evaluate(() => window.scrollTo(0, 0));
-  await page.waitForTimeout(50);
-  const finalShotPath = join(artifactsDir, 'smoke-editor-final.png');
-  await page.screenshot({ path: finalShotPath, fullPage: true });
-  copyFileSync(finalShotPath, join(tmpArtifactsDir, 'smoke-editor-final.png'));
 
   // 11. Открываем Экспорт и проверяем отмену экспорта («Отменить экспорт»), затем полный экспорт видеоклипа (≤ 3 с)
   await page.getByTestId('open-export-btn').click();
