@@ -2,7 +2,7 @@
 
 Подробный гайд по Supabase, TTL 24 часа и деплою на Vercel: [DEPLOYMENT_GUIDE_RU.md](./DEPLOYMENT_GUIDE_RU.md).
 
-Self-hosted веб-инструмент для автоматической генерации озвученных видео из изображений (манга/комикс) с BYOK, 25+ LLM и 15+ TTS провайдерами, OPFS кэшем, WebCodecs MP4 и SEO-пакетом.
+Self-hosted веб-инструмент для автоматической генерации озвученных видео из изображений (манга/комикс) с BYOK: 13 LLM-провайдеров в каталоге (+12 OpenAI-совместимых через прокси/custom), 15 TTS-провайдеров, OPFS кэш, WebCodecs MP4 и SEO-пакет.
 
 ## 🏁 Release Candidate (v1.3.17 RC)
 
@@ -12,14 +12,14 @@ Self-hosted веб-инструмент для автоматической ге
 ### 1. Что работает (функциональное ядро RC)
 - **Создание проекта и импорт изображений:** загрузка страниц манги и длинных webtoon-полос (PNG/JPEG/WebP) в локальное хранилище OPFS + IndexedDB (`DB_VERSION = 3`) без дублирования base64 в памяти.
 - **Сценарий и Vision-разметка:** парсер и сериализатор сценариев (`Изображение N [X..Y%]`, пол персонажа, валидация Y-диапазонов `validateYRange`), авто-перевод реплик на целевой язык озвучки.
-- **Импорт аудио v2 и TTS:** пакетный импорт `.mp3`/`.wav`/`.ogg`/`.opus`/`.m4a`/`.aac`/`.flac` (по манифесту, якорю в имени, номеру или порядку) с проверкой сигнатур, SHA-256 дедупликацией, проверкой квоты хранилища и откатом последнего импорта; генерация озвучки через 15+ TTS-провайдеров с OPFS-кэшированием.
+- **Импорт аудио v2 и TTS:** пакетный импорт `.mp3`/`.wav`/`.ogg`/`.opus`/`.m4a`/`.aac`/`.flac` (по манифесту, якорю в имени, номеру или порядку) с проверкой сигнатур, SHA-256 дедупликацией, проверкой квоты хранилища и откатом последнего импорта; генерация озвучки через 15 TTS-провайдеров реестра с OPFS-кэшированием.
 - **Единый таймлайн и NLE-операции:** канонический расчёт `SyncTimeline` и `SRT` (`invalidateAndRebuildTimeline`) с монотонным `timelineVersion`, единый источник времени `ProjectClock`, перетаскивание клипов (`drag-and-drop` с магнитной привязкой `snapTimeToTargets`), визуальные ручки обрезки `trimIn`/`trimOut`, `split`, `mute`/`solo`, `gain`/`fadeIn`/`fadeOut` и стек `Undo/Redo` (`HistoryManager`).
 - **Синхронное превью (`panels` и `strip`):** единое ядро камеры `sampleCameraFrame` для постраничного режима (`panels`) и вертикальной ленты (`strip`, `gapMode: 'hold'`), двусторонняя подсветка связанных видео- и аудиоклипов (`selected`), селектор шапки через `useSyncExternalStore`.
 - **Экспорт:** рендер видео 1920×1080 в MP4 (`WebCodecs` + `mediabunny` H.264/AAC) или WebM (`Canvas` + `MediaRecorder` VP8/VP9 + Opus) с побитовым совпадением команд отрисовки с `Preview`, предпрослушивание финального аудиомикса (`renderExportAudioMixPreviewWav`), выгрузка `.wav`/`.mp3`, `.srt` и SEO-пакета.
 - **Хранение и диагностика:** атомарная запись в OPFS через `.tmp`, оптимистическая блокировка `revision` (`StaleProjectRevisionError`), сверка и ремонт SHA-256 манифеста (`verifyAndRepairResourceManifest`), журнал восстановления прерванного импорта (`ImportJournal`), экспорт/импорт проекта в `.zip` и модалка диагностики `Проверка` (`ProjectHealthModal`, 6 категорий).
 
 ### 2. Что не работает (известные ограничения)
-Все платформенные, браузерные, инфраструктурные и архитектурные ограничения RC (L-1..L-14) с причинами и обходными путями задокументированы в [**`known-limits.md`**](./known-limits.md).
+Все платформенные, браузерные, инфраструктурные и архитектурные ограничения RC (L-1..L-17) с причинами и обходными путями задокументированы в [**`known-limits.md`**](./known-limits.md).
 - В частности, чистая математика и конечный автомат pointer-событий для drag-and-drop клипов (п. 51) и ручек обрезки `trimIn`/`trimOut` (п. 52) вынесены в `src/lib/pipeline/timelineDrag.ts` и покрыты unit-тестами `npm test`, а реальная браузерная симуляция `page.mouse` на DOM-элементах `[data-trim-handle="in"]` и `[data-video-clip-id]` с проверкой роста `timelineVersion` в `EditorPage`, снятием кадров Preview/Export и экспортом короткого клипа (≤ 3 с) выполняется в `npm run smoke:editor` (см. `L-11`, `L-13`, `L-14`).
 
 ### 3. Поддерживаемые браузеры
@@ -30,7 +30,7 @@ Self-hosted веб-инструмент для автоматической ге
 | **Safari (macOS / iOS)** | **Не поддерживается** | Нестабильная работа `OfflineAudioContext` на длинных дорожках и ограничения OPFS/MediaRecorder (см. `L-2`, `L-11` в [`known-limits.md`](./known-limits.md)) |
 
 ### 4. Как проверить локально
-> Для запуска `npm run smoke:editor` через `@sparticuz/chromium` на Linux рекомендуется **Node.js ≥ 22.17** (или **24+**, как в `.github/workflows/ci.yml`), либо установленный системный Chromium с переменной `CHROMIUM_PATH` (см. `L-13` в [`known-limits.md`](./known-limits.md)).
+> `npm run smoke:editor` сам находит браузер: `CHROMIUM_PATH` → системный Chrome/Chromium/Edge (Linux, macOS, Windows) → `@sparticuz/chromium` (только Linux; рекомендуется **Node.js ≥ 22.17**, см. `L-13` в [`known-limits.md`](./known-limits.md)). На headless Windows используйте сокращённый прогон `npm run smoke:editor -- --quick`: он оставляет загрузку, сценарий, импорт WAV, seek/Play и экспорт, но пропускает pointer-тесты NLE и попиксельное сравнение кадров, которые нестабильны из-за синтетических pointer-событий, а не из-за продукта.
 
 ```bash
 # 1. Установка зависимостей (с пропуском скачивания бинарника Electron при работе в веб-режиме)
@@ -41,11 +41,19 @@ npm run verify
 
 # 3. Автоматический E2E браузерный smoke-тест редактора в headless Chromium
 # (проверяет загрузку 100×2000 PNG, сценарий, импорт WAV, pointer drag-and-drop и trim-ручки,
-#  seek/Play/Pause, сохраняет кадры Preview/Export в artifacts/smoke-editor/ и экспортирует WebM ≤ 3 с)
+#  seek/Play/Pause, сохраняет кадры Preview/Export в artifacts/smoke-editor/ (в git не попадают —
+#  их выгружает CI; локально дублируются в системный tmp) и экспортирует WebM ≤ 3 с)
 npm run smoke:editor
 
-# 4. Опциональный автономный smoke-тест микширования WebAudio OfflineAudioContext -> WAV
+# 4. Сокращённый браузерный smoke (Windows-CI, без pointer-тестов NLE и сравнения кадров)
+npm run smoke:editor -- --quick
+
+# 5. Опциональный автономный smoke-тест микширования WebAudio OfflineAudioContext -> WAV
 npm run smoke:audio
+
+# 6. Переносимая desktop-сборка (Electron + Next): каталог release/
+npm run desktop:pack      # только распаковка (быстрая проверка конфигурации)
+npm run desktop:build     # установщики/образы (AppImage, portable exe, dmg)
 ```
 
 ### 5. Как сообщить о проблеме (шаблон Issue)
@@ -111,6 +119,16 @@ npm run smoke:audio
 [videoEncoder] → auto: WebCodecs MP4 (H264+AAC via mediabunny) или Canvas WEBM fallback
   ↓ MP4/WEBM + MP3 + SRT + SEO
 ```
+
+Сам редактор разложен по слоям в `src/components/studio/editor/`: `page.tsx` (16
+строк) только вызывает `useEditorController(id)` и рендерит `EditorView`; контроллер
+(338 строк, без единой бизнес-операции) собирает независимые модули — состояние
+(`useEditorState`) и производные значения (`useEditorDerived`), загрузка проекта
+(`useEditorProjectLoader`), автосейв (`useEditorPersistence`), озвучка
+(`useEditorAudioOps`), импорт аудио (`useEditorAudioImport`), NLE (`useEditorNle`),
+экспорт (`useEditorExport`), плеер и хоткеи (`useEditorPlayback`), сценарий
+(`useEditorScenario`), SRT (`useEditorSrtOps`); разметка — `EditorView`,
+`EditorWorkspace` и `EditorModals`. Ни один файл редактора не длиннее 400 строк.
 
 ## 🚀 Быстрый старт
 
@@ -202,77 +220,121 @@ Electron. Для веб-режима Electron не требуется, для д
 
 CI (`.github/workflows/ci.yml`) гоняет typecheck/test/lint/build на
 **ubuntu-latest и windows-latest**, поэтому Windows-регрессии не доживают до релиза.
-Плюс кроссплатформенные node-проверки (`npm run check:versions`, `npm run check:launchers`):
-версия в `package.json` не разъехалась по баннерам лаунчеров/README/electron-моста,
+Плюс кроссплатформенные node-проверки (`npm run check:versions`, `npm run check:providers`,
+`npm run check:launchers`): версия в `package.json` не разъехалась по баннерам
+лаунчеров/README/electron-моста, таблицы провайдеров в README совпадают с реестром,
 а `.bat` соблюдают правила npm-флагов, delayed expansion и `%ERRORLEVEL%` вне блоков.
+
+Браузерный e2e входит в CI на обеих ОС: полный `smoke:editor` на Linux и
+сокращённый (`--quick`) на Windows. Отдельная job **desktop** собирает AppImage
+(`electron-builder --linux AppImage`) и выкладывает его артефактом — код-подпись
+намеренно не выполняется.
+
+### Desktop-сборка (Electron)
+
+`electron/main.js` в упакованном режиме запускает Next **напрямую**
+(`ELECTRON_RUN_AS_NODE` + `next/dist/bin/next`), а не через `npm run start`:
+в переносимой сборке npm может отсутствовать. Пакет собирается с `asar: false`,
+потому что серверу нужно читать `.next` с диска. Артефакты складываются в
+`release/` (в git не попадают), и формат зависит от ОС:
+
+| ОС | Цель `electron-builder` | Файл в `release/` |
+|---|---|---|
+| Linux | `AppImage` | `Manga Voice Studio-1.3.17.AppImage` |
+| Windows | `portable` | `Manga Voice Studio 1.3.17.exe` (переносимый exe, **не** AppImage и не установщик) |
+| macOS | не собирается | подпись/нотаризация вне scope стабилизации |
+
+Их выгружает CI (job `desktop`, матрица ubuntu + windows, retention 14 дней);
+локально `npm run desktop:pack` кладёт распакованную сборку в
+`release/*-unpacked/`. Если `release/` после упаковки пуст, отдельный шаг CI
+падает с ошибкой — молча «зелёной» desktop-джобы не бывает.
 
 `/settings` → добавь ключи (см таблицы ниже). Все в localStorage, прямые запросы из браузера для CORS-friendly.
 
 ## 🧠 LLM-провайдеры (анализ изображений, SEO)
 
-### Базовые
+Таблицы ниже **генерируются из реестра** `src/lib/providers/registry.ts`
+(`npm run gen:providers`), поэтому количество и состав строк совпадают с кодом.
+Если провайдер добавлен в реестр, но забыт в README — падает
+`npm run check:providers` в `verify` и CI.
 
-| Провайдер | Лимиты | Ключ | Особенности |
-|-----------|--------|------|-------------|
-| **OpenRouter** | 20 RPM / 50 RPD (1000 RPD при $10) | [openrouter.ai/keys](https://openrouter.ai/keys) | 25+ free моделей `:free` с vision |
-| **NVIDIA NIM** | ~40 RPM, без карты | [build.nvidia.com](https://build.nvidia.com) | 189+ моделей, верификация телефона |
-| **Google AI Studio** | 5-15 RPM, 250 RPD | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) | Gemini 2.5 Flash/Pro vision, без карты |
-| **Groq** | 30 RPM, 14400 RPD | [console.groq.com/keys](https://console.groq.com/keys) | Самый быстрый, Llama 4 Scout vision |
-| **Mistral AI** | Free mode ~1B токенов/мес | [console.mistral.ai/api-keys](https://console.mistral.ai/api-keys) | Pixtral Large vision |
-| **GitHub Models** | 40+ моделей | [github.com/marketplace/models](https://github.com/marketplace/models) | GPT-4o, o1, Claude 3.5, DeepSeek-R1 |
-| **Cerebras** | $5 credit | [cloud.cerebras.ai](https://cloud.cerebras.ai) | Ultra-fast, free retired July 2026 |
-| **SambaNova** | 20 req/day | [cloud.sambanova.ai](https://cloud.sambanova.ai) | Llama 4 Maverick, 90B Vision |
-| **OpenAI** | $5 credit | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) | GPT-4o, o1 fallback |
-| **Anthropic** | Платно | [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys) | Claude 3.5 fallback |
+Что важно понимать:
 
-### Расширенные (добавлены в v1.3)
+- **Реализовано в каталоге** — есть объект `LLMProvider`, карточка в `/settings`,
+  выбор модели и vision-allowlist.
+- **Proxy-only** — OpenAI-совместимый endpoint, доступный через `/api/llm`
+  (используется старым кодом и сторонними клиентами), но без карточки в UI.
+  Любой такой провайдер можно подключить как `custom` с нужным `baseUrl`.
+- **Через `custom`** можно использовать любой OpenAI-совместимый сервис
+  (LM Studio, Ollama, vLLM и т.п.) — он не требует правок в реестре.
 
-| Провайдер | Лимиты | Ключ | Почему |
-|-----------|--------|------|--------|
-| **Cloudflare Workers AI** | 10k Neurons/день | [dash.cloudflare.com](https://dash.cloudflare.com/?to=/:account/workers/ai) | Llama 3.2 11B Vision, Whisper, без карты |
-| **Cohere** | 1000 req/мес Trial | [dashboard.cohere.com/api-keys](https://dashboard.cohere.com/api-keys) | Command A, Embed, без карты |
-| **Hugging Face** | 300 req/час | [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) | 100k+ моделей vision |
-| **DeepSeek** | Free tier, очень дёшево | [platform.deepseek.com/api_keys](https://platform.deepseek.com/api_keys) | V3, R1 |
-| **Together AI** | $5 credit | [api.together.xyz/settings/api-keys](https://api.together.xyz/settings/api-keys) | Llama 3.3 70B, Qwen 2.5 VL vision |
-| **Fireworks AI** | $1 credit | [fireworks.ai/account/api-keys](https://fireworks.ai/account/api-keys) | Llama 3.2 Vision, быстрый |
-| **DeepInfra** | $1 credit | [deepinfra.com/dash/api_keys](https://deepinfra.com/dash/api_keys) | Llama 3.2 90B Vision, Qwen VL |
-| **Novita AI** | $0.5 credit | [novita.ai/settings/key-management](https://novita.ai/settings/key-management) | Llama 3.2 Vision, Qwen VL |
-| **SiliconFlow** | Free tier щедрый | [cloud.siliconflow.cn/account/ak](https://cloud.siliconflow.cn/account/ak) | Qwen 2.5 VL, DeepSeek, CN |
-| **Zhipu AI (Z.ai)** | 1 concurrent | [open.bigmodel.cn/usercenter/apikeys](https://open.bigmodel.cn/usercenter/apikeys) | GLM-4V-Flash vision |
-| **Moonshot AI** | Free tier | [platform.moonshot.cn/console/api-keys](https://platform.moonshot.cn/console/api-keys) | Kimi Vision |
-| **01.AI** | Free tier | [platform.01.ai](https://platform.01.ai) | Yi-Vision |
-| **Perplexity** | $5/мес Pro | [perplexity.ai/settings/api](https://www.perplexity.ai/settings/api) | Sonar для SEO, online search |
-| **Custom** | — | LM Studio / Ollama / vLLM | Локальный endpoint |
+<!-- providers:llm:start -->
+Реализовано в каталоге: **13** провайдеров.
 
-> Актуальные лимиты: [awesome-freellm-apis](https://github.com/open-free-llm-api/awesome-freellm-apis) · [Free-LLM](https://github.com/nejib1/Free-LLM) · [free-llm.com](https://free-llm.com)
+| Провайдер | Модели | Vision | Free tier | Лимиты | Ключ |
+|-----------|--------|--------|-----------|--------|------|
+| **OpenRouter** (`openrouter`) | google/gemma-4-31b-it:free, qwen/qwen3-coder:free, nvidia/nemotron-3-ultra-550b-a55b:free | да | да | Лимиты зависят от модели и провайдера | [ключ](https://openrouter.ai/keys) |
+| **NVIDIA NIM** (`nvidia-nim`) | deepseek-ai/deepseek-v4.1-flash, moonshotai/kimi-k3, nvidia/nemotron-3-nano-omni-30b | да | да | ~40 RPM | [ключ](https://build.nvidia.com) |
+| **Google Gemini** (`gemini`) | gemini-3-flash-preview, gemini-3.6-flash | да | да | ~10–15 RPM / ~30 промптов в день | [ключ](https://aistudio.google.com/apikey) |
+| **Groq** (`groq`) | meta-llama/llama-4-scout-17b-16e-instruct, qwen/qwen3.8-27b | да | да | 30 RPM / 1 000 RPD | [ключ](https://console.groq.com/keys) |
+| **Mistral AI** (`mistral`) | mistral-small-latest, mistral-medium-3.5, pixtral-12b-2409 | да | да | 500K TPM / 1B токенов в месяц | [ключ](https://console.mistral.ai/api-keys) |
+| **Cloudflare Workers AI** (`cloudflare`) | @cf/moonshotai/kimi-k2.5, @cf/meta/llama-4-scout-17b-16e-instruct | да | да | 10 000 Neurons/день | [ключ](https://dash.cloudflare.com/?to=/:account/workers/ai) |
+| **Hugging Face** (`huggingface`) | meta-llama/Llama-3.2-11B-Vision-Instruct, Qwen/Qwen2-VL-72B-Instruct | да | да | $0.10 кредитов/мес | [ключ](https://huggingface.co/settings/tokens) |
+| **AI21 Labs** (`ai21`) | jamba-large, jamba-mini | нет | trial | $10 на 3 месяца | [ключ](https://studio.ai21.com/account/api-key) |
+| **Novita AI** (`novita`) | inclusionai/ling-3.0-flash-vl, deepseek/deepseek-v4.1-flash | да | trial | $100 promotional credits | [ключ](https://novita.ai/settings/key-management) |
+| **SiliconFlow** (`siliconflow`) | Qwen/Qwen3-8B, deepseek-ai/DeepSeek-R1-Distill-Qwen-7B | нет | да | $1 при регистрации + free models | [ключ](https://cloud.siliconflow.cn/account/ak) |
+| **Zhipu AI (GLM)** (`zhipu`) | glm-4.7-flash, glm-5.3 | нет | да | Полностью бесплатная модель GLM-4.7-Flash | [ключ](https://open.bigmodel.cn/usercenter/apikeys) |
+| **Moonshot AI (Kimi)** (`moonshot`) | kimi-k2.6, moonshot-v1-8k-vision-preview | да | trial | $5 кредитов каждые 30 дней | [ключ](https://platform.moonshot.ai/console/api-keys) |
+| **Custom OpenAI-compatible** (`custom`) | custom-model | да | платно | — | — |
+
+Дополнительно через `/api/llm` (без карточки в UI, OpenAI-совместимый протокол): `github-models`, `cerebras`, `sambanova`, `openai`, `cohere`, `deepseek`, `together`, `fireworks`, `deepinfra`, `01ai`, `perplexity`.
+
+Не поддерживаются прокси-маршрутом (другой протокол, документированный отказ 501): `anthropic`.
+
+<!-- providers:llm:end -->
 
 ## 🔊 TTS-провайдеры (озвучка)
 
-| Провайдер | Free tier | Ключ | Особенности |
-|-----------|-----------|------|-------------|
-| **Gemini TTS** | Free quota | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) | 200+ голосов, отличный RU, тот же ключ что LLM |
-| **ElevenLabs** | 10k симв/мес | [elevenlabs.io/app/settings/api-keys](https://elevenlabs.io/app/settings/api-keys) | Лучшее качество, Multilingual v2 |
-| **Azure TTS** | 500k симв/мес F0 | [portal.azure.com](https://portal.azure.com/#blade/HubsExtension/BrowseResource/resourceType/Microsoft.CognitiveServices%2Faccounts) | Нейронные, отличный RU, очень щедрый |
-| **Google Cloud TTS** | 4M Standard / 1M WaveNet | [console.cloud.google.com](https://console.cloud.google.com/apis/library/texttospeech.googleapis.com) | 380+ голосов, 75+ языков |
-| **Speechify** | Free tier ограничен | [platform.speechify.ai/api-keys](https://platform.speechify.ai/api-keys) | 1000+ голосов, 50+ языков |
-| **OpenAI TTS** | $15/1M | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) | tts-1, tts-1-hd |
-| **Polly** | 5M /12 мес | [console.aws.amazon.com/iam](https://console.aws.amazon.com/iam) | Нейронные, JSON ключ |
-| **Qwen3-TTS** | 1M free | [dashscope.console.aliyun.com/apiKey](https://dashscope.console.aliyun.com/apiKey) | 49 голосов, 10 языков |
-| **Cartesia Sonic 3** | Free tier, 40ms | [play.cartesia.ai/keys](https://play.cartesia.ai/keys) | Самый низкий latency, SSM |
-| **Hume Octave 2** | Free tier | [platform.hume.ai/settings/keys](https://platform.hume.ai/settings/keys) | Эмоциональная, контекстная |
-| **Deepgram Aura-2** | $200 credit | [console.deepgram.com](https://console.deepgram.com/) | Domain-tuned pronunciation |
-| **PlayHT** | Free tier | [play.ht/app/api-access](https://play.ht/app/api-access) | 900+ голосов, клонирование, userId:apiKey |
-| **Resemble AI** | Free tier | [app.resemble.ai](https://app.resemble.ai/) | Клонирование, emotion control |
-| **Murf AI** | Free tier | [murf.ai/api](https://murf.ai/api) | 120+ голосов, sync с видео |
-| **Fish Audio** | Free tier | [fish.audio](https://fish.audio/) | 50+ языков, Novita backed |
+Тот же принцип: состав и метаданные берутся из реестра. Колонка «CORS»
+показывает, идёт ли синтез напрямую из браузера или через серверный прокси
+`/api/tts` (политика `cors: 'proxy'` в реестре).
+
+<!-- providers:tts:start -->
+Реализовано в каталоге: **15** провайдеров.
+
+| Провайдер | Языки | Модель | Статус | CORS | Лимиты | Ключ |
+|-----------|--------|--------|--------|------|--------|------|
+| **Google Gemini TTS** (`gemini`) | ru, en, multi | gemini-3.8-flash-tts | free tier | напрямую | Free quota | [ключ](https://aistudio.google.com/apikey) |
+| **ElevenLabs** (`elevenlabs`) | ru, en, multi | eleven_multilingual_v2 | free tier | через `/api/tts` | 10 000 символов/мес | [ключ](https://elevenlabs.io/app/settings/api-keys) |
+| **Speechify** (`speechify`) | en-US, de-DE, es-ES, es-MX, fr-FR, it-IT, pt-BR | simba-3.2 | experimental | через `/api/tts` | По тарифам Speechify | [ключ](https://platform.speechify.ai/api-keys) |
+| **OpenAI TTS** (`openai`) | ru, en, multi | tts-1-hd | платно | через `/api/tts` | $15 / 1M символов | [ключ](https://platform.openai.com/api-keys) |
+| **Amazon Polly** (`polly`) | ru, en, multi | — | free tier | через `/api/tts` | 5M символов / 12 мес | [ключ](https://console.aws.amazon.com/iam) |
+| **Qwen3-TTS / DashScope** (`qwen`) | ru, en, zh, multi | qwen3-tts-flash | free tier | напрямую | 1M символов free | [ключ](https://dashscope.console.aliyun.com/apiKey) |
+| **Microsoft Azure TTS** (`azure`) | ru, en, multi | — | free tier | через `/api/tts` | 500 000 символов/мес (F0) | [ключ](https://portal.azure.com/#blade/HubsExtension/BrowseResource/resourceType/Microsoft.CognitiveServices%2Faccounts) |
+| **Google Cloud TTS** (`google-cloud`) | ru, en, multi | — | free tier | напрямую | 4M Standard / 1M WaveNet / мес | [ключ](https://console.cloud.google.com/apis/library/texttospeech.googleapis.com) |
+| **Cartesia Sonic 3.5** (`cartesia`) | ru, en, multi | sonic-3.5 | free tier | напрямую | Free tier, 40ms latency | [ключ](https://play.cartesia.ai/keys) |
+| **Hume AI Octave 2** (`hume`) | en, multi | — | experimental | через `/api/tts` | Free tier | [ключ](https://platform.hume.ai/settings/keys) |
+| **Deepgram Flux TTS / Aura-2** (`deepgram`) | en, es, de, fr, nl, it, ja | flux-hannah-en | free tier | через `/api/tts` | $200 кредитов на старт, pay-as-you-go | [ключ](https://console.deepgram.com/) |
+| **PlayHT** (`playht`) | ru, en, multi | — | experimental | через `/api/tts` | Free tier ограничен | [ключ](https://play.ht/app/api-access) |
+| **Resemble AI** (`resemble`) | en, multi | — | experimental | через `/api/tts` | Free tier | [ключ](https://app.resemble.ai/) |
+| **Murf AI** (`murf`) | en, multi | — | experimental | через `/api/tts` | Free tier | [ключ](https://murf.ai/api) |
+| **Fish Audio** (`fish`) | ru, en, multi | — | experimental | через `/api/tts` | Free tier | [ключ](https://fish.audio/) |
+
+<!-- providers:tts:end -->
 
 ### STT для субтитров
 
-| Провайдер | Free | Ключ |
-|-----------|------|------|
-| OpenAI Whisper API | $0.006/мин | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) |
-| AssemblyAI | Free limited | [assemblyai.com/dashboard](https://www.assemblyai.com/dashboard) |
-| Deepgram Nova STT | $200 credit | [console.deepgram.com](https://console.deepgram.com/) |
+<!-- providers:stt:start -->
+STT-провайдеры доступны как справка и как опциональный серверный путь
+(`/api/whisper`); отдельной кнопки в UI нет — SRT собирается из таймлайна.
+
+| Провайдер | Free tier | Лимиты | Ключ |
+|-----------|-----------|--------|------|
+| **OpenAI Whisper API** | платно | $0.006/мин | [ключ](https://platform.openai.com/api-keys) |
+| **AssemblyAI** | да | Free tier limited | [ключ](https://www.assemblyai.com/dashboard) |
+| **Deepgram Nova STT** | да | $200 кредитов на старт | [ключ](https://console.deepgram.com/) |
+
+<!-- providers:stt:end -->
 
 ## 🌐 UI провайдеров
 
@@ -302,8 +364,8 @@ CI (`.github/workflows/ci.yml`) гоняет typecheck/test/lint/build на
 ## 🔧 Что в коде для провайдеров
 
 - `lib/providers/links.ts` — 40+ провайдеров с keyUrl, docsUrl, limits, freeTier
-- `lib/providers/llm/catalog.ts` — 25+ LLM (OpenRouter, NVIDIA, Google, Groq, Mistral, GitHub, Cloudflare, Cohere, HF, DeepSeek, Together, Fireworks, DeepInfra, Novita, SiliconFlow, Zhipu, Moonshot, 01.AI, Perplexity, Custom...)
-- `lib/providers/tts/catalog.ts` — 15+ TTS (Gemini, ElevenLabs, Azure, Google Cloud, Speechify, OpenAI, Polly, Qwen, Cartesia, Hume, Deepgram, PlayHT, Resemble, Murf, Fish)
+- `lib/providers/registry.ts` — **единственный источник правды** о провайдерах (43 записи: 25 LLM, 15 TTS, 3 STT) с моделями, CORS-политикой, free-tier и ссылками на ключи; `lib/providers/llm/catalog.ts` (13 реализованных LLM) и `lib/providers/tts/catalog.ts` (15 TTS) — его проекции
+- таблицы провайдеров ниже генерируются из реестра (`npm run gen:providers`), их совпадение проверяет `npm run check:providers`
 - `components/settings/ProviderList.tsx` — строки вместо карточек, тест, ссылка на ключ, graphite+amber
 - `app/settings/page.tsx` — minimal header + ProviderList
 
@@ -519,10 +581,16 @@ npm run smoke:tts -- cartesia     # точечно по провайдеру
   проверяются только настоящим Chromium (Playwright), это отдельная задача.
 
 ### Тесты
-`npm test` (`tsx --test`) — 93 теста в 11 файлах: WAV-обёртка, определение MIME,
-раскладка и подпись аудио, лента (включая прогон по сетке раскладок), политика
-проксирования TTS и голосов, тело Cartesia, часы рендера, планировщик Web Audio,
-`check-launchers` (структура `.bat`/`.sh`) и `.sh`-лаунчеры.
+`npm test` (`node scripts/run-tests.mjs` → `tsx --test`) — юнит-тесты в <!-- tests:files:start -->42<!-- tests:files:end --> файлах:
+WAV-обёртка, определение MIME, раскладка и подпись аудио, лента (включая прогон по
+сетке раскладок), политика проксирования TTS и голосов, тело Cartesia, часы рендера,
+планировщик Web Audio, реестр провайдеров (включая структурные guard-тесты),
+конфигурация desktop-сборки, `check-launchers` (структура `.bat`/`.sh`) и `.sh`-лаунчеры.
+
+Раннер сам находит `tests/**/*.test.ts` — новый файл подхватывается без правки
+скриптов (`npm test -- <подстрока>` фильтрует по имени файла). Число файлов в
+этом абзаце сверяет `npm run check:tests` (входит в `verify` и CI), поэтому
+документация не расходится с реальностью.
 
 Полный прогон — `npm run verify`; то же самое CI делает на ubuntu и windows.
 Для локальной итерации «правлю — смотрю» есть `npm run verify:quick`:
@@ -790,7 +858,7 @@ npm run smoke:tts -- cartesia     # точечно по провайдеру
   для TLS), модели TTS берутся из каталога провайдеров (`defaultModel`) вместо второй карты
   хардкодов, `handleSaveRef` объявлен до эффекта хоткеев, убраны лишние `as any`,
   Cartesia умеет `ru`.
-- **Тесты**: `npm test` (`tsx --test`) — WAV-обёртка, определение MIME, раскладка аудио
+- **Тесты**: `npm test` (`scripts/run-tests.mjs` → `tsx --test`) — WAV-обёртка, определение MIME, раскладка аудио
   (`packStarts`), подпись аудио, лента и политика проксирования TTS; `npm run verify`
   теперь включает тесты **и** сборку. `tsx` — единственная dev-зависимость ради тестов:
   в проекте Node >= 20.9, а тесты импортируют TS без расширений и через `@/`-алиасы,
@@ -969,6 +1037,20 @@ SRT собирается в единой точке — `rebuildSrt` (`lib/pipel
 `project.settings.channelName` → настройки приложения → `siteName` →
 дефолт «Manga Voice Studio»; используется в fallback-интро/аутро.
 Новые проекты копируют канал из настроек в `project.settings` при создании.
+
+## 📄 Лицензия
+
+Проект распространяется по лицензии **MIT** — см. [LICENSE](./LICENSE).
+Copyright (c) 2026 DMloaderJava.
+
+Это значит: код можно использовать, изменять, распространять и использовать
+коммерчески при сохранении текста лицензии и копирайта. ПО поставляется «как
+есть», без гарантий.
+
+Версия приложения — единственный источник правды `package.json`; в клиент она
+попадает через `NEXT_PUBLIC_APP_VERSION` (`next.config.ts` → `src/lib/version.ts`),
+поэтому номер версии в исходниках не хардкодится (`npm run check:versions`
+падает на любом `vX.Y.Z` в `src/`).
 
 ## 🛣️ Roadmap
 

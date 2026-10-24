@@ -18,6 +18,8 @@
 /out/
 
 # production
+/artifacts/
+/release/
 /build
 
 # misc

@@ -170,7 +170,7 @@ export async function generateAllAudio(options: AudioGenerationOptions): Promise
   const selectedPanels = options.onlyPanelIds
     ? options.panels.filter(p => options.onlyPanelIds!.includes(p.id))
     : options.panels;
-  // Импортированное аудио (v1.3.18) TTS не трогает: его подпись никогда не
+  // Импортированное аудио TTS не трогает: его подпись никогда не
   // совпадёт с TTS-подписью, и без этого пропуска «Озвучить всё» молча
   // перезаписало бы файл пользователя. Только явный forceRegenerate.
   const importedPanels = options.forceRegenerate ? [] : selectedPanels.filter(p => p.audioSource === 'import');
@@ -324,7 +324,7 @@ export async function generateAllAudio(options: AudioGenerationOptions): Promise
 
         // 2. Кэши смотрятся только если это не явная переозвучка.
         //    По умолчанию: OPFS-файл панели (подпись совпала) → общий TTS-кэш.
-        //    Для аудио без подписи (до v1.3.2) сверяемся с текстом из таймлайна.
+        //    Для аудио без подписи (старые проекты) сверяемся с текстом из таймлайна.
         const persisted = options.forceRegenerate
           ? null
           : await loadFreshProjectAudio(

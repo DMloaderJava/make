@@ -1,3 +1,17 @@
+/**
+ * Каталог TTS-провайдеров.
+ *
+ * Реализации протоколов живут в отдельных файлах (`gemini.ts`, `azure.ts`, …),
+ * а метаданные карточки (имя, описание, языки, free tier, experimental, CORS)
+ * берутся из единого реестра (`../registry.ts`). Так добавление провайдера —
+ * это одна запись в реестре + файл реализации, без правки `links.ts`,
+ * `cors.ts` и прокси-маршрута.
+ *
+ * Если реестр объявляет провайдера, а реализации нет — модуль падает сразу:
+ * лучше упасть при импорте в тесте/CI, чем отдать пользователю пустой каталог.
+ */
+
+import { getImplementedProviders } from '../registry';
 import { TTSProvider, TTSOptions } from './types';
 import { geminiTTS } from './gemini';
 import { elevenLabsTTS } from './elevenlabs';
@@ -15,23 +29,53 @@ import { resembleTTS } from './resemble';
 import { murfTTS } from './murf';
 import { fishTTS } from './fish';
 
-export const TTS_PROVIDERS: TTSProvider[] = [
-  geminiTTS,
-  elevenLabsTTS,
-  azureTTS,
-  googleCloudTTS,
-  speechifyTTS,
-  openAITTS,
-  pollyTTS,
-  qwenTTS,
-  cartesiaTTS,
-  humeTTS,
-  deepgramTTS,
-  playhtTTS,
-  resembleTTS,
-  murfTTS,
-  fishTTS,
-].filter((p, i, arr) => arr.findIndex(x => x.id === p.id) === i); // dedup safety
+/** Реализации протоколов по id. Ключ — тот же, что `id` в реестре. */
+const TTS_IMPLEMENTATIONS: Record<string, TTSProvider> = {
+  [geminiTTS.id]: geminiTTS,
+  [elevenLabsTTS.id]: elevenLabsTTS,
+  [speechifyTTS.id]: speechifyTTS,
+  [openAITTS.id]: openAITTS,
+  [pollyTTS.id]: pollyTTS,
+  [qwenTTS.id]: qwenTTS,
+  [azureTTS.id]: azureTTS,
+  [googleCloudTTS.id]: googleCloudTTS,
+  [cartesiaTTS.id]: cartesiaTTS,
+  [humeTTS.id]: humeTTS,
+  [deepgramTTS.id]: deepgramTTS,
+  [playhtTTS.id]: playhtTTS,
+  [resembleTTS.id]: resembleTTS,
+  [murfTTS.id]: murfTTS,
+  [fishTTS.id]: fishTTS,
+};
+
+export const TTS_PROVIDERS: TTSProvider[] = getImplementedProviders('tts').map(entry => {
+  const implementation = TTS_IMPLEMENTATIONS[entry.id];
+  if (!implementation) {
+    throw new Error(
+      `Реестр содержит TTS-провайдера "${entry.id}" без реализации. ` +
+        'Добавьте файл провайдера и запись в TTS_IMPLEMENTATIONS (src/lib/providers/tts/catalog.ts).'
+    );
+  }
+  return {
+    ...implementation,
+    name: entry.name,
+    description: entry.description,
+    freeTier: entry.freeTier,
+    languages: entry.languages ?? implementation.languages,
+    experimental: entry.experimental ?? implementation.experimental,
+    proxyClientSide: entry.proxyClientSide ?? implementation.proxyClientSide,
+    supportsSpeed: entry.supportsSpeed ?? implementation.supportsSpeed,
+    defaultModel: entry.defaultModel ?? implementation.defaultModel,
+    baseUrl: entry.baseUrl ?? implementation.baseUrl,
+  };
+});
+
+/** Провайдеры, объявленные в реестре, но не имеющие реализации (диагностика/тесты). */
+export function getRegistryOnlyTTSIds(): string[] {
+  return getImplementedProviders('tts')
+    .map(entry => entry.id)
+    .filter(id => !TTS_IMPLEMENTATIONS[id]);
+}
 
 export function getTTSProvider(id: string): TTSProvider | undefined {
   return TTS_PROVIDERS.find(p => p.id === id);

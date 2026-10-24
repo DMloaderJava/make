@@ -1,9 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { mapLLMProviderError } from '@/lib/providers/llm/router';
 import { getLLMProvider } from '@/lib/providers/llm/catalog';
+import {
+  getRegistryEntry,
+  isGeminiApi,
+  isProxyUnsupported,
+  resolveLLMProxyUrl,
+} from '@/lib/providers/registry';
 
 export const runtime = 'nodejs';
 export const maxDuration = 60;
+
+const GEMINI_DEFAULT_MODEL = 'gemini-3-flash-preview';
 
 export async function POST(req: NextRequest) {
   try {
@@ -13,61 +21,31 @@ export async function POST(req: NextRequest) {
     if (!sceneDescription || !apiKey || !providerId) {
       return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
     }
+    // SEO-генерация работает только через каталог LLM (там есть реализации и
+    // дефолтные модели). Реестр используется для URL/протокола, чтобы карта
+    // провайдеров больше не дублировалась в этом файле.
     if (!getLLMProvider(providerId)) {
+      return NextResponse.json({ error: `Unknown LLM provider ${providerId}` }, { status: 400 });
+    }
+    const entry = getRegistryEntry('llm', providerId);
+    if (!entry) {
       return NextResponse.json({ error: `Unknown LLM provider ${providerId}` }, { status: 400 });
     }
 
     const { SEO_SYSTEM_PROMPT, SEO_USER_PROMPT } = await import('@/lib/prompts/seo-prompt');
 
-    const messages = [
-      { role: 'system', content: SEO_SYSTEM_PROMPT },
-      { role: 'user', content: SEO_USER_PROMPT(sceneDescription, characters || [], duration || 180) }
-    ];
-
-    if (providerId === 'custom' && !baseUrl) {
-      return NextResponse.json({ error: 'Custom provider requires baseUrl' }, { status: 400 });
-    }
-    if (providerId === 'cloudflare' && !String(accountId || '').trim()) {
+    if (entry.requiresAccountId && !String(accountId || '').trim()) {
       return NextResponse.json({ error: mapLLMProviderError({ providerId, status: 400, responseBody: 'missing account_id' }) }, { status: 400 });
     }
-    if (providerId === 'anthropic') {
+    if (isProxyUnsupported(providerId)) {
       return NextResponse.json({ error: 'Anthropic API is not OpenAI-compatible (uses /v1/messages). Use direct browser call for SEO generation.' }, { status: 501 });
     }
 
-    // Proxy to LLM - full map from /api/llm
-    const providerConfigs: Record<string, string> = {
-      'nvidia-nim': baseUrl || 'https://integrate.api.nvidia.com/v1',
-      'openrouter': baseUrl || 'https://openrouter.ai/api/v1',
-      'mistral': baseUrl || 'https://api.mistral.ai/v1',
-      'groq': baseUrl || 'https://api.groq.com/openai/v1',
-      'github-models': baseUrl || 'https://models.inference.ai.azure.com',
-      'cerebras': baseUrl || 'https://api.cerebras.ai/v1',
-      'sambanova': baseUrl || 'https://api.sambanova.ai/v1',
-      'openai': baseUrl || 'https://api.openai.com/v1',
-      'cloudflare': (baseUrl || 'https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1').replace('{account_id}', encodeURIComponent(String(accountId || ''))),
-      'cohere': baseUrl || 'https://api.cohere.ai/compatibility/v1',
-      'huggingface': baseUrl || 'https://router.huggingface.co/v1',
-      'deepseek': baseUrl || 'https://api.deepseek.com/v1',
-      'together': baseUrl || 'https://api.together.xyz/v1',
-      'fireworks': baseUrl || 'https://api.fireworks.ai/inference/v1',
-      'deepinfra': baseUrl || 'https://api.deepinfra.com/v1/openai',
-      'novita': baseUrl || 'https://api.novita.ai/openai',
-      'siliconflow': baseUrl || 'https://api.siliconflow.com/v1',
-      'zhipu': baseUrl || 'https://open.bigmodel.cn/api/paas/v4',
-      'moonshot': baseUrl || 'https://api.moonshot.ai/v1',
-      '01ai': baseUrl || 'https://api.01.ai/v1',
-      'perplexity': baseUrl || 'https://api.perplexity.ai',
-      'custom': baseUrl || '',
-      'ai21': baseUrl || 'https://api.ai21.com/studio/v1',
-      'gemini': 'google',
-      'google-ai': 'google',
-    };
-
     let content: string;
 
-    if (providerId === 'gemini' || providerId === 'google-ai') {
-      const modelName = model || 'gemini-3-flash-preview';
-      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelName)}:generateContent`, {
+    if (isGeminiApi(providerId)) {
+      const modelName = model || entry.defaultModel || GEMINI_DEFAULT_MODEL;
+      const res = await fetch(`${entry.baseUrl}/models/${encodeURIComponent(modelName)}:generateContent`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
         body: JSON.stringify({
@@ -83,13 +61,12 @@ export async function POST(req: NextRequest) {
       const data = await res.json();
       content = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
     } else {
-      const base = providerConfigs[providerId];
-      if (!base) return NextResponse.json({ error: `Unknown provider ${providerId}` }, { status: 400 });
-      if (!base && (providerId === 'custom' || providerId === 'cloudflare')) {
-        return NextResponse.json({ error: `${providerId} requires baseUrl` }, { status: 400 });
+      const target = resolveLLMProxyUrl(providerId, { baseUrl, accountId });
+      if (!target) {
+        return NextResponse.json({ error: 'Custom provider requires baseUrl' }, { status: 400 });
       }
 
-      const res = await fetch(`${base}/chat/completions`, {
+      const res = await fetch(`${target}/chat/completions`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${apiKey}`,
@@ -97,8 +74,11 @@ export async function POST(req: NextRequest) {
           ...(providerId === 'openrouter' ? { 'HTTP-Referer': 'https://manga-voice.local', 'X-Title': 'Manga Voice Studio' } : {})
         },
         body: JSON.stringify({
-          model,
-          messages,
+          model: model || entry.defaultModel,
+          messages: [
+            { role: 'system', content: SEO_SYSTEM_PROMPT },
+            { role: 'user', content: SEO_USER_PROMPT(sceneDescription, characters || [], duration || 180) }
+          ],
           temperature: 0.7,
           max_tokens: 4000
         })

@@ -1,3 +1,5 @@
+import { readEditorSource } from './helpers/editorSource';
+import { CURRENT_PROJECT_SCHEMA_VERSION } from '../src/lib/storage/db';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -11,8 +13,6 @@ import {
   resolvePanelEffectiveDuration,
   roundMediaDuration,
 } from '../src/lib/pipeline/buildTimeline';
-import fs from 'node:fs';
-import path from 'node:path';
 import {
   ProjectClock,
   resolveActiveTimelineMoment,
@@ -205,7 +205,8 @@ test('Stage 1 (5) & Stage 8 (74): идемпотентная миграция с
 
   const firstRun = migrateProjectSchema(legacyRaw);
   assert.equal(firstRun.migrated, true);
-  assert.equal(firstRun.toSchemaVersion, 2);
+  assert.equal(firstRun.toSchemaVersion, CURRENT_PROJECT_SCHEMA_VERSION);
+  assert.equal(firstRun.project.locks?.videoTrackLocked, false);
   assert.equal(firstRun.toTimelineVersion, 2);
   assert.equal(firstRun.project.timeline.length, 1);
   assert.ok(firstRun.project.srt.includes('Привет!'));
@@ -359,8 +360,7 @@ test('Stage 1 (10): интеграционный тест полного цик�
 });
 
 test('Итерация 2 — Задача 1: ProjectClock — единственный источник времени и камеры, setCurrentTime вызывается только в clock.subscribe', () => {
-  const editorPagePath = path.resolve(process.cwd(), 'src/app/editor/[id]/page.tsx');
-  const src = fs.readFileSync(editorPagePath, 'utf-8');
+  const src = readEditorSource();
   const lines = src.split('\n');
   const setCurrentTimeLines = lines
     .map((line, idx) => ({ line: line.trim(), num: idx + 1 }))

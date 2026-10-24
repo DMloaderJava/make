@@ -1,3 +1,4 @@
+import { readEditorSource } from './helpers/editorSource';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import './fixtures/browserEnv';
@@ -545,7 +546,7 @@ test('Итерация 2 — Задача 5 и Задача 12: buildTimelineAud
 });
 
 test('Итерация 2 — Задача 6: единообразное обновление состояния во всех 7 NLE-обработчиках EditorPage через applyNleResult', () => {
-  const editorSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/app/editor/[id]/page.tsx'), 'utf-8');
+  const editorSrc = readEditorSource();
   // Проверяем, что каждый из 7 именованных NLE-обработчиков EditorPage вызывает applyNleResult(res)
   const expectedNleHandlers = [
     'handleSplitActiveClip',
@@ -1245,7 +1246,7 @@ test('Этап 3 (подэтапы 3.1–3.6): assertValidPackedPlacements (Н-3
   assert.equal(timelineSrc.includes('onReorderPanel'), true, 'Timeline.tsx должен вызывать onReorderPanel при отпускании над допустимой позицией');
   assert.equal(timelineSrc.includes('onTrimPanel'), true, 'Timeline.tsx должен вызывать onTrimPanel при отпускании ручки trim');
 
-  const editorSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/app/editor/[id]/page.tsx'), 'utf-8');
+  const editorSrc = readEditorSource();
   assert.equal(editorSrc.includes('onReorderPanel={handleReorderClip}'), true, 'EditorPage должен передавать onReorderPanel в Timeline');
   assert.equal(editorSrc.includes('onTrimPanel={handleSetPanelAudioTrim}'), true, 'EditorPage должен передавать onTrimPanel в Timeline');
 });

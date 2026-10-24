@@ -7,6 +7,7 @@ import { getAllKeys } from '@/lib/storage/local';
 import { Button } from '@/components/ui/button';
 import { normalizeCharactersWithMap } from '@/lib/validators';
 import { CORS_BLOCKED_PROVIDERS, getAudioMimeType } from '@/lib/providers/tts/cors';
+import { confirmAction, toast } from '@/lib/ui/feedback';
 
 interface VoicesModalProps {
   open: boolean;
@@ -185,14 +186,16 @@ export function VoicesModal({ open, onClose, characters, assignments, onChange, 
   const speedUnsupported = selectedProviderMeta?.supportsSpeed === false;
 
   /** Смена провайдера: голоса старого провайдера невалидны → сбрасываем назначения. */
-  const handleProviderChange = (nextProvider: string) => {
+  const handleProviderChange = async (nextProvider: string) => {
     if (nextProvider === selectedProvider) return; // тот же провайдер — ничего не меняем
 
     const hasAssignments = Object.values(assignments).some(Boolean);
     if (hasAssignments) {
-      const ok = confirm(
-        'Сменить провайдера озвучки? Назначенные голоса относятся к прошлому провайдеру и будут сброшены.'
-      );
+      const ok = await confirmAction({
+        message: 'Сменить провайдера озвучки? Назначенные голоса относятся к прошлому провайдеру и будут сброшены.',
+        confirmLabel: 'Сменить',
+        danger: true,
+      });
       if (!ok) return;
       onChange({});
     }
@@ -226,7 +229,7 @@ export function VoicesModal({ open, onClose, characters, assignments, onChange, 
       onChange(newAssignments);
       onPanelsRename?.(renameMap);
     } else {
-      alert(`Уже оптимально: ${normalized.length} персонажей`);
+      toast(`Уже оптимально: ${normalized.length} персонажей`);
     }
   };
 
@@ -234,7 +237,7 @@ export function VoicesModal({ open, onClose, characters, assignments, onChange, 
     const keys = getAllKeys();
     const apiKey = keys[selectedProvider];
     if (!apiKey) {
-      alert(`Добавь ключ для ${selectedProvider} в Провайдерах (/settings)`);
+      toast(`Добавь ключ для ${selectedProvider} в Провайдерах (/settings)`, 'error');
       return;
     }
     setLoadingPreview(voiceId);
@@ -285,7 +288,7 @@ export function VoicesModal({ open, onClose, characters, assignments, onChange, 
         }
       });
     } catch (e: any) {
-      alert(`Ошибка превью: ${e.message}`);
+      toast(`Ошибка превью: ${e.message}`, 'error');
     } finally {
       setLoadingPreview(null);
     }
@@ -305,7 +308,7 @@ export function VoicesModal({ open, onClose, characters, assignments, onChange, 
         <div className="p-5 space-y-4 max-h-[70vh] overflow-y-auto">
           <div id="voice-preview-container" className="hidden p-2 rounded-[10px] bg-[#0B0B0C] border border-[#26262C]"></div>
           <div className="flex gap-2">
-            <select value={selectedProvider} onChange={(e) => handleProviderChange(e.target.value)} className="flex h-8 w-full rounded-[6px] border border-[#26262C] bg-[#0B0B0C] px-2 text-xs">
+            <select value={selectedProvider} onChange={(e) => void handleProviderChange(e.target.value)} className="flex h-8 w-full rounded-[6px] border border-[#26262C] bg-[#0B0B0C] px-2 text-xs">
               {TTS_PROVIDERS.map(p => (
                 <option key={p.id} value={p.id}>
                   {p.name}{p.freeTier ? ' · FREE' : ''}{p.experimental ? ' · не проверен' : ''}

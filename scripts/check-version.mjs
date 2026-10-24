@@ -10,9 +10,12 @@
  * Регекспы нарочно узкие: README полон исторических «v1.3.x» в разделах
  * изменений, их трогать нельзя — проверяем только заголовок и баннеры.
  */
-import { readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 
-const current = JSON.parse(readFileSync('package.json', 'utf8')).version;
+const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+const current = pkg.version;
+const EXPECTED_LICENSE = 'MIT';
 
 function read(file) {
   return readFileSync(file, 'utf8');
@@ -39,6 +42,56 @@ const claims = [
 
 const problems = [];
 let checked = 0;
+
+// --- Лицензия ---------------------------------------------------------------
+// Публичный репозиторий без LICENSE юридически = «all rights reserved».
+if (!existsSync('LICENSE')) {
+  problems.push('LICENSE: файл отсутствует в корне репозитория');
+} else {
+  const licenseText = read('LICENSE');
+  if (!licenseText.includes('MIT License')) {
+    problems.push('LICENSE: ожидается текст MIT License');
+  }
+  if (!/Permission is hereby granted, free of charge/i.test(licenseText)) {
+    problems.push('LICENSE: отсутствует стандартный текст разрешения MIT');
+  }
+  checked++;
+}
+if (pkg.license !== EXPECTED_LICENSE) {
+  problems.push(`package.json: license = ${JSON.stringify(pkg.license)}, ожидается "${EXPECTED_LICENSE}"`);
+} else {
+  checked++;
+}
+
+// --- Версии в исходниках ----------------------------------------------------
+// Хардкод номера версии в комментариях уже приводил к расхождению 1.3.17 /
+// 1.3.18. Единственный источник — package.json (src/lib/version.ts).
+// Сканируем только «свою» серию (1.3.x): `v20.9.0` в комментарии про Node или
+// фикстура «проект версии v1.2.0» — не хардкод версии приложения и не должны
+// валить проверку. Смена минорной версии автоматически расширяет шаблон.
+const APP_SERIES = current.split('.').slice(0, 2).join('\\.');
+const VERSION_LITERAL = new RegExp(`\\bv?${APP_SERIES}\\.\\d+\\b`, 'g');
+function walk(dir) {
+  const out = [];
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) out.push(...walk(full));
+    else if (/\.(ts|tsx|mjs|js)$/.test(entry)) out.push(full);
+  }
+  return out;
+}
+// Проверяем не только src/, но и scripts/: дрейф «v1.3.18» в комментарии
+// smoke-скрипта уже случался и раньше проходил незамеченным. electron/preload.js
+// сюда не входит — его версия проверяется отдельным точным шаблоном в `claims`.
+// Сам чекер исключён: в его шапке версии упомянуты как примеры расхождений.
+const SELF = join('scripts', 'check-version.mjs');
+const versionFiles = ['src', 'scripts'].flatMap((dir) => walk(dir)).filter((file) => file !== SELF);
+for (const file of versionFiles) {
+  const matches = read(file).match(VERSION_LITERAL);
+  if (matches) {
+    problems.push(`${file}: хардкод версии ${[...new Set(matches)].join(', ')} — используйте APP_VERSION из src/lib/version.ts`);
+  }
+}
 
 for (const claim of claims) {
   const versions = claim.versions.filter(v => typeof v === 'string' && v.length > 0);

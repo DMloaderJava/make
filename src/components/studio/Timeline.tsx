@@ -58,6 +58,10 @@ interface TimelineProps {
   onSetPanelTrim?: (panelId: number, trimIn: number, trimOut: number) => void;
   onTogglePanelMute?: (panelId: number) => void;
   onTogglePanelSolo?: (panelId: number) => void;
+  /** Блокировки дорожек (P1-1): если переданы — состояние живёт в проекте. */
+  videoTrackLocked?: boolean;
+  audioTrackLocked?: boolean;
+  onToggleTrackLock?: (track: 'video' | 'audio') => void;
   canUndo?: boolean;
   canRedo?: boolean;
   onUndo?: () => void;
@@ -93,6 +97,9 @@ export function Timeline({
   onSelectIntro,
   onSelectOutro,
   selectedId,
+  videoTrackLocked,
+  audioTrackLocked,
+  onToggleTrackLock,
   introDuration = 8,
   outroDuration = 5,
   panelGap = 0.3,
@@ -123,8 +130,14 @@ export function Timeline({
   const scrollRafRef = useRef<number | null>(null);
   const [snapEnabled, setSnapEnabled] = useState(true);
   const [autoFollow, setAutoFollow] = useState(true);
-  const [videoLocked, setVideoLocked] = useState(false);
-  const [audioLocked, setAudioLocked] = useState(false);
+  // Локальный fallback: если родитель не передал блокировки (например, в
+  // изолированном использовании компонента), поведение прежнее.
+  const [videoLockedLocal, setVideoLockedLocal] = useState(false);
+  const [audioLockedLocal, setAudioLockedLocal] = useState(false);
+  const videoLocked = videoTrackLocked ?? videoLockedLocal;
+  const audioLocked = audioTrackLocked ?? audioLockedLocal;
+  const toggleVideoLock = () => (onToggleTrackLock ? onToggleTrackLock('video') : setVideoLockedLocal(v => !v));
+  const toggleAudioLock = () => (onToggleTrackLock ? onToggleTrackLock('audio') : setAudioLockedLocal(v => !v));
   // Этап 3.2 (п. 51): drag-and-drop клипов (pointer-events + drag events), draggedPanelId и фильтр одной дорожки
   const [draggedPanelId, setDraggedPanelId] = useState<number | null>(null);
   const [draggedTrack, setDraggedTrack] = useState<'video' | 'audio' | null>(null);
@@ -662,7 +675,7 @@ export function Timeline({
               <span>Видео</span>
               <button
                 type="button"
-                onClick={() => setVideoLocked(v => !v)}
+                onClick={toggleVideoLock}
                 className={`px-1 rounded text-[9px] ${
                   videoLocked ? 'text-[#E8B44C] bg-[#2A2416]' : 'text-[#666672] hover:text-[#F5F5F7]'
                 }`}
@@ -937,7 +950,7 @@ export function Timeline({
               <span>Аудио</span>
               <button
                 type="button"
-                onClick={() => setAudioLocked(v => !v)}
+                onClick={toggleAudioLock}
                 className={`px-1 rounded text-[9px] ${
                   audioLocked ? 'text-[#E8B44C] bg-[#2A2416]' : 'text-[#666672] hover:text-[#F5F5F7]'
                 }`}

@@ -36,20 +36,29 @@ async function waitForServer(retries = 30) {
 function startNextServer() {
   console.log('[Electron] Starting Next.js server...');
   const isDev = !app.isPackaged || process.env.NODE_ENV === 'development';
-  
+  const appRoot = path.join(__dirname, '..');
+
+  // В упакованном приложении npm может отсутствовать, а `npm run start`
+  // зависит от shell. Поэтому Next запускается напрямую бинарём Electron в
+  // режиме Node (ELECTRON_RUN_AS_NODE): так работает и dev, и portable-сборка.
   if (isDev) {
-    // In dev, assume npm run dev is already running or start it
     nextProcess = spawn('npm', ['run', 'dev', '--', '-H', '0.0.0.0', '-p', String(PORT)], {
-      cwd: path.join(__dirname, '..'),
+      cwd: appRoot,
       shell: true,
       stdio: 'inherit'
     });
   } else {
-    // In production, use next start
-    nextProcess = spawn('npm', ['run', 'start', '--', '-H', '0.0.0.0', '-p', String(PORT)], {
-      cwd: path.join(__dirname, '..'),
-      shell: true,
-      stdio: 'inherit'
+    let nextBin;
+    try {
+      nextBin = require.resolve('next/dist/bin/next', { paths: [appRoot] });
+    } catch (err) {
+      console.error('[Electron] Не найден next/dist/bin/next в сборке:', err);
+      return;
+    }
+    nextProcess = spawn(process.execPath, [nextBin, 'start', '-H', '0.0.0.0', '-p', String(PORT)], {
+      cwd: appRoot,
+      stdio: 'inherit',
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', NODE_ENV: 'production' },
     });
   }
 

@@ -28,7 +28,7 @@ interface ContextPanelProps {
 export function ContextPanel({ selected, onUpdatePanel, onUpdateIntro, onUpdateOutro, voiceAssignments, onVoiceChange, onGenerateIntro, onGenerateOutro, generating, onRegeneratePanel, regenerating, onReorderPanel, totalPanels = 0 }: ContextPanelProps) {
   const [voices, setVoices] = useState<Voice[]>([]);
   // Переозвучка импортированного файла — в два клика (первый вооружает кнопку).
-  // Не confirm(): во встроенном превью (iframe без allow-modals) он молча false.
+  // Не нативный confirm: во встроенном превью (iframe без allow-modals) он молча false.
   const [armedPanelId, setArmedPanelId] = useState<number | null>(null);
   const [armedReorder, setArmedReorder] = useState<'up' | 'down' | null>(null);
   // Привязано к id панели и снимается по blur — смена панели снимает его сама.

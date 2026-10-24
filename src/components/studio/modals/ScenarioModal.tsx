@@ -58,7 +58,7 @@ export function ScenarioModal({ open, onClose, imagesCount, existingPanels, ttsL
   const [text, setText] = useState('');
   const [applying, setApplying] = useState(false);
   const [translating, setTranslating] = useState(false);
-  // Подтверждение замены существующих панелей: явный чекбокс, а не confirm() —
+  // Подтверждение замены существующих панелей: явный чекбокс, а не нативный confirm —
   // во встроенном превью (iframe без allow-modals) confirm молча вернёт false.
   const [replaceConfirmed, setReplaceConfirmed] = useState(false);
   const needsReplaceConfirm = existingPanels > 0 && !replaceConfirmed;

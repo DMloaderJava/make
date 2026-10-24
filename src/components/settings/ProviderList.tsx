@@ -9,6 +9,7 @@ import { getLLMHttpError, mapLLMProviderError } from '@/lib/providers/llm/router
 import { TTS_PROVIDERS, getTTSProvider } from '@/lib/providers/tts';
 import { getProviderLink, ProviderLink } from '@/lib/providers/links';
 import { ExternalLink, Check, X, Eye, EyeOff, Trash2, Beaker, Loader2 } from 'lucide-react';
+import { confirmAction, toast } from '@/lib/ui/feedback';
 
 type Tab = 'llm' | 'tts';
 
@@ -62,7 +63,7 @@ function ProviderRow({
               <>
                 {llmProvider?.freeTier && <span className="text-[10px] px-1.5 py-0.5 rounded-[6px] bg-green-900/40 text-green-300 border border-green-800 font-medium">FREE</span>}
                 {llmProvider?.trialOnly && <span title={llmProvider.freeTierNote || 'Пробный период'} className="text-[10px] px-1.5 py-0.5 rounded-[6px] bg-yellow-900/40 text-yellow-300 border border-yellow-800 font-medium">TRIAL</span>}
-                {llmProvider?.supportsVision && <span className="text-[10px] px-1.5 py-0.5 rounded-[6px] bg-[#1E1E23] border border-[#26262C] text-[#8A8A93]">VISION</span>}
+                {llmProvider?.supportsVision && (llmProvider.visionModels?.length ?? 0) > 0 && <span className="text-[10px] px-1.5 py-0.5 rounded-[6px] bg-[#1E1E23] border border-[#26262C] text-[#8A8A93]">VISION</span>}
                 {llmProvider?.limitsUrl && <a href={llmProvider.limitsUrl} target="_blank" rel="noopener noreferrer" className="text-[11px] text-[#8A8A93] hover:text-[#E8B44C]">Лимиты</a>}
               </>
             ) : (
@@ -484,7 +485,10 @@ function DataManagementSection() {
 
   const handleExport = async (withKeys: boolean) => {
     if (withKeys) {
-      const ok = confirm('Бэкап содержит API-ключи в открытом виде. Храни файл в безопасном месте. Продолжить?');
+      const ok = await confirmAction({
+        message: 'Бэкап содержит API-ключи в открытом виде. Храни файл в безопасном месте.',
+        confirmLabel: 'Продолжить',
+      });
       if (!ok) return;
     }
     setLoading(true);
@@ -498,7 +502,7 @@ function DataManagementSection() {
       a.click();
       URL.revokeObjectURL(url);
     } catch (e: any) {
-      alert(`Ошибка экспорта: ${e.message}`);
+      toast(`Ошибка экспорта: ${e.message}`, 'error');
     } finally {
       setLoading(false);
       loadUsage();
@@ -506,34 +510,46 @@ function DataManagementSection() {
   };
 
   const handleImport = async (file: File) => {
-    const confirm1 = confirm('Это перезапишет все текущие данные (проекты, ключи, настройки, кеш). Продолжить?');
+    const confirm1 = await confirmAction({
+      message: 'Импорт перезапишет все текущие данные (проекты, ключи, настройки, кеш).',
+      confirmLabel: 'Продолжить',
+      danger: true,
+    });
     if (!confirm1) return;
     setLoading(true);
     try {
       const { importAllInfo } = await import('@/lib/storage/info');
       await importAllInfo(file);
-      alert('Импорт завершён, перезагружаю...');
+      toast('Импорт завершён, перезагружаю...', 'success');
       location.reload();
     } catch (e: any) {
-      alert(`Ошибка импорта: ${e.message}`);
+      toast(`Ошибка импорта: ${e.message}`, 'error');
     } finally {
       setLoading(false);
     }
   };
 
   const handleClear = async () => {
-    const c1 = confirm('Удалить все проекты, ключи и кеш?');
+    const c1 = await confirmAction({
+      message: 'Удалить все проекты, ключи и кеш?',
+      confirmLabel: 'Удалить',
+      danger: true,
+    });
     if (!c1) return;
-    const c2 = confirm('Точно? Это необратимо. Все данные в mvs-info будут удалены.');
+    const c2 = await confirmAction({
+      message: 'Точно? Это необратимо. Все данные в mvs-info будут удалены.',
+      confirmLabel: 'Удалить всё',
+      danger: true,
+    });
     if (!c2) return;
     setLoading(true);
     try {
       const { clearAllInfo } = await import('@/lib/storage/info');
       await clearAllInfo();
-      alert('Всё очищено');
+      toast('Всё очищено', 'success');
       location.reload();
     } catch (e: any) {
-      alert(`Ошибка очистки: ${e.message}`);
+      toast(`Ошибка очистки: ${e.message}`, 'error');
     } finally {
       setLoading(false);
     }

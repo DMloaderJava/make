@@ -5,6 +5,10 @@ on:
     branches: ['**']
   pull_request:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify:
     # Windows проверяем отдельно: пути, npm-скрипты и .bat-лаунчеры ломаются
@@ -14,6 +18,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -43,17 +48,96 @@ jobs:
       - name: "Smoke — прод-сборка стартует"
         run: npm run smoke:server
 
+      # Windows-образ содержит Chrome и Edge, но это неявная зависимость от
+      # образа runner-а: ставим Chrome явно (если уже есть — choco скажет об этом).
+      - name: "Chrome для smoke (Windows)"
+        if: runner.os == 'Windows'
+        run: choco install googlechrome --no-progress -y
+        continue-on-error: true
+
       # Браузерный smoke на Chromium (Задача 3.1.2 / Н-3.2): загрузка 100×2000 PNG,
       # применение сценария с 2 панелями, импорт WAV, seek/Play/Pause и экспорт клипа.
       - name: "Smoke — редактор в Chromium (E2E)"
         if: runner.os == 'Linux'
         run: npm run smoke:editor
 
+      # Windows: сокращённый сценарий (загрузка → сценарий → импорт WAV → экспорт).
+      # Pointer-тесты NLE и попиксельное сравнение кадров на headless Windows
+      # нестабильны из-за синтетических pointer-событий, а не из-за продукта.
+      - name: "Smoke — редактор в Chromium (сокращённый, Windows)"
+        if: runner.os == 'Windows'
+        run: npm run smoke:editor -- --quick
+
+      # Визуальное доказательство прогона: скриншоты Preview/Export, коллажи и
+      # экспортированный WebM. В git они не хранятся (регенерируемые бинарники),
+      # поэтому выгружаются артефактом — в том числе при падении smoke.
+      - name: "Артефакты smoke"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-${{ matrix.os }}
+          path: |
+            artifacts/smoke-editor
+            artifacts/smoke-onboarding
+          if-no-files-found: warn
+          retention-days: 14
+
       # Кроссплатформенные проверки (node, без pwsh): версия в package.json не
-      # разъехалась по баннерам лаунчеров/README/electron-моста, а .bat соблюдают
-      # правила npm-флагов, delayed expansion и %ERRORLEVEL% вне блоков.
+      # разъехалась по баннерам лаунчеров/README/electron-моста, таблицы
+      # провайдеров в README совпадают с реестром, .bat соблюдают правила
+      # npm-флагов, delayed expansion и %ERRORLEVEL% вне блоков.
       # На Windows шаг читает те же файлы с CRLF — это заодно проверка .gitattributes.
-      - name: Проверки согласованности (версии, лаунчеры)
-        run: npm run check:versions && npm run check:launchers
+      - name: Проверки согласованности (версии, провайдеры, лаунчеры)
+        run: npm run check:versions && npm run check:providers && npm run check:tests && npm run check:launchers
 
+  # Переносная desktop-сборка (Electron + Next): AppImage на Linux, portable exe
+  # на Windows. Код-подпись не выполняется — вне scope стабилизации.
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Здесь postinstall Electron нужен: electron-builder упаковывает бинарь.
+      - name: Установка зависимостей
+        run: npm ci --no-audit --no-fund
+
+      - name: Сборка Next
+        run: npm run build
+
+      - name: Упаковка desktop
+        run: npx electron-builder --publish never
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.os }}
+          path: |
+            release/*.AppImage
+            release/*.exe
+            release/*-unpacked/**
+          # Формат артефакта зависит от electron-builder и ОС: на Linux нет
+          # *.exe, на Windows — *.AppImage. Отсутствие файлов здесь означает
+          # сломанную упаковку, но отдельный шаг ниже явно проверяет, что
+          # артефакт появился, поэтому загрузка не блокирует CI.
+          if-no-files-found: warn
+          retention-days: 14
+
+      # Страховка вместо строгого режима загрузки: формат файлов зависит от
+      # ОС, но пустой release/ означает, что упаковка сломалась.
+      - name: Проверить, что артефакт desktop собрался
+        shell: bash
+        run: |
+          ls -la release || true
+          if [ -z "$(ls -A release 2>/dev/null)" ]; then
+            echo "::error::electron-builder не создал ни одного артефакта в release/"
+            exit 1
+          fi

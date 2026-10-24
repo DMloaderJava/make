@@ -11,7 +11,7 @@ const DB_VERSION = 3;
 export const PROJECT_TTL_MS = 24 * 60 * 60 * 1000;
 
 /** Текущая версия схемы проекта (Этап 1 п. 5, Этап 8 п. 74). */
-export const CURRENT_PROJECT_SCHEMA_VERSION = 2;
+export const CURRENT_PROJECT_SCHEMA_VERSION = 3;
 /** Текущая версия формата таймлайна (Этап 1 п. 5). */
 export const CURRENT_TIMELINE_VERSION = 2;
 
@@ -47,7 +47,7 @@ export interface PanelData {
    */
   fullFrame?: boolean;
   /**
-   * Откуда аудио панели (v1.3.18). 'import' — внешний файл из «Импорт аудио»:
+   * Откуда аудио панели. 'import' — внешний файл из «Импорт аудио»:
    * «Озвучить всё» его не трогает, «↻ Переозвучить» спрашивает подтверждение.
    * Нет поля — TTS (или аудио ещё нет). Сам файл — по тому же ключу
    * audio/{id}.mp3, длительность — project.audioDurations[id].
@@ -187,10 +187,18 @@ export interface Project {
   audioDurations?: Record<number, number>; // panelId -> duration, persisted
   /**
    * Снимок текста каждой панели на момент последней генерации аудио.
-   * Нужен для мягкой миграции: у аудио до v1.3.2 нет .sig-подписи, и без снимка
+   * Нужен для мягкой миграции: у старого аудио нет .sig-подписи, и без снимка
    * нельзя отличить «текст не менялся» от «менялся, но файл остался старым».
    */
   audioTexts?: Record<number, string>;
+  /**
+   * Блокировки дорожек таймлайна (P1-1, схема v3).
+   *
+   * Раньше это был локальный useState в Timeline: блокировка аудио/видео
+   * исчезала после перезагрузки страницы, и «случайно» разблокированный
+   * таймлайн менялся от первого неосторожного drag-and-drop.
+   */
+  locks?: { videoTrackLocked?: boolean; audioTrackLocked?: boolean };
   /** Манифест ресурсов проекта: контрольные суммы, MIME, размеры (Этап 8 п. 72, 73). */
   resourceManifest?: Record<string, ResourceManifestEntry>;
   /** Снимок для отмены последнего импорта аудио (Этап 2 п. 20). */

@@ -1,3 +1,4 @@
+import { readEditorSource } from './helpers/editorSource';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -492,7 +493,7 @@ test('Задача 3.1.6: паритет Preview и Export на точках п�
 test('Задача 3.3.1 (п. 62): двусторонняя связь выбора панели в Preview и подсветки аудио-клипа (класс selected) в Timeline', () => {
   const previewSrc = readFileSync('src/components/studio/Preview.tsx', 'utf8');
   const timelineSrc = readFileSync('src/components/studio/Timeline.tsx', 'utf8');
-  const editorSrc = readFileSync('src/app/editor/[id]/page.tsx', 'utf8');
+  const editorSrc = readEditorSource();
 
   assert.ok(
     previewSrc.includes('onSelectPanel?.(first.panelId)'),

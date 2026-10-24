@@ -114,6 +114,12 @@ export function migrateProjectSchema(raw: Partial<Project> & { id: string }): Sc
   const introDuration = typeof raw.introDuration === 'number' && Number.isFinite(raw.introDuration) && raw.introDuration >= 0 ? raw.introDuration : 8;
   const outroDuration = typeof raw.outroDuration === 'number' && Number.isFinite(raw.outroDuration) && raw.outroDuration >= 0 ? raw.outroDuration : 5;
   const voiceAssignments = raw.voiceAssignments && typeof raw.voiceAssignments === 'object' ? { ...raw.voiceAssignments } : {};
+  // Схема v3: блокировки дорожек живут в проекте (P1-1), а не в useState
+  // компонента — иначе после перезагрузки они молча снимались.
+  const locks = {
+    videoTrackLocked: Boolean(raw.locks?.videoTrackLocked),
+    audioTrackLocked: Boolean(raw.locks?.audioTrackLocked),
+  };
   const rawSettings: Partial<Project['settings']> = raw.settings && typeof raw.settings === 'object' ? raw.settings : {};
   const panelGap = typeof rawSettings.panelGap === 'number' && Number.isFinite(rawSettings.panelGap) && rawSettings.panelGap >= 0
     ? rawSettings.panelGap
@@ -178,6 +184,7 @@ export function migrateProjectSchema(raw: Partial<Project> & { id: string }): Sc
     id: raw.id,
     name: typeof raw.name === 'string' && raw.name.trim() ? raw.name : 'Без названия',
     schemaVersion: CURRENT_PROJECT_SCHEMA_VERSION,
+    locks,
     timelineVersion: CURRENT_TIMELINE_VERSION,
     revision: typeof raw.revision === 'number' && Number.isFinite(raw.revision) ? raw.revision : 1,
     images: Array.isArray(raw.images) ? [...raw.images] : [],
