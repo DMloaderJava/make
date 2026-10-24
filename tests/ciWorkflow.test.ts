@@ -113,12 +113,21 @@ test('ci: verify идёт матрицей ubuntu+windows с потолком в
 
 test('ci: полный smoke только на Linux, на Windows — сокращённый', () => {
   const steps = stepsOf('verify');
-  const full = steps.find((step) => step.run?.trim() === 'npm run smoke:editor');
-  const quick = steps.find((step) => step.run?.trim() === 'npm run smoke:editor -- --quick');
+  // Шаг может быть обёрнут (лог в артефакт, повтор при флапе), поэтому ищем по
+  // вызову скрипта, а не по точной строке: важно, какой сценарий и на какой ОС.
+  const runs = steps.map((step) => ({ if: step.if, run: String(step.run ?? '') }));
+  const full = runs.find((step) => step.run.includes('npm run smoke:editor') && !step.run.includes('--quick'));
+  const quick = runs.find((step) => step.run.includes('npm run smoke:editor -- --quick'));
   assert.ok(full, 'нет полного smoke:editor');
   assert.ok(quick, 'нет сокращённого smoke:editor -- --quick');
   assert.equal(full.if, "runner.os == 'Linux'");
   assert.equal(quick.if, "runner.os == 'Windows'");
+  // Падение smoke на Linux должно оставлять лог в артефактах: иначе причина
+  // видна только как «Process completed with exit code 1».
+  assert.ok(
+    full.run.includes('artifacts/smoke-editor/ci-smoke.log'),
+    'полный smoke на Linux должен писать лог в artifacts/smoke-editor/ci-smoke.log (артефакт smoke-*)'
+  );
 });
 
 test('ci: в verify входят проверки согласованности', () => {

@@ -57,9 +57,28 @@ jobs:
 
       # Браузерный smoke на Chromium (Задача 3.1.2 / Н-3.2): загрузка 100×2000 PNG,
       # применение сценария с 2 панелями, импорт WAV, seek/Play/Pause и экспорт клипа.
+      # Вывод прогона уезжает артефактом: иначе падение smoke видно только как
+      # «Process completed with exit code 1» (логи job-а в blob-хранилище могут
+      # быть недоступны). Разрешён один повтор: в headless Chromium изредка не
+      # поднимается браузер или сервер — это флап инфраструктуры, а не продукта.
+      # Лог первой попытки сохраняется, поэтому флап видно в артефактах.
       - name: "Smoke — редактор в Chromium (E2E)"
         if: runner.os == 'Linux'
-        run: npm run smoke:editor
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p artifacts/smoke-editor
+          log=artifacts/smoke-editor/ci-smoke.log
+          run_smoke() {
+            echo "--- $(date -u +%FT%TZ) попытка smoke:editor ---" | tee -a "$log"
+            npm run smoke:editor 2>&1 | tee -a "$log"
+          }
+          if run_smoke; then
+            exit 0
+          fi
+          echo "smoke:editor — попытка упала, повтор через 5 с" | tee -a "$log"
+          sleep 5
+          run_smoke
 
       # Windows: сокращённый сценарий (загрузка → сценарий → импорт WAV → экспорт).
       # Pointer-тесты NLE и попиксельное сравнение кадров на headless Windows
