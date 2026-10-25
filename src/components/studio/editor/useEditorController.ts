@@ -277,7 +277,7 @@ export function useEditorController(id: string) {
     panelGap,
     audioDurations,
     selectedId,
-    currentTime,
+    clockRef,
     updateProject,
     handleSeek,
     historyRef,

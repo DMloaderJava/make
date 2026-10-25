@@ -2,6 +2,7 @@
 
 import type { Dispatch, SetStateAction } from 'react';
 import type { Project } from '@/lib/storage/db';
+import type { ProjectClock } from '@/lib/pipeline/projectClock';
 import type { NleHistorySnapshot, HistoryManager } from '@/lib/pipeline/historyManager';
 import {
   reorderPanelClips,
@@ -29,7 +30,7 @@ export function useEditorNle({
   panelGap,
   audioDurations,
   selectedId,
-  currentTime,
+  clockRef,
   updateProject,
   handleSeek,
   historyRef,
@@ -54,7 +55,7 @@ export function useEditorNle({
   setAudioDurations: Dispatch<SetStateAction<Map<number, number>>>;
   setShowHealthModal: Dispatch<SetStateAction<boolean>>;
   setNotice: Dispatch<SetStateAction<string | null>>;
-  currentTime: number;
+  clockRef: { current: ProjectClock };
 }) {
   // --- NLE операции и стек истории Undo/Redo (Этап 6 п. 51–60) ---
   const buildCurrentHistorySnapshot = (label: string): NleHistorySnapshot | null => {
@@ -147,15 +148,18 @@ export function useEditorNle({
 
   const handleSplitActiveClip = () => {
     if (!project) return;
+    // Время берём напрямую из часов: rAF-тики больше не пишутся в React-состояние,
+    // поэтому currentTime там мог отставать во время воспроизведения.
+    const now = clockRef.current.getTime();
     const targetPanelId = typeof selectedId === 'number'
       ? selectedId
-      : tl.find(s => currentTime >= s.audioStart && currentTime < s.audioEnd)?.panelId ?? null;
+      : tl.find(s => now >= s.audioStart && now < s.audioEnd)?.panelId ?? null;
     if (targetPanelId === null) return;
     const seg = tl.find(s => s.panelId === targetPanelId);
     if (!seg) return;
     const segDur = Math.max(0.2, seg.audioEnd - seg.audioStart);
-    const offset = currentTime > seg.audioStart + 0.05 && currentTime < seg.audioEnd - 0.05
-      ? currentTime - seg.audioStart
+    const offset = now > seg.audioStart + 0.05 && now < seg.audioEnd - 0.05
+      ? now - seg.audioStart
       : segDur / 2;
 
     try {

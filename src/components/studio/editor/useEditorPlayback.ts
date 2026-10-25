@@ -11,8 +11,10 @@ import type { ObjectUrlRegistry } from '@/lib/pipeline/objectUrlRegistry';
  * Воспроизведение (P0-1): подписка на ProjectClock, синхронизация плеера,
  * горячие клавиши и seek.
  *
- * Единственное место, где вызывается setCurrentTime: превью читает часы
- * напрямую в Canvas-rAF на 60 fps, а React-дерево получает тики ~20 Гц.
+ * Единственное место, где вызывается setCurrentTime: rAF-тики часов (60 fps)
+ * не проходят через React-состояние — превью рисует кадры собственным rAF,
+ * таймлайн двигает плейхед императивно, а дерево React перерисовывается только
+ * на дискретных событиях (seek/play/pause/горячие клавиши/конец воспроизведения).
  */
 export function useEditorPlayback({
   project,
@@ -74,19 +76,23 @@ export function useEditorPlayback({
     });
     playerRef.current = player;
 
-    let lastReactSyncWallMs = 0;
     let lastPlayingState = clock.getIsPlaying();
 
     const unsubscribe = clock.subscribe((snap) => {
+      // ref обновляется на каждом тике (60 Гц), чтобы не-React потребители
+      // (hotkeys, NLE) всегда видели актуальное время без перерисовки дерева.
+      currentTimeRef.current = snap.currentTime;
       if (snap.isPlaying !== lastPlayingState) {
         lastPlayingState = snap.isPlaying;
         setIsPlaying(snap.isPlaying);
       }
-      const nowMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
-      if (snap.reason === 'raf' && nowMs - lastReactSyncWallMs < 45) {
+      // rAF-тики не должны будить React-дерево 60 раз в секунду: Preview рисует
+      // кадры собственным rAF, а Timeline двигает плейхед императивно по своей
+      // подписке на эти же часы. В React-состояние время пишем только на
+      // дискретных событиях (seek, play, pause, hotkey, wheel/drag, конец).
+      if (snap.reason === 'raf') {
         return;
       }
-      lastReactSyncWallMs = nowMs;
       setCurrentTime(snap.currentTime);
     });
 

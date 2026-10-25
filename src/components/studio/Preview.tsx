@@ -866,8 +866,16 @@ export function Preview({
     }
 
     setClockTime(clock.getTime());
+    // Подпись formatTime имеет точность до секунды: нет смысла будить React
+    // 60 раз в секунду — обновляем состояние только при смене целой секунды.
+    // Перерисовка Canvas по-прежнему идёт на каждом тике через scheduleDraw.
+    let lastClockSecond = Math.floor(clock.getTime());
     const unsub = clock.subscribe(snap => {
-      setClockTime(snap.currentTime);
+      const nextSecond = Math.floor(snap.currentTime);
+      if (nextSecond !== lastClockSecond) {
+        lastClockSecond = nextSecond;
+        setClockTime(snap.currentTime);
+      }
       scheduleDraw();
     });
 
