@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PanelData, SyncTimeline } from '@/lib/storage/db';
+import type { ProjectClock } from '@/lib/pipeline/projectClock';
 import {
   TIMELINE_TRACK_OFFSET,
   TIMELINE_ZOOM_MAX,
@@ -35,6 +36,12 @@ interface TimelineProps {
   panels?: PanelData[];
   currentTime: number;
   duration: number;
+  /**
+   * Единые часы проекта. Если переданы, плейхед, подсветка активного клипа,
+   * подпись времени и `data-current-time` двигаются императивно по подписке
+   * на часы — без перерисовки всего дерева клипов на каждом rAF-тике.
+   */
+  clock?: ProjectClock;
   onSeek: (time: number) => void;
   onSelectPanel: (panelId: number) => void;
   onSelectIntro: () => void;
@@ -77,13 +84,23 @@ function formatTime(s: number): string {
   return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
 }
 
+// Форма волны детерминирована только panelId — кэшируем массивы, чтобы не
+// пересчитывать тригонометрию и не аллоцировать массивы на каждый рендер
+// (во время воспроизведения таймлайн раньше перерисовывался ~20 раз в секунду).
+const waveformCache = new Map<string, number[]>();
+
 function waveform(panelId: number, count = 32): number[] {
-  return Array.from({ length: count }, (_, i) => {
+  const cacheKey = `${panelId}:${count}`;
+  const cached = waveformCache.get(cacheKey);
+  if (cached) return cached;
+  const next = Array.from({ length: count }, (_, i) => {
     const value = Math.abs(
       Math.sin((panelId + 1) * 7.31 + i * 1.83) * 0.58 + Math.cos(i * 0.71 + panelId) * 0.24
     );
     return clamp(0.18 + value, 0.16, 0.95);
   });
+  waveformCache.set(cacheKey, next);
+  return next;
 }
 
 export function Timeline({
@@ -92,6 +109,7 @@ export function Timeline({
   panels = [],
   currentTime,
   duration,
+  clock,
   onSeek,
   onSelectPanel,
   onSelectIntro,
@@ -179,6 +197,19 @@ export function Timeline({
   const scrollerRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
 
+  // --- Императивный слой часов: плейхед, подсветка клипа и подпись времени
+  // обновляются прямым DOM-доступом, не запуская перерисовку дерева клипов.
+  const sectionRef = useRef<HTMLElement>(null);
+  const playheadRef = useRef<HTMLDivElement>(null);
+  const activeOverlayRef = useRef<HTMLDivElement>(null);
+  const timeReadoutRef = useRef<HTMLSpanElement>(null);
+  const liveTimeRef = useRef(currentTime);
+  const geometryRef = useRef<ReturnType<typeof computeTimelineGeometry> | null>(null);
+  const timelineRef = useRef(timeline);
+  const durationRef = useRef(duration);
+  const zoomRef = useRef(zoom);
+  const viewportWidthRef = useRef(viewportWidth);
+
   // Этап 3.1 (Н-3.6): отмена запланированного scrollRafRef при размонтировании компонента
   useEffect(
     () => () => {
@@ -228,30 +259,111 @@ export function Timeline({
     [duration, zoom, scrollLeft, viewportWidth]
   );
 
-  // Автоследование горизонтального скролла за playhead при воспроизведении в rAF (Этап 5 п. 43, P1 п. 13)
+  // Держим «горячие» значения в ref, чтобы подписка на часы и rAF-цикл
+  // автоследования читали актуальные данные без перезапуска и без setState.
+  useEffect(() => {
+    geometryRef.current = geometry;
+    timelineRef.current = timeline;
+    durationRef.current = duration;
+    zoomRef.current = zoom;
+    viewportWidthRef.current = viewportWidth;
+    liveTimeRef.current = currentTime;
+  });
+
+  /**
+   * Императивно переносит плейхед, рамку активного клипа и подпись времени в
+   * позицию `t`. Вызывается из подписки на ProjectClock на каждом rAF-тике,
+   * но НЕ запускает React-рендер: дерево клипов (кнопки, waveform, ручки trim)
+   * при воспроизведении остается нетронутым.
+   */
+  const applyClockTime = (t: number) => {
+    liveTimeRef.current = t;
+    const geom = geometryRef.current;
+    if (!geom) return;
+
+    sectionRef.current?.setAttribute('data-current-time', t.toFixed(3));
+
+    const playhead = playheadRef.current;
+    if (playhead) {
+      playhead.style.left = `${geom.timeToContentPx(t)}px`;
+    }
+
+    // Подсветка активного клипа на дорожке Видео (раньше считалась в каждом
+    // рендере через activeNow и перерисовывала все клипы).
+    const overlay = activeOverlayRef.current;
+    if (overlay) {
+      const seg = timelineRef.current.find(s => t >= s.audioStart - 1e-4 && t < s.audioEnd + 1e-4);
+      if (seg) {
+        const segGeom = geom.segmentGeometry(seg.audioStart, seg.audioEnd, 1.2);
+        overlay.style.display = 'block';
+        overlay.style.left = `${segGeom.leftPercent}%`;
+        overlay.style.width = `${segGeom.widthPercent}%`;
+      } else {
+        overlay.style.display = 'none';
+      }
+    }
+
+    // Подпись времени меняется раз в секунду — лишний раз textContent не трогаем.
+    const readout = timeReadoutRef.current;
+    if (readout) {
+      const nextText = `${formatTime(t)} / ${formatTime(durationRef.current)}`;
+      if (readout.textContent !== nextText) readout.textContent = nextText;
+    }
+  };
+
+  // Единая подписка на часы: все визуальные движения таймлайна во время
+  // воспроизведения идут мимо React (см. applyClockTime).
+  useEffect(() => {
+    if (!clock) return;
+    applyClockTime(clock.getTime());
+    const unsubscribe = clock.subscribe(snap => {
+      applyClockTime(snap.currentTime);
+    });
+    return unsubscribe;
+  }, [clock]);
+
+  // Режим без часов (изолированное использование): синхронизируемся по пропу.
+  useEffect(() => {
+    if (clock) return;
+    applyClockTime(currentTime);
+  }, [clock, currentTime, geometry, duration, timeline]);
+
+  // Геометрия меняется на зум/скролл/ресайз — сразу переставляем плейхед,
+  // не дожидаясь следующего тика часов.
+  useEffect(() => {
+    applyClockTime(clock ? clock.getTime() : liveTimeRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [geometry]);
+
+  // Автоследование горизонтального скролла за playhead при воспроизведении в rAF (Этап 5 п. 43, P1 п. 13).
+  // Цикл читает время из ref и не вызывает setState на каждом кадре: изменение
+  // scrollLeft подхватывается штатным onScroll-обработчиком (он троттлит
+  // обновление scrollLeft через scrollRafRef).
   useEffect(() => {
     if (!autoFollow || !isPlaying) return;
-    const scroller = scrollerRef.current;
-    if (!scroller) return;
-    const rafId = window.requestAnimationFrame(() => {
+    let rafId = 0;
+    const step = () => {
       const el = scrollerRef.current;
-      if (!el) return;
-      const nextScroll = computeAutoFollowScrollLeft({
-        currentTime,
-        duration,
-        zoom,
-        scrollLeft: el.scrollLeft,
-        viewportWidth: el.clientWidth || viewportWidth,
-        trackOffset: TIMELINE_TRACK_OFFSET,
-        smoothing: 0.2,
-      });
-      if (Math.abs(nextScroll - el.scrollLeft) > 0.5) {
-        el.scrollLeft = nextScroll;
-        setScrollLeft(nextScroll);
+      const geom = geometryRef.current;
+      if (el && geom) {
+        const nextScroll = computeAutoFollowScrollLeft({
+          currentTime: liveTimeRef.current,
+          duration: durationRef.current,
+          zoom: zoomRef.current,
+          scrollLeft: el.scrollLeft,
+          viewportWidth: el.clientWidth || viewportWidthRef.current,
+          trackOffset: TIMELINE_TRACK_OFFSET,
+          smoothing: 0.2,
+        });
+        if (Math.abs(nextScroll - el.scrollLeft) > 0.5) {
+          el.scrollLeft = nextScroll;
+        }
       }
-    });
+      rafId = window.requestAnimationFrame(step);
+    };
+    rafId = window.requestAnimationFrame(step);
     return () => window.cancelAnimationFrame(rafId);
-  }, [currentTime, duration, zoom, autoFollow, isPlaying, viewportWidth]);
+  }, [autoFollow, isPlaying]);
 
   // Масштабирование вокруг currentTime без сброса горизонтального скролла (Этап 5 п. 44, 45)
   const handleZoomChange = (nextZoomRaw: number) => {
@@ -263,7 +375,7 @@ export function Timeline({
     const scroller = scrollerRef.current;
     if (scroller) {
       const result = computeZoomAroundTime({
-        anchorTime: currentTime,
+        anchorTime: liveTimeRef.current,
         duration,
         oldZoom: zoom,
         newZoom: clampedZoom,
@@ -375,6 +487,7 @@ export function Timeline({
 
   return (
     <section
+      ref={sectionRef}
       data-testid="studio-timeline"
       data-current-time={currentTime.toFixed(3)}
       data-dragged-panel-id={draggedPanelId ?? undefined}
@@ -557,6 +670,7 @@ export function Timeline({
           </div>
 
           <span
+            ref={timeReadoutRef}
             data-testid="timeline-time-readout"
             className="font-mono text-[11px] text-[#8A8A93]"
           >
@@ -686,6 +800,14 @@ export function Timeline({
               </button>
             </div>
             <div className="relative h-20 sm:h-24 rounded-md bg-[#0B0B0C]">
+              {/* Рамка активного по времени клипа: двигается императивно из
+                  подписки на ProjectClock, без перерисовки списка клипов. */}
+              <div
+                ref={activeOverlayRef}
+                aria-hidden="true"
+                className="pointer-events-none absolute top-1 bottom-1 z-[5] rounded border border-emerald-400/80 bg-[#283328]"
+                style={{ display: 'none', left: 0, width: 0 }}
+              />
               {/* Интро (Этап 5 п. 49) */}
               {introDuration > 0 && (
                 <button
@@ -732,8 +854,6 @@ export function Timeline({
               {timeline.map((seg, segIdx) => {
                 const segGeom = geometry.segmentGeometry(seg.audioStart, seg.audioEnd, 1.2);
                 const selected = selectedId === seg.panelId;
-                const activeNow =
-                  currentTime >= seg.audioStart - 1e-4 && currentTime < seg.audioEnd + 1e-4;
                 const panel = panelById.get(seg.panelId);
                 const fromPct = panel ? Math.round(panel.bbox.y) : 0;
                 const toPct = panel ? Math.round(panel.bbox.y + panel.bbox.height) : 100;
@@ -874,8 +994,6 @@ export function Timeline({
                         ? 'border-[#34D399] ring-2 ring-[#34D399] bg-[#164E3E] z-20'
                         : selected
                         ? 'selected border-[#F5D27A] ring-1 ring-[#E8B44C] bg-[#3A311D] z-10'
-                        : activeNow
-                        ? 'border-emerald-400/80 bg-[#283328]'
                         : 'border-[#34343C] bg-[#24242B] hover:border-[#77736A]'
                     }`}
                     style={{
@@ -1449,8 +1567,10 @@ export function Timeline({
             </div>
           </div>
 
-          {/* Линия Playhead, строго привязанная к geometry.timeToContentPx(currentTime) (Этап 5 п. 41) */}
+          {/* Линия Playhead, строго привязанная к geometry.timeToContentPx(currentTime) (Этап 5 п. 41).
+              Во время воспроизведения позиция обновляется императивно из подписки на clock. */}
           <div
+            ref={playheadRef}
             className="pointer-events-none absolute bottom-0 top-0 z-20 w-px bg-[#F5D27A] shadow-[0_0_8px_rgba(232,180,76,0.8)]"
             style={{ left: `${geometry.timeToContentPx(currentTime)}px` }}
           >

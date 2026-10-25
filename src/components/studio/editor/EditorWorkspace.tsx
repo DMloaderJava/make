@@ -120,6 +120,7 @@ export function EditorWorkspace({ c }: { c: EditorController }) {
               panels={project.panels}
               currentTime={currentTime}
               duration={duration}
+              clock={clockInstance}
               onSeek={handleSeek}
               onSelectPanel={(id) => {
                 setSelectedId(id);
