@@ -527,6 +527,57 @@ export function sampleScroll(keys: ScrollKeyframe[], time: number): number {
   return keys[keys.length - 1].y;
 }
 
+/**
+ * Непрерывный обратный маппинг позиции ленты → время для РУЧНОЙ прокрутки
+ * (колесо мыши / перетаскивание пальцем).
+ *
+ * В отличие от `timeAtScroll` (семантический снап к `audioStart` панели —
+ * на нем держатся клики, тесты и обратная связь «какая реплика звучит»), эта
+ * функция инвертирует саму траекторию `sampleScroll`: камера следует за
+ * жестом попиксельно, без ступенек на границах реплик. Холды (одна y-позиция
+ * на интервале времени) и easeInOut обрабатываются за счёт инверсии по
+ * монотонной функции времени.
+ *
+ * Траектория гарантированно неубывает (анти-откат в `stripScrollSpans`,
+ * hold-режим на паузах, входы страниц только вниз), поэтому достаточно
+ * бинарного поиска по времени. `hintTime` (текущее время часов) не даёт
+ * времени прыгать назад, пока палец/колесо удерживают позицию на холде.
+ */
+export function timeForScrollContinuous(
+  keys: ScrollKeyframe[],
+  targetY: number,
+  hintTime?: number
+): number {
+  if (keys.length === 0) return 0;
+  const firstTime = keys[0].time;
+  const lastTime = keys[keys.length - 1].time;
+  if (keys.length === 1 || lastTime <= firstTime) return firstTime;
+
+  const firstY = sampleScroll(keys, firstTime);
+  const lastY = sampleScroll(keys, lastTime);
+
+  // Уже стоим на холде с этой позицией (включая граничные плато) — не дёргаем
+  // время внутри плато, иначе палец замирает, а время улетает вперёд.
+  if (hintTime !== undefined && Number.isFinite(hintTime)) {
+    const hint = Math.min(lastTime, Math.max(firstTime, hintTime));
+    if (Math.abs(sampleScroll(keys, hint) - targetY) < 0.01) return hint;
+  }
+
+  if (targetY <= firstY) return firstTime;
+  if (targetY >= lastY) return lastTime;
+
+  // Первое время t, при котором траектория достигает targetY:
+  // на холде это начало плато, на движении — точная инверсия.
+  let lo = firstTime;
+  let hi = lastTime;
+  for (let i = 0; i < 32; i++) {
+    const mid = (lo + hi) / 2;
+    if (sampleScroll(keys, mid) < targetY) lo = mid;
+    else hi = mid;
+  }
+  return (lo + hi) / 2;
+}
+
 export interface StripRenderOptions {
   layout: StripLayout;
   /** Изображения страниц по индексу слота (может быть меньше — пропуски игнорируются). */
@@ -940,6 +991,11 @@ export interface StripScene {
   scrollAt(time: number): number;
   /** Позиция скролла → начало реплики (обратный маппинг), по индексу сцены. */
   timeAtScroll(scrollY: number): number | null;
+  /**
+   * Непрерывная инверсия траектории для ручной прокрутки (колесо/drag):
+   * позиция ленты → время без снапа к границам реплик.
+   */
+  timeAtScrollContinuous(scrollY: number, hintTime?: number): number;
   render(
     ctx: CanvasRenderingContext2D,
     time: number,
@@ -974,6 +1030,8 @@ export function createStripScene(params: {
     index,
     scrollAt: (time: number) => sampleScroll(keyframes, time),
     timeAtScroll: (scrollY: number) => timeAtScrollIndexed(layout, index, scrollY),
+    timeAtScrollContinuous: (scrollY: number, hintTime?: number) =>
+      timeForScrollContinuous(keyframes, clampScroll(scrollY, layout), hintTime),
     render: (ctx, time, extras) => {
       const scrollY =
         typeof extras?.scrollY === 'number' && Number.isFinite(extras.scrollY)
