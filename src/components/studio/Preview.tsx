@@ -561,17 +561,21 @@ export function Preview({
   }, [loaded, stripScene]);
 
   /**
-   * Ручной скролл ленты (колесо): scrollY → timeAtScroll → onSeek к позиции
-   * времени на ProjectClock (Этап 4 п. 40).
+   * Ручной скролл ленты (колесо): позиция ленты плавно гонится за жестом в
+   * пиксельном пространстве, а в часы попадает через НЕПРЕРЫВНУЮ инверсию
+   * траектории (timeAtScrollContinuous) — без ступенек снапа к границам реплик
+   * и без шторма перерисовок React (reason 'wheel' не синхронизирует состояние
+   * на каждом кадре; финальный onSeek при остановке досинхронизирует его).
    */
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || renderMode !== 'strip') return;
     const onWheel = (e: WheelEvent) => {
       const state = stripStateRef.current;
-      if (!state.stripScene || !state.onSeek) return;
+      if (!state.stripScene) return;
       e.preventDefault();
       userScrollingRef.current = true;
+      if (clock?.getIsPlaying()) clock.pause('pause');
       const scale = FRAME_H / Math.max(1, canvas.clientHeight);
       const currentSample = sampleCameraFrame({
         time: clock ? clock.getTime() : state.currentTime,
@@ -590,7 +594,7 @@ export function Preview({
       if (wheelFrameRef.current === null) {
         const animate = () => {
           const latest = stripStateRef.current;
-          if (!latest.stripScene || !latest.onSeek || wheelTargetRef.current === null) {
+          if (!latest.stripScene || wheelTargetRef.current === null) {
             wheelFrameRef.current = null;
             return;
           }
@@ -608,13 +612,18 @@ export function Preview({
           const actual = latestSample.stripScrollY;
           const targetScroll = wheelTargetRef.current;
           const nextScroll = actual + (targetScroll - actual) * 0.24;
-          const targetTime = latest.stripScene.timeAtScroll(nextScroll);
-          if (targetTime !== null) latest.onSeek(targetTime);
+          const hintTime = clock ? clock.getTime() : latest.currentTime;
+          const targetTime = latest.stripScene.timeAtScrollContinuous(nextScroll, hintTime);
+          if (clock) clock.seek(targetTime, 'wheel');
+          else latest.onSeek?.(targetTime);
           if (Math.abs(targetScroll - nextScroll) > 1) {
             wheelFrameRef.current = window.requestAnimationFrame(animate);
           } else {
             wheelTargetRef.current = null;
             wheelFrameRef.current = null;
+            // Дискретный seek на финише: синхронизирует React-состояние и выбор панели.
+            latest.onSeek?.(clock ? clock.getTime() : targetTime);
+            userScrollingRef.current = false;
           }
         };
         wheelFrameRef.current = window.requestAnimationFrame(animate);
@@ -636,6 +645,7 @@ export function Preview({
   // Итерация 2.2 (P1-2): handleStripPointerDown читает clock?.getTime() и sampleCameraFrame напрямую
   const handleStripPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (!stripScene) return;
+    if (clock?.getIsPlaying()) clock.pause('pause');
     const nowTime = clock ? clock.getTime() : renderParamsRef.current.currentTime;
     const nowSample = sampleCameraFrame({
       time: nowTime,
@@ -660,12 +670,18 @@ export function Preview({
       drag.startScroll + (e.clientY - drag.startY) * scale,
       stripScene.layout
     );
-    const target = stripScene.timeAtScroll(next);
-    if (target !== null) performSeek(target);
+    const hintTime = clock ? clock.getTime() : renderParamsRef.current.currentTime;
+    // Палец следует 1:1 за позицией ленты — непрерывная инверсия без снапа.
+    const target = stripScene.timeAtScrollContinuous(next, hintTime);
+    if (clock) clock.seek(target, 'drag');
+    else performSeek(target);
   };
   const handleStripPointerEnd = () => {
+    const wasDragging = dragRef.current !== null;
     dragRef.current = null;
     userScrollingRef.current = false;
+    // Финальный дискретный seek: состояние React и выбор панели догоняют часы.
+    if (wasDragging && clock) onSeek?.(clock.getTime());
   };
 
   const scheduleDrawRef = useRef<() => void>(() => {});

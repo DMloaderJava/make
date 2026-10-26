@@ -6,6 +6,7 @@ import {
   buildScrollSpans,
   clampScroll,
   computeStripLayout,
+  createStripScene,
   maxScrollY,
   pageIndexAtScroll,
   renderStripFrame,
@@ -16,6 +17,7 @@ import {
   STRIP_ZOOM_MIN,
   targetScrollForSlot,
   timeAtScroll,
+  timeForScrollContinuous,
   visibleSlots,
 } from '../src/lib/pipeline/mangaStrip';
 
@@ -486,6 +488,111 @@ test('стык двух ДЛИННЫХ страниц: переход сохра
 test('sampleScroll: пустые ключи и время до первого', () => {
   assert.equal(sampleScroll([], 5), 0);
   assert.equal(sampleScroll([{ time: 2, y: 100, ease: 'linear' }], 0), 100);
+});
+
+test('timeForScrollContinuous: точная инверсия линейного сегмента', () => {
+  const keys = [
+    { time: 0, y: 0, ease: 'linear' as const },
+    { time: 4, y: 400, ease: 'linear' as const },
+  ];
+  for (const t of [0, 0.5, 1, 2.37, 3.9, 4]) {
+    const y = sampleScroll(keys, t);
+    assert.ok(Math.abs(timeForScrollContinuous(keys, y) - t) < 1e-6, `t=${t}`);
+  }
+  // Клампинг за границы траектории
+  assert.equal(timeForScrollContinuous(keys, -50), 0);
+  assert.equal(timeForScrollContinuous(keys, 9999), 4);
+  assert.equal(timeForScrollContinuous([], 100), 0);
+});
+
+test('timeForScrollContinuous: холд не заставляет время прыгать назад (hintTime)', () => {
+  const keys = [
+    { time: 0, y: 0, ease: 'linear' as const },
+    { time: 2, y: 0, ease: 'linear' as const },
+    { time: 4, y: 400, ease: 'linear' as const },
+  ];
+  // Позиция холда достижима на всём интервале [0, 2] — hint удерживает время на месте
+  assert.equal(timeForScrollContinuous(keys, 0, 1.25), 1.25);
+  assert.equal(timeForScrollContinuous(keys, 0, 0.4), 0.4);
+  // Без hint возвращается начало плато
+  assert.equal(timeForScrollContinuous(keys, 0), 0);
+  // После холда инверсия снова точная
+  const y = sampleScroll(keys, 3);
+  assert.ok(Math.abs(timeForScrollContinuous(keys, y, 3) - 3) < 1e-6);
+});
+
+test('timeForScrollContinuous: инверсия easeInOut монотонна и попадает в якоря', () => {
+  const keys = [
+    { time: 0, y: 100, ease: 'linear' as const },
+    { time: 2, y: 100, ease: 'linear' as const },
+    { time: 3, y: 500, ease: 'easeInOut' as const },
+    { time: 5, y: 500, ease: 'linear' as const },
+  ];
+  // Внутри перехода инверсия строго в его временном окне и монотонна
+  let prevT = 2;
+  for (let y = 101; y < 500; y += 10) {
+    const t = timeForScrollContinuous(keys, y, prevT);
+    assert.ok(t > 2 - 1e-9 && t < 3 + 1e-9, `инверсия внутри перехода (y=${y}, t=${t})`);
+    assert.ok(t >= prevT - 1e-9, `время не убывает по мере скролла вниз (y=${y})`);
+    prevT = t;
+  }
+  // Якоря: на холдах hint удерживает время, без hint — начало плато
+  assert.equal(timeForScrollContinuous(keys, 100, 1), 1);
+  assert.equal(timeForScrollContinuous(keys, 100), 0);
+  assert.equal(timeForScrollContinuous(keys, 500, 5), 5);
+  // Без hint верхняя граница клампится к последнему времени траектории
+  assert.equal(timeForScrollContinuous(keys, 500), 5);
+});
+
+test('timeForScrollContinuous: ручной скролл на реальной сцене с диапазонами непрерывен', () => {
+  const panels = [
+    { id: 1, order: 0, imageIndex: 0, bbox: { x: 0, y: 0, width: 100, height: 30 } },
+    { id: 2, order: 1, imageIndex: 0, bbox: { x: 0, y: 30, width: 100, height: 30 } },
+    { id: 3, order: 2, imageIndex: 0, bbox: { x: 0, y: 60, width: 100, height: 40 } },
+  ];
+  const timeline = [
+    { panelId: 1, imageIndex: 0, audioStart: 0, audioEnd: 2 },
+    { panelId: 2, imageIndex: 0, audioStart: 2.5, audioEnd: 4.5 },
+    { panelId: 3, imageIndex: 0, audioStart: 5, audioEnd: 8 },
+  ];
+  const scene = createStripScene({
+    sizes: [{ width: 1000, height: 3000 }],
+    images: [null],
+    timeline,
+    panels,
+    options: { frameWidth: FRAME.frameWidth, frameHeight: FRAME.frameHeight, gap: 0 },
+  })!;
+
+  // Траектория неубывает — предпосылка бинарного поиска инверсии
+  let prevY = -Infinity;
+  for (let t = 0; t <= 8; t += 0.01) {
+    const y = scene.scrollAt(t);
+    assert.ok(y >= prevY - 1e-6, `траектория откатывается назад при t=${t}`);
+    prevY = y;
+  }
+
+  // Гладкость = визуальная непрерывность: время, полученное из позиции y,
+  // возвращает камеру ровно в y (round-trip), а само время не убывает.
+  const max = maxScrollY(scene.layout);
+  let prevT = 0;
+  for (let y = 0; y <= max; y += 1) {
+    const t = scene.timeAtScrollContinuous(y, prevT);
+    assert.ok(t >= prevT - 1e-9, `время не убывает при скролле вниз (y=${y})`);
+    const backY = scene.scrollAt(t);
+    assert.ok(Math.abs(backY - y) <= 1.5, `round-trip позиции y=${y} дал ${backY}`);
+    prevT = t;
+  }
+
+  // Семантический timeAtScroll дискретен (снап к audioStart панелей) —
+  // именно он давал ступеньки при ручной прокрутке.
+  const semanticPoints = new Set<number>();
+  for (let y = 0; y <= max; y += 4) {
+    semanticPoints.add(scene.timeAtScroll(y) ?? -1);
+  }
+  assert.ok(
+    semanticPoints.size <= timeline.length + 1,
+    `семантический маппинг должен снапить к границам реплик, получено точек: ${semanticPoints.size}`
+  );
 });
 
 test('pageIndexAtScroll: центр окна определяет активную страницу', () => {

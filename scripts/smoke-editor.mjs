@@ -631,6 +631,53 @@ try {
       console.log(`smoke:editor — Задача 3.1.1 (${mode}): сохранены 4 пары Preview/Export и коллаж ${compPath}`);
     }
 
+    // 10а. Ручная прокрутка ленты колесом непрерывна: время двигается мелкими
+    // приращениями на каждом тике колеса, а не ступеньками к границам реплик
+    // (timeAtScrollContinuous + reason 'wheel' без ререндеров React-дерева).
+    {
+      const canvas = page.getByTestId('preview-canvas');
+      // Уходим из аутро (лента уже внизу) к началу первой реплики, иначе
+      // колесо вниз упрётся в maxScroll и инверсия вернёт время последней реплики.
+      await page.locator('[data-video-clip-id="0"]').click();
+      await page.waitForTimeout(80);
+      // Синтетические WheelEvent прямо на canvas: детерминированно для CI
+      // (геометрия headless-страницы не обязана класть мышь ровно на canvas),
+      // продуктовый обработчик не проверяет isTrusted.
+      const dispatchWheel = (deltaY) =>
+        canvas.evaluate((el, dy) => {
+          el.dispatchEvent(new WheelEvent('wheel', { deltaX: 0, deltaY: dy, bubbles: true, cancelable: true }));
+        }, deltaY);
+      const timelineEl = page.locator('[data-testid="studio-timeline"]');
+      const readTime = async () => Number(await timelineEl.getAttribute('data-current-time'));
+      const t0 = await readTime();
+      const samples = [t0];
+      for (let i = 0; i < 20; i++) {
+        await dispatchWheel(36);
+        await page.waitForTimeout(25);
+        samples.push(await readTime());
+      }
+      await page.waitForTimeout(200); // settle: финальный onSeek досинхронизирует состояние
+      const tEnd = await readTime();
+      const deltas = samples.slice(1).map((v, i) => v - samples[i]);
+      const movingTicks = deltas.filter(d => d > 1e-6).length;
+      const totalShift = tEnd - t0;
+      const maxStep = Math.max(...deltas);
+      if (!(tEnd > t0)) {
+        throw new Error(`Колесо не сдвинуло время ленты: ${t0} -> ${tEnd}`);
+      }
+      if (movingTicks < 14) {
+        throw new Error(`Ступенчатая прокрутка ленты: время менялось лишь ${movingTicks}/20 тиков`);
+      }
+      if (maxStep > Math.max(totalShift, 1e-6) * 0.4) {
+        throw new Error(
+          `Скачок камеры при прокрутке: шаг ${maxStep.toFixed(3)}с при общем сдвиге ${totalShift.toFixed(3)}с`
+        );
+      }
+      console.log(
+        `smoke:editor — колесо ленты: время ${t0.toFixed(3)} -> ${tEnd.toFixed(3)}с, живых тиков ${movingTicks}/20, макс. шаг ${maxStep.toFixed(3)}с`
+      );
+    }
+
     // Возвращаем режим panels и сохраняем финальный скриншот редактора
     const panelsModeBtn = page.getByRole('button', { name: /^Панели$/i }).first();
     if (await panelsModeBtn.isVisible()) {

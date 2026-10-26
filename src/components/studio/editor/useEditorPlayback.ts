@@ -86,11 +86,13 @@ export function useEditorPlayback({
         lastPlayingState = snap.isPlaying;
         setIsPlaying(snap.isPlaying);
       }
-      // rAF-тики не должны будить React-дерево 60 раз в секунду: Preview рисует
-      // кадры собственным rAF, а Timeline двигает плейхед императивно по своей
-      // подписке на эти же часы. В React-состояние время пишем только на
-      // дискретных событиях (seek, play, pause, hotkey, wheel/drag, конец).
-      if (snap.reason === 'raf') {
+      // Высокочастотные события (rAF-тики, ручная прокрутка ленты колесом и
+      // перетаскиванием) не должны будить React-дерево 60 раз в секунду:
+      // Preview рисует кадры собственным rAF, а Timeline двигает плейхед
+      // императивно по своей подписке на эти же часы. В React-состояние время
+      // пишем только на дискретных событиях (seek, play, pause, hotkey, конец);
+      // колесо/drag досинхронизируют состояние финальным onSeek при остановке.
+      if (snap.reason === 'raf' || snap.reason === 'wheel' || snap.reason === 'drag') {
         return;
       }
       setCurrentTime(snap.currentTime);
