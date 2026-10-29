@@ -1,4 +1,5 @@
 import { TTSProvider, TTSOptions, Voice } from './types';
+import { ttsFetch } from './transport';
 
 export const googleCloudTTS: TTSProvider = {
   id: 'google-cloud',
@@ -8,8 +9,9 @@ export const googleCloudTTS: TTSProvider = {
   languages: ['ru', 'en', 'multi'],
   baseUrl: 'https://texttospeech.googleapis.com',
 
-  async generate(text: string, { voice = 'ru-RU-Wavenet-A', apiKey, speed = 1.0, language = 'ru-RU' }: TTSOptions): Promise<ArrayBuffer> {
-    const res = await fetch(`https://texttospeech.googleapis.com/v1/text:synthesize?key=${apiKey}`, {
+  async generate(text: string, options: TTSOptions): Promise<ArrayBuffer> {
+    const { voice = 'ru-RU-Wavenet-A', apiKey, speed = 1.0, language = 'ru-RU' } = options;
+    const res = await ttsFetch('google-cloud', 'Google Cloud TTS', `https://texttospeech.googleapis.com/v1/text:synthesize?key=${apiKey}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -17,11 +19,7 @@ export const googleCloudTTS: TTSProvider = {
         voice: { languageCode: language, name: voice },
         audioConfig: { audioEncoding: 'MP3', speakingRate: speed }
       })
-    });
-    if (!res.ok) {
-      const err = await res.text();
-      throw new Error(`Google Cloud TTS error: ${res.status} — ${err.slice(0,500)}`);
-    }
+    }, options);
     const data = await res.json();
     if (!data.audioContent) throw new Error('No audioContent');
     const binary = atob(data.audioContent);

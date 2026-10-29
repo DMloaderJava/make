@@ -9,6 +9,16 @@ export interface TTSOptions {
   speed?: number;
   emotion?: string;
   model?: string;
+  /**
+   * Внешняя отмена (клиент закрыл вкладку, экспорт отменён). Прокидывается в
+   * `providerFetch`, который прерывает текущую попытку и не делает новых.
+   */
+  signal?: AbortSignal;
+  /**
+   * Общий бюджет запроса в миллисекундах. Ставит маршрут `/api/tts`, чтобы
+   * три попытки по 25 с не вышли за `maxDuration`; в браузере не задаётся.
+   */
+  deadlineMs?: number;
 }
 
 export interface Voice {
@@ -45,15 +55,16 @@ export interface TTSProvider {
   getVoices(apiKey: string): Promise<Voice[]>;
   generate(text: string, options: TTSOptions): Promise<ArrayBuffer>;
   /**
-   * Серверная реализация синтеза для /api/tts.
-   * Если не задана и `proxyClientSide` не выставлен, сервер использует generate()
-   * (её fetch идёт на внешний API — это безопасно).
+   * Серверная реализация синтеза для /api/tts. Нужна только если серверный
+   * запрос отличается от клиентского (подпись, SDK): иначе маршрут вызывает
+   * обычную generate(), и её fetch идёт на внешний API — это безопасно.
    */
   serverGenerate?: (text: string, options: TTSOptions) => Promise<ArrayBuffer>;
   /**
    * true — generate() обращается к /api/tts. Вызывать её на сервере НЕЛЬЗЯ:
-   * это рекурсия (сервер → сам себя → таймаут). Такие провайдеры обязаны иметь
-   * либо явную серверную ветку в route.ts, либо serverGenerate.
+   * это рекурсия (сервер → сам себя → таймаут). Такому провайдеру нужен либо
+   * `serverGenerate`, либо запись в `tts/server/overrides.ts`: маршрут больше
+   * не содержит собственных веток по провайдерам.
    */
   proxyClientSide?: boolean;
   // For server proxy

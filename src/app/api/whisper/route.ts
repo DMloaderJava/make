@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createRequire } from 'node:module';
+import { providerFailureCode, providerFailureStatus, providerFetch, ProviderHttpError } from '@/lib/providers/http';
 
 export const runtime = 'nodejs';
 export const maxDuration = 120;
@@ -44,17 +45,40 @@ export async function POST(req: NextRequest) {
       whisperForm.append('model', 'whisper-1');
       whisperForm.append('response_format', 'srt');
 
-      const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${openaiKey}`,
-        },
-        body: whisperForm
-      });
+      // Транскрипция длинного файла — самая долгая операция в приложении:
+      // бюджет поднят под maxDuration = 120, повтор только один (аплоад дорогой).
+      let res: Response;
+      try {
+        res = await providerFetch('openai', 'https://api.openai.com/v1/audio/transcriptions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${openaiKey}`,
+          },
+          body: whisperForm
+        }, {
+          label: 'Whisper API',
+          retries: 1,
+          timeoutMs: 90_000,
+          deadlineMs: 110_000,
+          signal: req.signal,
+          throwOnHttpError: false,
+        });
+      } catch (error) {
+        if (error instanceof ProviderHttpError) {
+          return NextResponse.json(
+            { error: `Whisper API error: ${error.message}`, code: providerFailureCode(error) },
+            { status: providerFailureStatus(error) }
+          );
+        }
+        throw error;
+      }
 
       if (!res.ok) {
         const err = await res.text();
-        return NextResponse.json({ error: `Whisper API error: ${err}` }, { status: res.status });
+        return NextResponse.json(
+          { error: `Whisper API error: ${err}`, code: 'provider_http_error' },
+          { status: res.status }
+        );
       }
 
       const srt = await res.text();

@@ -1,6 +1,8 @@
 import { TTSProvider, TTSOptions, Voice } from './types';
 import { base64ToArrayBuffer } from '@/lib/utils';
 import { pcmToWav } from './wav';
+import { providerFetch, ProviderHttpError } from '../http';
+import { ttsFetch } from './transport';
 
 export const GEMINI_TTS_SUPPORTED_MODELS = [
   'gemini-3.8-flash-tts',
@@ -26,14 +28,12 @@ function normalizeGeminiModelName(name: string): string {
 export async function fetchAvailableGeminiModels(apiKey: string): Promise<string[]> {
   if (!apiKey) return [...GEMINI_TTS_SUPPORTED_MODELS];
 
-  const response = await fetch(`${GEMINI_API_BASE}/models`, {
+  // Список моделей — диагностический запрос: один повтор на 429/5xx и без
+  // долгого бюджета, чтобы экран настроек не висел.
+  const response = await providerFetch('gemini', `${GEMINI_API_BASE}/models`, {
     method: 'GET',
     headers: { 'x-goog-api-key': apiKey },
-  });
-  if (!response.ok) {
-    const details = await response.text().catch(() => response.statusText);
-    throw new Error(`Gemini models error: ${response.status} — ${details.slice(0, 400)}`);
-  }
+  }, { label: 'Gemini models', retries: 1, timeoutMs: 15_000 });
 
   const data = await response.json() as { models?: GeminiModelInfo[] };
   const availableTTSModels = (data.models || [])
@@ -72,7 +72,13 @@ export async function generateGeminiTTS(text: string, options: TTSOptions): Prom
     for (let attempt = 0; attempt < GEMINI_ATTEMPTS_PER_MODEL; attempt++) {
       let response: Response;
       try {
-        response = await fetch(
+        // retries: 0 — у Gemini уже есть свой цикл повторов и фолбэк по моделям;
+        // транспортный ретрай поверх него утроил бы число запросов.
+        // throwOnHttpError: false — статусы (404, 5xx, «текст вместо аудио»)
+        // разбираются ниже, это часть логики выбора модели.
+        response = await ttsFetch(
+          'gemini',
+          'Gemini TTS',
           `${GEMINI_API_BASE}/models/${encodeURIComponent(model)}:generateContent`,
           {
             method: 'POST',
@@ -91,9 +97,16 @@ export async function generateGeminiTTS(text: string, options: TTSOptions): Prom
                 },
               },
             }),
-          }
+          },
+          options,
+          { retries: 0, throwOnHttpError: false }
         );
       } catch (error) {
+        // Таймаут и отмену наверх как есть: маршрут отдаст 504/499, а не
+        // «Gemini network error» с потерянным статусом.
+        if (error instanceof ProviderHttpError && (error.code === 'timeout' || error.code === 'aborted')) {
+          throw error;
+        }
         lastError = new Error(`Gemini TTS network error: ${error instanceof Error ? error.message : String(error)}`);
         if (attempt + 1 < GEMINI_ATTEMPTS_PER_MODEL) continue;
         break;

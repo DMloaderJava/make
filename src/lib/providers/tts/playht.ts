@@ -1,4 +1,6 @@
 import { TTSProvider, TTSOptions, Voice } from './types';
+import { providerFetch } from '../http';
+import { ttsFetch } from './transport';
 
 export const playhtTTS: TTSProvider = {
   id: 'playht',
@@ -10,7 +12,8 @@ export const playhtTTS: TTSProvider = {
   experimental: true,
   baseUrl: 'https://api.play.ht',
 
-  async generate(text: string, { voice = 's3://voice-cloning-zero-shot/d9ff78ba-d016-47f6-b0ef-dd630f59414e/female-cs/manifest.json', apiKey }: TTSOptions): Promise<ArrayBuffer> {
+  async generate(text: string, options: TTSOptions): Promise<ArrayBuffer> {
+    const { voice = 's3://voice-cloning-zero-shot/d9ff78ba-d016-47f6-b0ef-dd630f59414e/female-cs/manifest.json', apiKey } = options;
     // PlayHT requires USER_ID and API_KEY separated by | or JSON
     // Expect apiKey format: "userId:apiKey" or just apiKey
     let userId = '';
@@ -26,7 +29,7 @@ export const playhtTTS: TTSProvider = {
         key = parsed.apiKey || parsed.key || apiKey;
       } catch {}
     }
-    const res = await fetch('https://api.play.ht/api/v2/tts', {
+    const res = await ttsFetch('playht', 'PlayHT', 'https://api.play.ht/api/v2/tts', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${key}`,
@@ -39,11 +42,7 @@ export const playhtTTS: TTSProvider = {
         output_format: 'mp3',
         voice_engine: 'Play3.0-mini'
       })
-    });
-    if (!res.ok) {
-      const err = await res.text();
-      throw new Error(`PlayHT error: ${res.status} — ${err.slice(0,500)}`);
-    }
+    }, options);
     // PlayHT returns streaming URL in header or direct audio
     const contentType = res.headers.get('content-type') || '';
     if (contentType.includes('audio')) {
@@ -52,7 +51,7 @@ export const playhtTTS: TTSProvider = {
     const data = await res.json();
     const url = data.url || data.audioUrl || data.href;
     if (url) {
-      const audioRes = await fetch(url);
+      const audioRes = await ttsFetch('playht', 'PlayHT file', url, { method: 'GET' }, options, { retries: 1 });
       return audioRes.arrayBuffer();
     }
     throw new Error('PlayHT: no audio url');
@@ -70,9 +69,9 @@ export const playhtTTS: TTSProvider = {
         key = parts.slice(1).join(':');
       }
       try {
-        const res = await fetch('https://api.play.ht/api/v2/voices', {
+        const res = await providerFetch('playht', 'https://api.play.ht/api/v2/voices', {
           headers: { Authorization: `Bearer ${key}`, 'X-USER-ID': userId },
-        });
+        }, { label: 'PlayHT voices', retries: 0, timeoutMs: 12_000, throwOnHttpError: false });
         if (res.ok) {
           const data = await res.json();
           const list = Array.isArray(data) ? data : data.voices || [];

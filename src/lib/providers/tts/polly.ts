@@ -1,3 +1,4 @@
+import { requestTTSProxy } from './proxy-client';
 import { TTSProvider, TTSOptions, Voice } from './types';
 
 // Amazon Polly via AWS API - for browser we proxy, but here direct implementation expects AWS credentials
@@ -10,7 +11,8 @@ export const pollyTTS: TTSProvider = {
   languages: ['ru', 'en', 'multi'],
   baseUrl: 'https://polly.eu-central-1.amazonaws.com',
   // Клиент ходит в /api/tts (там AWS SDK и SigV4), поэтому серверу запрещено
-  // звать эту generate() — ветка polly в route.ts идёт через SDK напрямую.
+  // звать эту generate(): серверная реализация — tts/server/polly.ts, она
+  // подключается через карту переопределений, а не веткой в route.ts.
   proxyClientSide: true,
 
   async generate(text: string, { voice = 'Maxim', apiKey, language = 'ru-RU' }: TTSOptions): Promise<ArrayBuffer> {
@@ -26,18 +28,9 @@ export const pollyTTS: TTSProvider = {
       throw new Error('Polly: в JSON-ключе нет accessKeyId.');
     }
 
-    const res = await fetch('/api/tts', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ providerId: 'polly', text, voice, apiKey, language }),
-    });
-
-    if (!res.ok) {
-      const err = await res.text().catch(() => res.statusText);
-      throw new Error(`Polly proxy error: ${res.status} — ${err.slice(0, 300)}`);
-    }
-
-    return res.arrayBuffer();
+    // Тот же клиентский путь, что и у остальных прокси-провайдеров: таймаут,
+    // отмена и разбор ошибки живут в router.ts, а не здесь.
+    return requestTTSProxy({ providerId: 'polly', text, voice, apiKey, language });
   },
 
   async getVoices(): Promise<Voice[]> {

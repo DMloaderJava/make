@@ -70,13 +70,6 @@ export const TTS_PROVIDERS: TTSProvider[] = getImplementedProviders('tts').map(e
   };
 });
 
-/** Провайдеры, объявленные в реестре, но не имеющие реализации (диагностика/тесты). */
-export function getRegistryOnlyTTSIds(): string[] {
-  return getImplementedProviders('tts')
-    .map(entry => entry.id)
-    .filter(id => !TTS_IMPLEMENTATIONS[id]);
-}
-
 export function getTTSProvider(id: string): TTSProvider | undefined {
   return TTS_PROVIDERS.find(p => p.id === id);
 }

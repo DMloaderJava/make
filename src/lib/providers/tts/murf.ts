@@ -1,4 +1,5 @@
 import { TTSProvider, TTSOptions, Voice } from './types';
+import { ttsFetch } from './transport';
 
 export const murfTTS: TTSProvider = {
   id: 'murf',
@@ -10,8 +11,9 @@ export const murfTTS: TTSProvider = {
   experimental: true,
   baseUrl: 'https://api.murf.ai',
 
-  async generate(text: string, { voice = 'en-US-natalie', apiKey }: TTSOptions): Promise<ArrayBuffer> {
-    const res = await fetch('https://api.murf.ai/v1/speech/generate', {
+  async generate(text: string, options: TTSOptions): Promise<ArrayBuffer> {
+    const { voice = 'en-US-natalie', apiKey } = options;
+    const res = await ttsFetch('murf', 'Murf', 'https://api.murf.ai/v1/speech/generate', {
       method: 'POST',
       headers: {
         'api-key': apiKey,
@@ -23,15 +25,11 @@ export const murfTTS: TTSProvider = {
         format: 'MP3',
         sampleRate: 44100
       })
-    });
-    if (!res.ok) {
-      const err = await res.text();
-      throw new Error(`Murf error: ${res.status} — ${err.slice(0,500)}`);
-    }
+    }, options);
     const data = await res.json();
     const url = data.audioFile || data.audio_url || data.encodedAudio;
     if (url && url.startsWith('http')) {
-      const audioRes = await fetch(url);
+      const audioRes = await ttsFetch('murf', 'Murf file', url, { method: 'GET' }, options, { retries: 1 });
       return audioRes.arrayBuffer();
     }
     if (data.encodedAudio) {

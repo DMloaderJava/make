@@ -1,4 +1,6 @@
+import { ProviderHttpError, providerFetch } from '../http';
 import { TTSProvider, TTSOptions, Voice } from './types';
+import { ttsFetch } from './transport';
 
 /**
  * Тело запроса к Cartesia «Text to Speech (Bytes)» для версии API 2026-03-01.
@@ -58,24 +60,36 @@ export async function generateCartesia(text: string, options: TTSOptions): Promi
   };
   const body = buildCartesiaBody(text, options);
 
-  let res = await fetch(CARTESIA_URL, { method: 'POST', headers, body: JSON.stringify(body) });
-  if (!res.ok) {
-    const errText = await res.text();
-    if (res.status === 400 && /speed/i.test(errText) && 'speed' in body) {
-      const retry = { ...body };
-      delete retry.speed;
-      res = await fetch(CARTESIA_URL, { method: 'POST', headers, body: JSON.stringify(retry) });
-      if (res.ok) return res.arrayBuffer();
-      const retryText = await res.text();
-      const error = new Error(`Cartesia error: ${res.status} — ${retryText.slice(0, 500)}`) as Error & { status?: number };
-      error.status = res.status;
+  try {
+    const res = await ttsFetch('cartesia', 'Cartesia', CARTESIA_URL, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+    }, options);
+    return res.arrayBuffer();
+  } catch (error) {
+    // 400 на `speed` — единственный случай, когда имеет смысл повторить запрос
+    // с другим телом. Транспорт 400 не повторяет (это ошибка входа, а не сети),
+    // поэтому страховка живёт здесь. Прочие ошибки — как есть.
+    if (
+      !(error instanceof ProviderHttpError) ||
+      error.code !== 'http' ||
+      error.status !== 400 ||
+      !/speed/i.test(error.body) ||
+      !('speed' in body)
+    ) {
       throw error;
     }
-    const error = new Error(`Cartesia error: ${res.status} — ${errText.slice(0, 500)}`) as Error & { status?: number };
-    error.status = res.status;
-    throw error;
+    const retry = { ...body };
+    delete retry.speed;
+    // Один повтор без транспортовых ретраев: если и он не прошёл, ошибка честная.
+    const res = await ttsFetch('cartesia', 'Cartesia', CARTESIA_URL, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(retry),
+    }, options, { retries: 0 });
+    return res.arrayBuffer();
   }
-  return res.arrayBuffer();
 }
 
 export const cartesiaTTS: TTSProvider = {
@@ -99,10 +113,9 @@ export const cartesiaTTS: TTSProvider = {
       ];
     }
     try {
-      const res = await fetch('https://api.cartesia.ai/voices', {
+      const res = await providerFetch('cartesia', 'https://api.cartesia.ai/voices', {
         headers: { 'X-API-Key': apiKey, 'Cartesia-Version': CARTESIA_VERSION }
-      });
-      if (!res.ok) throw new Error('fail');
+      }, { label: 'Cartesia voices', retries: 1, timeoutMs: 15_000 });
       const data = await res.json();
       return (data.data || data).slice(0, 20).map((v: any) => ({
         id: v.id,

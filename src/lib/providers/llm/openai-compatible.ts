@@ -1,3 +1,4 @@
+import { providerFetch } from '../http';
 import { LLMProvider, LLMOptions, Message, ResponseFormatSchema } from './types';
 
 /**
@@ -89,8 +90,10 @@ async function postChatCompletion(params: {
   body: Record<string, unknown>;
   responseFormat?: ResponseFormatSchema;
   label?: string;
+  signal?: AbortSignal;
+  deadlineMs?: number;
 }): Promise<Response> {
-  const { configId, name, url, apiKey, body, responseFormat, label = '' } = params;
+  const { configId, name, url, apiKey, body, responseFormat, label = '', signal, deadlineMs } = params;
   const model = typeof body.model === 'string' ? body.model : '';
   const cacheKey = `${configId}|${model}`;
 
@@ -104,7 +107,10 @@ async function postChatCompletion(params: {
 
   for (const mode of candidates) {
     const responseFormatBody = buildResponseFormat(configId, responseFormat, mode);
-    const response = await fetch(url, {
+    // throwOnHttpError: false — деградация response_format анализирует 400/422
+    // по телу. Ретраи транспорта сюда не мешают: 400/422 не входят в список
+    // повторяемых статусов, поэтому число запросов не растёт.
+    const response = await providerFetch(configId, url, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${apiKey}`,
@@ -114,6 +120,13 @@ async function postChatCompletion(params: {
         ...body,
         ...(responseFormatBody ? { response_format: responseFormatBody } : {}),
       }),
+    }, {
+      label: `${name}${label}`,
+      retries: 1,
+      timeoutMs: 25_000,
+      deadlineMs,
+      signal,
+      throwOnHttpError: false,
     });
 
     if (response.ok) {
@@ -139,6 +152,61 @@ async function postChatCompletion(params: {
   }
 
   throw new Error(`${name}${label} error: ${lastStatus} — ${lastError.slice(0, 500)}`);
+}
+
+/**
+ * Сколько клиент ждёт легаси-прокси /api/llm. Сервер отвечает за 50 с, поэтому
+ * 55 с — это «сервер точно не ответит», а не конкурирующий таймаут.
+ */
+const CLIENT_PROXY_TIMEOUT_MS = 55_000;
+
+/**
+ * Один клиентский путь через /api/llm для chat и vision. Раньше эти два блока
+ * были копиями друг друга (и разошлись бы при следующей правке).
+ *
+ * Формат ошибки сохранён: `"<Name>[ vision] proxy error: <status> — <body>"` —
+ * его разбирает getLLMHttpError, чтобы роутер LLM переключился на резервного
+ * провайдера при 429/402.
+ */
+async function callLLMProxy(params: {
+  providerId: string;
+  name: string;
+  label: string;
+  payload: Record<string, unknown>;
+  signal?: AbortSignal;
+}): Promise<string> {
+  const { providerId, name, label, payload, signal } = params;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), CLIENT_PROXY_TIMEOUT_MS);
+  const onAbort = () => controller.abort();
+  signal?.addEventListener('abort', onAbort, { once: true });
+
+  let res: Response;
+  try {
+    res = await fetch('/api/llm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ providerId, ...payload }),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (signal?.aborted) throw new Error(`${name}${label} proxy error: 499 — запрос отменён`);
+    if (controller.signal.aborted) {
+      throw new Error(`${name}${label} proxy error: 504 — прокси не ответил за ${CLIENT_PROXY_TIMEOUT_MS / 1000} с`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', onAbort);
+  }
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`${name}${label} proxy error: ${res.status} — ${err.slice(0, 500)}`);
+  }
+  const data = await res.json();
+  if (data.error) throw new Error(data.error);
+  return data.content || '';
 }
 
 export function createOpenAICompatibleProvider(config: {
@@ -217,11 +285,12 @@ export function createOpenAICompatibleProvider(config: {
 
       // For custom/localhost, use server proxy to avoid CORS
       if (typeof window !== 'undefined' && shouldProxy(baseUrl)) {
-        const res = await fetch('/api/llm', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            providerId: config.id,
+        return callLLMProxy({
+          providerId: config.id,
+          name: config.name,
+          label: '',
+          signal: options.signal,
+          payload: {
             messages: openAIMessages,
             apiKey: options.apiKey,
             model,
@@ -229,15 +298,8 @@ export function createOpenAICompatibleProvider(config: {
             maxTokens: options.maxTokens,
             baseUrl: options.baseUrl || config.baseUrl,
             accountId: options.accountId,
-          })
+          },
         });
-        if (!res.ok) {
-          const err = await res.text();
-          throw new Error(`${config.name} proxy error: ${res.status} — ${err.slice(0,500)}`);
-        }
-        const data = await res.json();
-        if (data.error) throw new Error(data.error);
-        return data.content || '';
       }
 
       const response = await postChatCompletion({
@@ -252,6 +314,8 @@ export function createOpenAICompatibleProvider(config: {
           max_tokens: options.maxTokens ?? 4000,
         },
         responseFormat: options.responseFormat,
+        signal: options.signal,
+        deadlineMs: options.deadlineMs,
       });
 
       const data = await response.json();
@@ -283,11 +347,12 @@ export function createOpenAICompatibleProvider(config: {
       ];
 
       if (typeof window !== 'undefined' && shouldProxy(baseUrl)) {
-        const res = await fetch('/api/llm', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            providerId: config.id,
+        return callLLMProxy({
+          providerId: config.id,
+          name: config.name,
+          label: ' vision',
+          signal: options.signal,
+          payload: {
             messages,
             apiKey: options.apiKey,
             model,
@@ -295,15 +360,8 @@ export function createOpenAICompatibleProvider(config: {
             maxTokens: options.maxTokens,
             baseUrl: options.baseUrl || config.baseUrl,
             accountId: options.accountId,
-          })
+          },
         });
-        if (!res.ok) {
-          const err = await res.text();
-          throw new Error(`${config.name} vision proxy error: ${res.status} — ${err.slice(0,500)}`);
-        }
-        const data = await res.json();
-        if (data.error) throw new Error(data.error);
-        return data.content || '';
       }
 
       const response = await postChatCompletion({
@@ -319,6 +377,8 @@ export function createOpenAICompatibleProvider(config: {
         },
         responseFormat: options.responseFormat,
         label: ' vision',
+        signal: options.signal,
+        deadlineMs: options.deadlineMs,
       });
 
       const data = await response.json();

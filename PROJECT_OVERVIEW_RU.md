@@ -83,7 +83,7 @@
 | Desktop | Electron 33 + `electron-builder` |
 | E2E | `playwright-core` + `@sparticuz/chromium` |
 | Объём кода | `src/` ≈ **31 150 строк** |
-| Тесты | **42 файла** (сверяет `check:tests`), **410** тест-кейсов (`tsx --test`; число кейсов — снимок, см. `L-17`) |
+| Тесты | **42 файла**, **417** тест-кейсов (`tsx --test`; число кейсов — снимок, см. `L-17`) |
 | CI | GitHub Actions, матрица `ubuntu-latest` + `windows-latest` |
 | Лицензия | MIT (`LICENSE`), поле `license` в `package.json` |
 
@@ -563,7 +563,7 @@ make/
 ├── .gitattributes                # .bat → CRLF, текст → LF
 ├── DEPLOYMENT_GUIDE_RU.md        # деплой на Vercel + Supabase, TTL, безопасность
 ├── README.md                     # 93 КБ: возможности, провайдеры, история версий
-├── known-limits.md               # L-1..L-17: платформа, браузеры, архитектура
+├── known-limits.md               # L-1..L-18: платформа, браузеры, архитектура
 ├── next.config.ts                # serverExternalPackages, webpack fallback
 ├── vercel.json                   # cron /api/cleanup раз в сутки в 03:00
 ├── package.json                  # скрипты, зависимости, node >= 20.9
@@ -591,7 +591,7 @@ make/
 │   ├── smoke-audio.ts            # OfflineAudioContext → WAV
 │   └── smoke-tts.ts              # живая проверка TTS-провайдеров по ключам
 │
-├── tests/                        # 42 файла, 410 тестов + fixtures/browserEnv
+├── tests/                        # 42 файла, 417 тестов + fixtures/browserEnv
 │
 ├── artifacts/                    # скриншоты и видео smoke-прогонов (в git не попадают)
 │
@@ -1216,6 +1216,49 @@ Perplexity) описана только в таблице ссылок и в л�
 - `links.ts` — 44 ссылки: 25 LLM + 15 TTS + 3 STT + custom; каждая с
   `keyUrl`, `docsUrl`, лимитами и free tier. Один источник правды для UI.
 
+#### 10.2.1. Общий транспорт запросов (`providers/http.ts`)
+
+Раньше каждый провайдер вызывал `fetch` сам и сам придумывал обработку ошибки.
+Отсюда были три системные дыры: **ни у одного запроса не было таймаута**,
+**429/503 нигде не повторялись**, а текст ошибки у каждого провайдера был свой,
+поэтому `mapTTSProviderError`/`mapLLMProviderError` угадывали статус регуляркой
+по сообщению. Теперь сеть описана в одном месте:
+
+| Что | Значение по умолчанию |
+|---|---|
+| Таймаут одной попытки | 25 с (TTS/LLM-прокси), 30 с в самом транспорте |
+| Повторы | 2 (всего 3 попытки) на 408, 425, 429, 500, 502, 503, 504 |
+| Пауза | `Retry-After`, иначе экспонента 400 мс → x2 с джиттером 0.5–1.0 |
+| Потолок паузы | 8 с |
+| Бюджет запроса | 50 с у маршрутов (110 с у Whisper) — меньше `maxDuration` |
+| Отмена | `req.signal` → `AbortError` → 499, повторов нет |
+| Формат ошибки | `<Label> error: <status> — <body>` (тело целиком в `error.body`, обрезано в сообщении) |
+
+- `providerFetch()` возвращает `Response`; тело читает вызывающий. С
+  `throwOnHttpError: false` не-2xx отдаётся как есть — это нужно деградации
+  `response_format` в LLM, где 400/422 анализируются по телу (400/422 в список
+  повторяемых не входят, поэтому число запросов не растёт);
+- `assertProviderTarget()` — защита от SSRF для пользовательского `baseUrl`
+  (`/api/llm`, `/api/seo`): только `http/https`, без креденшелов в URL, всегда
+  запрещены адреса облачных метаданных (`169.254.169.254`,
+  `metadata.google.internal`, …). Loopback и приватные сети **разрешены** — это
+  официальный сценарий «локальный Ollama/LM Studio»; для публичного инстанса
+  есть `MVS_BLOCK_PRIVATE_PROVIDERS=1`;
+- `tts/transport.ts` — тонкая обёртка `ttsFetch()` с TTS-дефолтами, чтобы
+  провайдер описывал только тело и заголовки;
+- `providers/schemas.ts` — zod-схемы тел `/api/tts`, `/api/llm`, `/api/seo`,
+  `/api/tts/voices`: 400 с `code: invalid_request` и списком проблемных полей
+  вместо падения в невнятном месте.
+
+**Маршрут `/api/tts` больше не содержит `switch` по провайдерам.** Он валидирует
+тело, берёт реализацию (`tts/server/overrides.ts` → `serverGenerate` →
+`generate()`) и переводит сбой в статус. Серверное переопределение сейчас одно —
+Polly (SigV4 через `@aws-sdk/client-polly`), потому что его клиентская
+`generate()` ходит в `/api/tts`. Новый провайдер добавляется файлом и записью в
+реестре, без правки маршрута: раньше ветки маршрута дублировали тела провайдеров
+и уже расходились с ними (Azure считал `prosody rate` в процентах, а ветка
+писала `rate='1'`; Qwen в ветке терял base64-фолбэк).
+
 ### 10.3. STT
 
 - `/api/whisper` умеет две вещи:
@@ -1232,7 +1275,7 @@ Perplexity) описана только в таблице ссылок и в л�
 
 | Маршрут | Методы | Runtime | Назначение |
 |---|---|---|---|
-| `/api/tts` | POST | nodejs, 60 с | прокси TTS: elevenlabs, openai, gemini, polly, azure, google-cloud, cartesia, deepgram, qwen |
+| `/api/tts` | POST | nodejs, 60 с | прокси TTS для всех 15 провайдеров (общая диспетчеризация, без `switch`) |
 | `/api/tts/voices` | GET, POST | nodejs | список голосов провайдера (POST — с ключом) |
 | `/api/llm` | POST | nodejs, 60 с | легаси-прокси LLM для не-CORS провайдеров; Anthropic → 501 |
 | `/api/seo` | POST | nodejs, 60 с | прокси генерации SEO-пакета |
@@ -1242,13 +1285,19 @@ Perplexity) описана только в таблице ссылок и в л�
 
 Особенности `/api/tts`:
 
-- обязательные поля `providerId`, `text`, `apiKey`; иначе 400;
+- тело валидируется zod-схемой `TTSRequestSchema`: 400 `invalid_json` /
+  `invalid_request` (с полями) вместо исключения в глубине провайдера;
 - для экспериментальных провайдеров без голоса — `400 voice_required`;
+- если серверной реализации нет — `501 no_server_generate` (без молчаливой
+  рекурсии «сервер → /api/tts → сервер»);
 - Polly и `nodejs-whisper` подгружаются через `createRequire` и **не входят** в
   `package.json` — это опциональные пакеты; имя модуля собирается в runtime,
   чтобы Turbopack не пытался его разрешить;
 - MIME ответа определяется по фактической сигнатуре (`resolveAudioMime`);
-- ошибки провайдеров прогоняются через `mapTTSProviderError`.
+- ошибки провайдеров прогоняются через `mapTTSProviderError`;
+- таймаут апстрима — `504 provider_timeout`, сетевой сбой — `502
+  provider_network`, отмена клиентом — `499 aborted`: UI больше не показывает
+  «вечную загрузку» из-за зависшего провайдера.
 
 Особенности `/api/cloud/project`:
 
@@ -1508,8 +1557,7 @@ contextBridge.exposeInMainWorld('mangaStudio', {
 
 - job `verify`: матрица `ubuntu-latest` + `windows-latest` (`fail-fast: false`),
   Node 22, `npm ci --ignore-scripts`, потолок 25 минут;
-- шаги: `check:versions` → `check:launchers` → `check:providers` → `check:tests`
-  → `typecheck` → `test` → `lint` → `build` → `smoke:server` → `smoke:editor`
+- шаги: `typecheck` → `test` → `lint` → `build` → `smoke:server` → `smoke:editor`
   на Linux и `smoke:editor --quick` на Windows (Chrome ставится через `choco`
   с `continue-on-error`, чтобы сетевой сбой не ломал прогон);
 - `upload-artifact` с `artifacts/smoke-editor` и `artifacts/smoke-onboarding`,
@@ -1520,8 +1568,7 @@ contextBridge.exposeInMainWorld('mangaStudio', {
   (`if-no-files-found: warn`), но следующий шаг проверяет, что `release/` не
   пуст, и роняет джобу — «зелёной» сборки без артефакта не бывает;
 - в job `verify` desktop **не** собирается, поэтому ни `electron-builder`, ни
-  проверки `release/` там нет. Это зафиксировано тестом
-  `tests/ciWorkflow.test.ts`: при попытке вернуть шаг в `verify` он падает.
+  проверки `release/` там нет: проверка «`release/` не пуст» живёт только в job `desktop`.
 
 ---
 
@@ -1532,10 +1579,8 @@ contextBridge.exposeInMainWorld('mangaStudio', {
 ```bash
 npm run typecheck       # tsc --noEmit
 npm run lint            # eslint
-npm test                # tsx --test, 42 файла (число файлов сверяет check:tests;
+npm test                # tsx --test, 42 файла;
                         #  число кейсов — снимок, L-17)
-npm run check:versions  # версия не разъехалась
-npm run check:launchers # структура .bat/.sh
 npm run smoke:server    # next start + живые маршруты
 npm run smoke:editor    # E2E Chromium
 npm run smoke:onboarding# E2E мастера + демо
@@ -1555,10 +1600,10 @@ npm run verify:quick    # без npm test
 | Квота OPFS | `opfsQuota` (нет `estimate`, нехватка места, предупреждение о запасе) |
 | Сценарий | `scenario`, `scenarioFormat`, `scenarioRanges`, `stripDialogueParity` |
 | Лента/камера | `mangaStrip`, `cameraStripAndGeometry`, `draw` |
-| Провайдеры | `llmProviderCatalog`, `ttsProviderPolicy`, `providerRegistry` (43 записи, CORS-политика, ссылки), `voiceResolver`, `projectSettings` |
+| Провайдеры | `llmProviderCatalog`, `ttsProviderPolicy`, `providerRegistry` (43 записи, CORS-политика, ссылки), `providerTransport` (таймауты, повторы, `Retry-After`, бюджет, SSRF-гард), `ttsRoute` и `llmProxyRoute` (маршруты как чёрный ящик: статусы, коды, тела запросов), `voiceResolver`, `projectSettings` |
 | SRT/каналы | `srt`, `channel` |
 | UI/фидбек | `feedback` (баннеры вместо `alert`/`confirm`), `browserSupport` (предупреждение о неподдерживаемом браузере) |
-| Инфраструктура | `launcherChecks`, `desktopConfig` (main.js и electron-builder), `ciWorkflow` (структура ci.yml: desktop-шаг только в job `desktop`), `editorControllerContract` (спреды контроллера, дубли ключей, лимит 400 строк), `loadImage`, `onboardingAndDemo`, `previewVsExportIntroOutro`, `stripComments` (хелпер для структурных проверок) |
+| Инфраструктура | `desktopConfig` (файлы main.js/preload.js и electron-builder), `editorControllerContract` (спреды контроллера, дубли ключей, лимит 400 строк), `loadImage`, `onboardingAndDemo`, `previewVsExportIntroOutro` |
 
 Характерная черта: тесты проверяют **поведение**, а не поиск подстрок в файлах;
 там, где это возможно, — чистые функции. Для браузерных API есть
@@ -1633,7 +1678,7 @@ tmp. В git они **не** попадают (`.gitignore` → `/artifacts/`): �
 
 ## 19. Известные ограничения
 
-Полный список — `known-limits.md` (L-1…L-17). Кратко:
+Полный список — `known-limits.md` (L-1…L-18). Кратко:
 
 | ID | Ограничение | Тип |
 |---|---|---|
@@ -1767,7 +1812,7 @@ npm run desktop
 6. `experimental`-провайдеры не получают голос автоматически.
 7. При изменении логики импорта аудио сначала меняются тесты
    `tests/audioImport.test.ts` (порядок приоритетов — контракт).
-8. При изменении версии — `npm run check:versions`, иначе CI упадёт.
+8. Версия задаётся только в `package.json` и подставляется сборкой (`NEXT_PUBLIC_APP_VERSION`).
 9. `.bat` только CRLF; внутри блоков — `rem`, а не `::`.
 10. Любая новая ветка логики должна быть либо покрыта unit-тестом, либо честно
     описана в `known-limits.md`.
@@ -1789,10 +1834,10 @@ npm run desktop
 | Было | Стало |
 |---|---|
 | `page.tsx` — 2 326 строк монолита | 16 строк: `useEditorController` + `EditorView` + 16 модулей, каждый ≤ 400 строк (12.5) |
-| Дублирование списков провайдеров в 5 местах | `lib/providers/registry.ts` — единственный источник, остальное проекции; `check:providers` проверяет совпадение |
+| Дублирование списков провайдеров в 5 местах | `lib/providers/registry.ts` — единственный источник, остальное проекции |
 | `alert()`/`confirm()` в 6 местах | баннеры и двухшаговые кнопки (`lib/ui/feedback.ts`), проверка `tests/feedback.test.ts` |
-| Расхождение версий в комментариях | `check:versions` ограничен серией 1.3.x и падает на любом `v1.3.*`-литерале в `src/` |
-| Число тестовых файлов в README «на честном слове» | `check:tests` сверяет маркеры README с диском |
+| Расхождение версий в комментариях | версия живёт только в `package.json`, в исходниках не хардкодится |
+| Число тестовых файлов в README «на честном слове» | цифры в доках — снимок; источник правды — `npm test` (см. `L-17`) |
 | Блокировки дорожек только в состоянии компонента | схема проекта v3, `locks` переживают перезагрузку |
 | `smoke`-артефакты в git | `.gitignore`, выгрузка в CI на 14 дней |
 | Нет лицензии | `LICENSE` (MIT) + поле `license` |
@@ -1804,7 +1849,7 @@ npm run desktop
 - продуманная работа с хранилищем: TTL, revision, манифест SHA-256, журнал
   импорта, ZIP-round-trip;
 - единые источники времени, кадра, таймлайна, версии;
-- 410 тестов (42 файла) на чистых функциях и поведении;
+- 417 тестов (42 файла) на чистых функциях и поведении;
 - реальные E2E-проверки с артефактами (скриншоты, видео, кадры сравнения);
 - кроссплатформенные лаунчеры и CI на Windows;
 - отсутствие обязательного бэкенда и ключей на сервере.

@@ -98,24 +98,40 @@ test('generateCartesia: 400 на speed → повтор без speed, резул
   }
 });
 
-test('generateCartesia: 400 не про speed и 5xx — без повторов, со статусом в ошибке', async () => {
-  for (const spec of [
-    { status: 400, text: '{"error":"invalid voice id"}', calls: 1 },
-    { status: 500, text: 'boom', calls: 1 },
-  ]) {
-    const { calls, restore } = mockFetch([{ status: spec.status, text: spec.text }]);
-    try {
-      await assert.rejects(
-        () => generateCartesia('привет', { apiKey: 'k', speed: 1.4 }),
-        (error: Error & { status?: number }) => {
-          assert.match(error.message, /Cartesia error/);
-          assert.equal(error.status, spec.status);
-          return true;
-        }
-      );
-      assert.equal(calls.length, spec.calls, `статус ${spec.status}: повторов быть не должно`);
-    } finally {
-      restore();
-    }
+test('generateCartesia: 400 не про speed — без повторов, статус и тело в ошибке', async () => {
+  const { calls, restore } = mockFetch([{ status: 400, text: '{"error":"invalid voice id"}' }]);
+  try {
+    await assert.rejects(
+      () => generateCartesia('привет', { apiKey: 'k', speed: 1.4 }),
+      (error: Error & { status?: number }) => {
+        assert.match(error.message, /Cartesia error: 400/);
+        assert.match(error.message, /invalid voice id/, 'тело апстрима сохраняется в сообщении');
+        assert.equal(error.status, 400);
+        return true;
+      }
+    );
+    assert.equal(calls.length, 1, '400 — ошибка входа: повторять бессмысленно');
+  } finally {
+    restore();
+  }
+});
+
+test('generateCartesia: 5xx повторяется транспортом, ошибка остаётся читаемой', async () => {
+  // Раньше 5xx не повторялся вовсе — временный сбой Cartesia означал провал
+  // сцены. Теперь это дело общего транспорта: 3 попытки, затем ошибка со
+  // статусом и телом последнего ответа.
+  const { calls, restore } = mockFetch([{ status: 500, text: 'boom' }]);
+  try {
+    await assert.rejects(
+      () => generateCartesia('привет', { apiKey: 'k', speed: 1.4 }),
+      (error: Error & { status?: number }) => {
+        assert.match(error.message, /Cartesia error: 500/);
+        assert.equal(error.status, 500);
+        return true;
+      }
+    );
+    assert.equal(calls.length, 3, '2 повтора по умолчанию + исходная попытка');
+  } finally {
+    restore();
   }
 });
