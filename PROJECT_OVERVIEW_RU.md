@@ -83,7 +83,7 @@
 | Desktop | Electron 33 + `electron-builder` |
 | E2E | `playwright-core` + `@sparticuz/chromium` |
 | Объём кода | `src/` ≈ **31 150 строк** |
-| Тесты | **42 файла**, **417** тест-кейсов (`tsx --test`; число кейсов — снимок, см. `L-17`) |
+| Тесты | **43 файла**, **421** тест-кейс (`tsx --test`; число кейсов — снимок, см. `L-17`) |
 | CI | GitHub Actions, матрица `ubuntu-latest` + `windows-latest` |
 | Лицензия | MIT (`LICENSE`), поле `license` в `package.json` |
 
@@ -591,7 +591,7 @@ make/
 │   ├── smoke-audio.ts            # OfflineAudioContext → WAV
 │   └── smoke-tts.ts              # живая проверка TTS-провайдеров по ключам
 │
-├── tests/                        # 42 файла, 417 тестов + fixtures/browserEnv
+├── tests/                        # 43 файла, 421 тест + fixtures/browserEnv
 │
 ├── artifacts/                    # скриншоты и видео smoke-прогонов (в git не попадают)
 │
@@ -1579,7 +1579,7 @@ contextBridge.exposeInMainWorld('mangaStudio', {
 ```bash
 npm run typecheck       # tsc --noEmit
 npm run lint            # eslint
-npm test                # tsx --test, 42 файла;
+npm test                # tsx --test, 43 файла;
                         #  число кейсов — снимок, L-17)
 npm run smoke:server    # next start + живые маршруты
 npm run smoke:editor    # E2E Chromium
@@ -1590,7 +1590,7 @@ npm run verify          # всё, включая тесты и сборку
 npm run verify:quick    # без npm test
 ```
 
-### 17.2. Что покрыто юнит-тестами (42 файла)
+### 17.2. Что покрыто юнит-тестами (43 файла)
 
 | Группа | Файлы |
 |---|---|
@@ -1602,7 +1602,7 @@ npm run verify:quick    # без npm test
 | Лента/камера | `mangaStrip`, `cameraStripAndGeometry`, `draw` |
 | Провайдеры | `llmProviderCatalog`, `ttsProviderPolicy`, `providerRegistry` (43 записи, CORS-политика, ссылки), `providerTransport` (таймауты, повторы, `Retry-After`, бюджет, SSRF-гард), `ttsRoute` и `llmProxyRoute` (маршруты как чёрный ящик: статусы, коды, тела запросов), `voiceResolver`, `projectSettings` |
 | SRT/каналы | `srt`, `channel` |
-| UI/фидбек | `feedback` (баннеры вместо `alert`/`confirm`), `browserSupport` (предупреждение о неподдерживаемом браузере) |
+| UI/фидбек | `feedback` (баннеры вместо `alert`/`confirm`), `browserSupport` (предупреждение о неподдерживаемом браузере), `chunkReload` (детект «Failed to load chunk», авто-перезагрузка устаревшей вкладки с анти-циклом) |
 | Инфраструктура | `desktopConfig` (файлы main.js/preload.js и electron-builder), `editorControllerContract` (спреды контроллера, дубли ключей, лимит 400 строк), `loadImage`, `onboardingAndDemo`, `previewVsExportIntroOutro` |
 
 Характерная черта: тесты проверяют **поведение**, а не поиск подстрок в файлах;
@@ -1849,7 +1849,7 @@ npm run desktop
 - продуманная работа с хранилищем: TTL, revision, манифест SHA-256, журнал
   импорта, ZIP-round-trip;
 - единые источники времени, кадра, таймлайна, версии;
-- 417 тестов (42 файла) на чистых функциях и поведении;
+- 421 тест (43 файла) на чистых функциях и поведении;
 - реальные E2E-проверки с артефактами (скриншоты, видео, кадры сравнения);
 - кроссплатформенные лаунчеры и CI на Windows;
 - отсутствие обязательного бэкенда и ключей на сервере.
