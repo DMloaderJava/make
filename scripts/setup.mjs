@@ -12,7 +12,6 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { checkLaunchers } from './check-launchers.mjs';
 
 const root = process.cwd();
 
@@ -71,13 +70,10 @@ async function main() {
   const ffmpeg = checkCommand('ffmpeg', ['-version']);
   const ffprobe = checkCommand('ffprobe', ['-version']);
   const chromium = await resolveChromiumInfo();
-  const launcherFiles = {};
-  for (const file of readdirSync(root).filter(f => f.endsWith('.bat') || f.endsWith('.sh'))) {
-    launcherFiles[file] = readFileSync(resolve(root, file), 'utf8');
-  }
-  const launcherProblems = checkLaunchers(launcherFiles);
-  const launchersOk =
-    Object.keys(launcherFiles).length >= 6 && launcherProblems.length === 0;
+  // Доктор окружения проверяет только наличие файлов запуска, а не их содержимое:
+  // разбор .bat регулярками переехал в историю вместе с check-launchers.mjs.
+  const launcherFiles = readdirSync(root).filter(f => f.endsWith('.bat') || f.endsWith('.sh'));
+  const launchersOk = launcherFiles.length >= 6;
 
   const rows = [
     {

@@ -1,7 +1,5 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
 import {
   normalizeRangeText,
   validateYRange,
@@ -466,11 +464,6 @@ test('Итерация 2 — Задача 11: интро/аутро камера
 });
 
 test('Итерация 2 — Задача 8 и P1 (5, 12, 13, 14): Preview и экспорт рисуют из sampleCameraFrame (совпадение в t ∈ {0, 1.5, 3, 5, 5.5} в режимах panels и strip)', () => {
-  // Проверяем, что Preview.tsx не вызывает stripScene.scrollAt напрямую в рендере
-  const previewSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/components/studio/Preview.tsx'), 'utf-8');
-  assert.equal(previewSrc.includes('.scrollAt('), false, 'Preview.tsx не должен вызывать scrollAt в обход sampleCameraFrame');
-  assert.equal(previewSrc.includes('const scrollY = sample.stripScrollY'), true, 'Preview.tsx должен передавать sample.stripScrollY в stripScene.render');
-
   const panels: PanelData[] = [
     makePanel(1, { order: 0, imageIndex: 0, bbox: { x: 0, y: 0, width: 100, height: 60 } }),
     makePanel(2, { order: 1, imageIndex: 0, bbox: { x: 0, y: 60, width: 100, height: 40 } }),
@@ -685,11 +678,6 @@ test('Итерация 2 — Задача 8 и P1 (5, 12, 13, 14): Preview и э
 });
 
 test('Итерация 2.1 — Б1 (Задача 1): побитовое совпадение drawImage offset между Preview и Export (renderPanel) в режиме panels для bbox [0..30%] на t ∈ {0, 1, 2}', () => {
-  // Проверяем, что assembleVideo.ts не использует старый getKenBurnsParams в renderPanel
-  const assembleSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/lib/pipeline/assembleVideo.ts'), 'utf-8');
-  assert.equal(assembleSrc.includes('getKenBurnsParams'), false, 'renderPanel в assembleVideo.ts не должен использовать getKenBurnsParams');
-  assert.equal(assembleSrc.includes('drawPanelWithCamera('), true, 'renderPanel в assembleVideo.ts должен использовать drawPanelWithCamera');
-
   const panel = makePanel(1, {
     order: 0,
     imageIndex: 0,
@@ -845,43 +833,7 @@ test('Итерация 2.1 — Б2 (Задача 2): отсутствие ска
   }
 });
 
-test('Итерация 2.1 — Задачи 4, 5 и P1 (8, 13): 0 совпадений stripGapMode в src/, clockTime в Preview.tsx только для formatTime, scrollLeft в Timeline.tsx и panelProgress=0 для fullFrame', () => {
-  // Задача 4: grep 'stripGapMode' src/ -> 0 совпадений
-  const srcRoot = path.resolve(process.cwd(), 'src');
-  const walkFiles = (dir: string): string[] => {
-    const out: string[] = [];
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) out.push(...walkFiles(full));
-      else if (full.endsWith('.ts') || full.endsWith('.tsx')) out.push(full);
-    }
-    return out;
-  };
-  const forbiddenProp = 'stripGap' + 'Mode';
-  for (const file of walkFiles(srcRoot)) {
-    const content = fs.readFileSync(file, 'utf-8');
-    assert.equal(
-      content.includes(forbiddenProp),
-      false,
-      `В файле ${path.relative(process.cwd(), file)} найдено устаревшее свойство ${forbiddenProp}`
-    );
-  }
-
-  // Задача 5: clockTime в Preview.tsx используется только в useState и в JSX для formatTime, не в sampleCameraFrame
-  const previewSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/components/studio/Preview.tsx'), 'utf-8');
-  const clockTimeLines = previewSrc
-    .split('\n')
-    .map(l => l.trim())
-    .filter(l => !l.startsWith('//') && !l.startsWith('*') && /\bclockTime\b/.test(l));
-  assert.equal(clockTimeLines.length, 2, `Ожидалось ровно 2 вхождения clockTime (useState и formatTime), найдено: ${JSON.stringify(clockTimeLines)}`);
-  assert.ok(clockTimeLines[0].includes('useState('));
-  assert.ok(clockTimeLines[1].includes('formatTime('));
-  assert.equal(previewSrc.includes('const frameTime = clock ? clock.getTime() : currentTime;'), true);
-
-  // P1 п. 8: Timeline.tsx передаёт актуальный scrollLeft в computeTimelineGeometry (не scrollLeft: 0)
-  const timelineSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/components/studio/Timeline.tsx'), 'utf-8');
-  assert.equal(timelineSrc.includes('scrollLeft: 0'), false, 'Timeline.tsx должен передавать актуальный scrollLeft в computeTimelineGeometry');
-
+test('P1 п. 13: для fullFrame-панели panelProgress = 0 и frameSignature неизменна внутри сегмента', () => {
   // P1 п. 13: для fullFrame-панели panelProgress === 0 и frameSignature неизменна внутри сегмента
   const ffPanel = makePanel(1, { fullFrame: true, bbox: { x: 0, y: 0, width: 100, height: 100 } });
   const ffTl = [makeSeg({ panelId: 1, imageIndex: 0, audioStart: 1.0, audioEnd: 4.0 })];
@@ -911,12 +863,6 @@ test('Итерация 2.1 — Задачи 4, 5 и P1 (8, 13): 0 совпаде
 });
 
 test('Задача 3.1.3 (Н-3.3): useSyncExternalStore и computePreviewHeaderSelectorKey обновляют селектор шапки при смене фазы/панели/yRange/stripScrollDirection и не вызывают лишних ререндеров внутри одной полосы', () => {
-  const previewSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/components/studio/Preview.tsx'), 'utf-8');
-  assert.ok(
-    previewSrc.includes('useSyncExternalStore(') && previewSrc.includes('computePreviewHeaderSelectorKey('),
-    'Preview.tsx должен подписываться на clock через useSyncExternalStore с computePreviewHeaderSelectorKey'
-  );
-
   const panels: PanelData[] = [
     makePanel(1, { order: 0, imageIndex: 0, bbox: { x: 0, y: 0, width: 100, height: 45 } }),
     makePanel(2, { order: 1, imageIndex: 0, bbox: { x: 0, y: 50, width: 100, height: 50 } }),

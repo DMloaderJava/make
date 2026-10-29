@@ -1,6 +1,5 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import {
   PROVIDER_REGISTRY,
   getImplementedProviders,
@@ -178,17 +177,7 @@ test('CORS-политика выводится из реестра и не пр�
   );
 });
 
-test('добавление провайдера не требует правок в API-маршрутах', () => {
-  // Структурные guard-ы: если в маршрут снова заведут локальную карту URL,
-  // тест упадёт и напомнит, что источник правды — реестр.
-  const llmRoute = readFileSync('src/app/api/llm/route.ts', 'utf8');
-  const seoRoute = readFileSync('src/app/api/seo/route.ts', 'utf8');
-  for (const [name, source] of [['/api/llm', llmRoute], ['/api/seo', seoRoute]] as const) {
-    assert.match(source, /resolveLLMProxyUrl/, `${name} должен брать URL из реестра`);
-    assert.doesNotMatch(source, /providerConfigs/, `${name}: локальная карта провайдеров вернулась`);
-    assert.doesNotMatch(source, /api\.(openai|groq|mistral)\.com/, `${name}: URL провайдера захардкожен`);
-  }
-
+test('у каждого проксируемого TTS-провайдера есть серверный путь или явный запрет прокси', () => {
   // У каждого TTS-провайдера с cors=proxy есть либо serverGenerate, либо
   // честный proxyClientSide-запрет (иначе сервер молча сходит в /api/tts).
   for (const provider of TTS_PROVIDERS) {

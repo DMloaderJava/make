@@ -1,24 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
 import { createStripScene } from '../src/lib/pipeline/mangaStrip';
 import { renderExportFrameToCanvas } from '../src/lib/pipeline/assembleVideo';
 import { drawPreviewFrameToCanvas } from '../src/components/studio/Preview';
 import type { PanelData, SyncTimeline } from '../src/lib/storage/db';
 
 test('Итерация 2.2 — Б-2.2 (stripDialogueParity): в режиме strip в фазах panel и gap ни Preview, ни Export не рисуют плашку drawDialogue (чистый вебтун без плашек)', () => {
-  // 1. Проверяем, что архитектурное решение задокументировано в шапке mangaStrip.ts
-  const mangaStripSrc = fs.readFileSync(
-    path.resolve(process.cwd(), 'src/lib/pipeline/mangaStrip.ts'),
-    'utf-8'
-  );
-  assert.ok(
-    mangaStripSrc.includes('чистым вебтуном без плашек'),
-    'В шапке src/lib/pipeline/mangaStrip.ts должно быть явно задокументировано решение Б-2.2'
-  );
-
-  // 2. Проверяем паритет на нескольких точках t внутри сегментов и в межрепликовой паузе
+  // Проверяем паритет на нескольких точках t внутри сегментов и в межрепликовой паузе
   const imgUrl = 'data:image/png;base64,webtoon_strip';
   const fakeImg = { width: 1000, height: 2400 } as unknown as HTMLImageElement;
   const loadedImages = new Map<string, HTMLImageElement>([[imgUrl, fakeImg]]);

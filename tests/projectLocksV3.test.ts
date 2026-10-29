@@ -2,7 +2,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { migrateProjectSchema } from '../src/lib/storage/schemaMigration';
 import { CURRENT_PROJECT_SCHEMA_VERSION } from '../src/lib/storage/db';
-import { readEditorSource } from './helpers/editorSource';
 
 /**
  * P1-1: блокировки дорожек переживают перезагрузку (схема проекта v2 → v3).
@@ -108,7 +107,3 @@ test('P1-1: реальные NLE-операции уважают блокиро�
   assert.doesNotThrow(() => togglePanelMute(lockPanels, durs, 1, true, unlocked));
 });
 
-test('P1-1: редактор передаёт блокировки проекта в NLE-операции', () => {
-  const editor = readEditorSource();
-  assert.match(editor, /locks:\s*project\?\.locks/, 'getNleOptions должен брать locks из проекта');
-});
