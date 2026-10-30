@@ -1,4 +1,6 @@
 import { TTSProvider, TTSOptions, Voice } from './types';
+import { providerFetch } from '../http';
+import { ttsFetch } from './transport';
 
 export const fishTTS: TTSProvider = {
   id: 'fish',
@@ -10,8 +12,9 @@ export const fishTTS: TTSProvider = {
   experimental: true,
   baseUrl: 'https://api.fish.audio',
 
-  async generate(text: string, { voice = 'default', apiKey }: TTSOptions): Promise<ArrayBuffer> {
-    const res = await fetch('https://api.fish.audio/v1/tts', {
+  async generate(text: string, options: TTSOptions): Promise<ArrayBuffer> {
+    const { voice = 'default', apiKey } = options;
+    const res = await ttsFetch('fish', 'Fish Audio', 'https://api.fish.audio/v1/tts', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${apiKey}`,
@@ -22,11 +25,7 @@ export const fishTTS: TTSProvider = {
         reference_id: voice !== 'default' ? voice : undefined,
         format: 'mp3'
       })
-    });
-    if (!res.ok) {
-      const err = await res.text();
-      throw new Error(`Fish Audio error: ${res.status} — ${err.slice(0,500)}`);
-    }
+    }, options);
     return res.arrayBuffer();
   },
 
@@ -37,10 +36,9 @@ export const fishTTS: TTSProvider = {
       ];
     }
     try {
-      const res = await fetch('https://api.fish.audio/v1/models', {
+      const res = await providerFetch('fish', 'https://api.fish.audio/v1/models', {
         headers: { 'Authorization': `Bearer ${apiKey}` }
-      });
-      if (!res.ok) throw new Error('fail');
+      }, { label: 'Fish Audio voices', retries: 1, timeoutMs: 15_000 });
       const data = await res.json();
       return (data.items || data.models || []).slice(0, 20).map((v: any) => ({
         id: v._id || v.id,

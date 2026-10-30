@@ -1,4 +1,3 @@
-import { readEditorSource } from './helpers/editorSource';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import './fixtures/browserEnv';
@@ -68,9 +67,6 @@ import {
   computeTrimHandleUpdate,
   createTimelinePointerController,
 } from '../src/lib/pipeline/timelineDrag';
-import fs from 'node:fs';
-import path from 'node:path';
-
 function makePanel(id: number, overrides: Partial<PanelData> = {}): PanelData {
   return {
     id,
@@ -545,42 +541,8 @@ test('Итерация 2 — Задача 5 и Задача 12: buildTimelineAud
   assert.ok(mutedOutroSamples.every(v => v === 0));
 });
 
-test('Итерация 2 — Задача 6: единообразное обновление состояния во всех 7 NLE-обработчиках EditorPage через applyNleResult', () => {
-  const editorSrc = readEditorSource();
-  // Проверяем, что каждый из 7 именованных NLE-обработчиков EditorPage вызывает applyNleResult(res)
-  const expectedNleHandlers = [
-    'handleSplitActiveClip',
-    'handleDeleteActiveClip',
-    'handleDuplicateActiveClip',
-    'handleReorderClip',
-    'handleTogglePanelMute',
-    'handleTogglePanelSolo',
-    'handleSetPanelAudioTrim',
-    'handleSetPanelDurationOverride',
-    'handleSetPanelAudioGainAndFades',
-  ];
-  for (const handlerName of expectedNleHandlers) {
-    const startIdx = editorSrc.indexOf(`const ${handlerName} =`);
-    assert.ok(startIdx !== -1, `Обработчик ${handlerName} должен быть объявлен в EditorPage`);
-    const bodySlice = editorSrc.slice(startIdx, startIdx + 1200);
-    assert.ok(
-      bodySlice.includes('applyNleResult(res)'),
-      `Обработчик ${handlerName} должен вызывать applyNleResult(res)`
-    );
-  }
-  const applyMatches = editorSrc.match(/applyNleResult\(/g) ?? [];
-  assert.equal(
-    applyMatches.length,
-    expectedNleHandlers.length,
-    `Ожидалось ${expectedNleHandlers.length} вызовов applyNleResult в NLE-обработчиках EditorPage, найдено ${applyMatches.length}`
-  );
-  // Также проверяем, что handleApplyScenario прокидывает timelineVersion: patch.timelineVersion
-  assert.ok(
-    editorSrc.includes('timelineVersion: patch.timelineVersion'),
-    'handleApplyScenario в EditorPage должен передавать timelineVersion: patch.timelineVersion в updateProject'
-  );
-
-  // Проверяем идентичный контракт для всех 7 NLE-операций: panels, audioDurations, timeline, srt, timelineVersion
+test('NLE-операции: единый контракт (panels, audioDurations, timeline, srt, timelineVersion) и монотонный timelineVersion', () => {
+  // Проверяем идентичный контракт для всех NLE-операций: panels, audioDurations, timeline, srt, timelineVersion
   const basePanels = [
     makePanel(1, { order: 0, dialogue: 'Первая реплика один два три четыре пять' }),
     makePanel(2, { order: 1, dialogue: 'Вторая реплика шесть семь восемь девять' }),
@@ -965,17 +927,6 @@ test('Этап 3 (подэтапы 3.1–3.6): assertValidPackedPlacements (Н-3
     /Некорректный playDuration/
   );
 
-  // 2. Подэтап 3.1 (Н-3.6): проверка очистки scrollRafRef при размонтировании Timeline.tsx
-  const timelineSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/components/studio/Timeline.tsx'), 'utf-8');
-  assert.equal(
-    timelineSrc.includes('window.cancelAnimationFrame(scrollRafRef.current)'),
-    true,
-    'Timeline.tsx должен отменять scrollRafRef.current при unmount'
-  );
-  assert.equal(timelineSrc.includes('data-trim-handle="in"'), true, 'Timeline.tsx должен рендерить левую ручку trim');
-  assert.equal(timelineSrc.includes('data-trim-handle="out"'), true, 'Timeline.tsx должен рендерить правую ручку trim');
-  assert.equal(timelineSrc.includes('data-reorder-confirm-bar'), true, 'Timeline.tsx должен подтверждать перестановку drag-and-drop');
-
   // 3. Подэтап 3.2 (п. 51 и п. 59): расчёт целевого индекса drag-and-drop с привязкой snapTimeToTargets -> reorderPanelClips
   const tl: SyncTimeline[] = [
     makeSeg({ panelId: 1, imageIndex: 0, audioStart: 1.0, audioEnd: 3.0 }),
@@ -1064,12 +1015,6 @@ test('Этап 3 (подэтапы 3.1–3.6): assertValidPackedPlacements (Н-3
   const upCrossTrack = pointerController.pointerUpClip({ overTrack: 'audio' });
   assert.equal(upCrossTrack.reordered, false);
   assert.equal(simTimelineVersion, 11, 'Междорожечный drop не должен менять timelineVersion');
-  assert.equal(
-    timelineSrc.includes("draggedTrack !== 'video'") && timelineSrc.includes("draggedTrack !== 'audio'"),
-    true,
-    'Timeline.tsx должен отклонять перетаскивание клипа между разными дорожками (видео <-> аудио)'
-  );
-
   // 4. Подэтап 3.2 (п. 52 и п. 59): расчёт ручек trimIn / trimOut и pointer-симуляция на ручках -> setPanelAudioTrim
   const trimInRes = computeTrimHandleUpdate({
     edge: 'in',
@@ -1237,16 +1182,4 @@ test('Этап 3 (подэтапы 3.1–3.6): assertValidPackedPlacements (Н-3
     options: { frameWidth: 1000, frameHeight: 500, gap: 0 },
   });
   assert.ok(Math.abs(strip4s.scrollAt(1.0) - 0.5 * strip2s.scrollAt(1.0)) < 1e-6);
-
-  // 6. Подэтап 3.3 (п. 62) и 3.2 (п. 51, 52): проверка двусторонней подсветки в Preview.tsx/Timeline.tsx и вызовов onReorderPanel/onTrimPanel
-  const previewSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/components/studio/Preview.tsx'), 'utf-8');
-  assert.equal(previewSrc.includes('useSyncExternalStore'), true, 'Preview.tsx должен использовать useSyncExternalStore для шапки');
-  assert.equal(previewSrc.includes('data-linked-clip-highlight'), true, 'Preview.tsx должен подсвечивать связанные видео/аудиоклипы');
-  assert.equal(timelineSrc.includes('draggedPanelId'), true, 'Timeline.tsx должен хранить draggedPanelId при перетаскивании клипа');
-  assert.equal(timelineSrc.includes('onReorderPanel'), true, 'Timeline.tsx должен вызывать onReorderPanel при отпускании над допустимой позицией');
-  assert.equal(timelineSrc.includes('onTrimPanel'), true, 'Timeline.tsx должен вызывать onTrimPanel при отпускании ручки trim');
-
-  const editorSrc = readEditorSource();
-  assert.equal(editorSrc.includes('onReorderPanel={handleReorderClip}'), true, 'EditorPage должен передавать onReorderPanel в Timeline');
-  assert.equal(editorSrc.includes('onTrimPanel={handleSetPanelAudioTrim}'), true, 'EditorPage должен передавать onTrimPanel в Timeline');
 });

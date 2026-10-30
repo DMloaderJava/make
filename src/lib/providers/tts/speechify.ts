@@ -1,4 +1,6 @@
 import { TTSProvider, TTSOptions, Voice } from './types';
+import { providerFetch } from '../http';
+import { ttsFetch } from './transport';
 
 export const speechifyTTS: TTSProvider = {
   id: 'speechify',
@@ -15,7 +17,8 @@ export const speechifyTTS: TTSProvider = {
   supportsSpeed: false,
   baseUrl: 'https://api.sws.speechify.com',
 
-  async generate(text: string, { voice = 'matthew', apiKey, speed: _speed = 1.0, language = 'en-US', model }: TTSOptions): Promise<ArrayBuffer> {
+  async generate(text: string, options: TTSOptions): Promise<ArrayBuffer> {
+    const { voice = 'matthew', apiKey, language = 'en-US', model } = options;
     // simba-base was used by older project settings; migrate it to the supported
     // Simba 3 model selected for the request language.
     const languageBase = language.toLowerCase().split('-')[0];
@@ -28,7 +31,7 @@ export const speechifyTTS: TTSProvider = {
     const modelId = !isEnglish && requestedModel === 'simba-3.2'
       ? 'simba-3.0'
       : requestedModel || (isEnglish ? 'simba-3.2' : 'simba-3.0');
-    const response = await fetch('https://api.sws.speechify.com/v1/audio/speech', {
+    const response = await ttsFetch('speechify', 'Speechify', 'https://api.sws.speechify.com/v1/audio/speech', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${apiKey}`,
@@ -41,12 +44,7 @@ export const speechifyTTS: TTSProvider = {
         language,
         model: modelId,
       })
-    });
-
-    if (!response.ok) {
-      const err = await response.text();
-      throw new Error(`Speechify error: ${response.status} — ${err}`);
-    }
+    }, options);
 
     const data = await response.json();
     // Speechify returns audio_data as base64
@@ -70,10 +68,9 @@ export const speechifyTTS: TTSProvider = {
       ];
     }
     try {
-      const res = await fetch('https://api.sws.speechify.com/v1/voices', {
+      const res = await providerFetch('speechify', 'https://api.sws.speechify.com/v1/voices', {
         headers: { 'Authorization': `Bearer ${apiKey}` }
-      });
-      if (!res.ok) throw new Error('fail');
+      }, { label: 'Speechify voices', retries: 1, timeoutMs: 15_000 });
       const data = await res.json();
       return data.map((v: any) => ({
         id: v.id,

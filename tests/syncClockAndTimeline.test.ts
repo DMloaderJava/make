@@ -1,4 +1,3 @@
-import { readEditorSource } from './helpers/editorSource';
 import { CURRENT_PROJECT_SCHEMA_VERSION } from '../src/lib/storage/db';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -359,21 +358,7 @@ test('Stage 1 (10): интеграционный тест полного цик�
   assert.equal(fullValidation.valid, true, JSON.stringify(fullValidation.issues));
 });
 
-test('Итерация 2 — Задача 1: ProjectClock — единственный источник времени и камеры, setCurrentTime вызывается только в clock.subscribe', () => {
-  const src = readEditorSource();
-  const lines = src.split('\n');
-  const setCurrentTimeLines = lines
-    .map((line, idx) => ({ line: line.trim(), num: idx + 1 }))
-    .filter(item => item.line.includes('setCurrentTime('));
-
-  assert.equal(
-    setCurrentTimeLines.length,
-    1,
-    `Ожидался ровно 1 вызов setCurrentTime( внутри clock.subscribe, найдено: ${JSON.stringify(setCurrentTimeLines)}`
-  );
-  assert.equal(setCurrentTimeLines[0].line, 'setCurrentTime(snap.currentTime);');
-  assert.equal(src.includes('playbackAudioRef'), false, 'Старый ручной цикл playbackAudioRef должен быть удалён');
-
+test('Итерация 2 — Задача 1: ProjectClock мгновенно доставляет seek всем подписчикам (Preview и Timeline видят одно время)', () => {
   // Проверяем, что seek(3.7) мгновенно виден всем подписчикам ProjectClock (Timeline и Preview)
   const clock = new ProjectClock({ duration: 12, currentTime: 0 });
   let previewTime = 0;

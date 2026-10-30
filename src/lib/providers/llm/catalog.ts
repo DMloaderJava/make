@@ -13,6 +13,7 @@
  * консистентность.
  */
 
+import { providerFetch } from '../http';
 import { getImplementedProviders, type ProviderRegistryEntry } from '../registry';
 import { createOpenAICompatibleProvider } from './openai-compatible';
 import { LLMOptions, LLMProvider, Message, MessageContent } from './types';
@@ -57,9 +58,8 @@ async function generateGemini(
   options: LLMOptions
 ): Promise<string> {
   const model = options.model || fallbackModel;
-  const response = await fetch(
-    `${baseUrl}/models/${encodeURIComponent(model)}:generateContent`,
-    {
+  // Один повтор на 429/5xx: Gemini в LLM-режиме не имеет своего цикла повторов.
+  const response = await providerFetch(baseUrl, `${baseUrl}/models/${encodeURIComponent(model)}:generateContent`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -72,13 +72,15 @@ async function generateGemini(
           maxOutputTokens: options.maxTokens ?? 4000,
         },
       }),
+    },
+    {
+      label: 'Gemini',
+      retries: 1,
+      timeoutMs: 25_000,
+      signal: options.signal,
+      deadlineMs: options.deadlineMs,
     }
   );
-
-  if (!response.ok) {
-    const details = await response.text().catch(() => response.statusText);
-    throw new Error(`Gemini error: ${response.status} — ${details.slice(0, 500)}`);
-  }
 
   const data = await response.json() as {
     candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;

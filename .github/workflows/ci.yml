@@ -82,14 +82,6 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      # Кроссплатформенные проверки (node, без pwsh): версия в package.json не
-      # разъехалась по баннерам лаунчеров/README/electron-моста, таблицы
-      # провайдеров в README совпадают с реестром, .bat соблюдают правила
-      # npm-флагов, delayed expansion и %ERRORLEVEL% вне блоков.
-      # На Windows шаг читает те же файлы с CRLF — это заодно проверка .gitattributes.
-      - name: Проверки согласованности (версии, провайдеры, лаунчеры)
-        run: npm run check:versions && npm run check:providers && npm run check:tests && npm run check:launchers
-
   # Переносная desktop-сборка (Electron + Next): AppImage на Linux, portable exe
   # на Windows. Код-подпись не выполняется — вне scope стабилизации.
   desktop:

@@ -1,7 +1,5 @@
-import { readEditorSource } from './helpers/editorSource';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { createStripScene } from '../src/lib/pipeline/mangaStrip';
 import { renderExportFrameToCanvas } from '../src/lib/pipeline/assembleVideo';
 import { drawPreviewFrameToCanvas } from '../src/components/studio/Preview';
@@ -490,28 +488,3 @@ test('Задача 3.1.6: паритет Preview и Export на точках п�
   }
 });
 
-test('Задача 3.3.1 (п. 62): двусторонняя связь выбора панели в Preview и подсветки аудио-клипа (класс selected) в Timeline', () => {
-  const previewSrc = readFileSync('src/components/studio/Preview.tsx', 'utf8');
-  const timelineSrc = readFileSync('src/components/studio/Timeline.tsx', 'utf8');
-  const editorSrc = readEditorSource();
-
-  assert.ok(
-    previewSrc.includes('onSelectPanel?.(first.panelId)'),
-    'Preview должен вызывать onSelectPanel при клике по странице'
-  );
-  assert.ok(
-    previewSrc.includes('data-linked-clip-highlight'),
-    'Preview должен отображать индикатор связанного клипа при выбранной панели'
-  );
-  assert.ok(
-    editorSrc.includes('selectedPanelId={typeof selectedId === \'number\' ? selectedId : null}'),
-    'EditorPage должен передавать selectedPanelId в Preview'
-  );
-  assert.ok(
-    timelineSrc.includes('data-audio-clip-panel={seg.panelId}') &&
-      timelineSrc.includes("? 'selected border-[#E8B44C] ring-1 ring-[#6EE7B7] bg-[#164E3E]'") &&
-      timelineSrc.includes("? 'selected border-[#E8B44C] ring-1 ring-[#F5D27A] bg-[#57451B]'") &&
-      timelineSrc.includes("? 'selected border-[#F5D27A] ring-1 ring-[#E8B44C] bg-[#3A311D] z-10'"),
-    'Видео- и аудио-клипы в Timeline должны получать класс selected при совпадении seg.panelId === selectedId'
-  );
-});

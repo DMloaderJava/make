@@ -1,4 +1,5 @@
 import { TTSProvider, TTSOptions, Voice } from './types';
+import { ttsFetch } from './transport';
 
 export const qwenTTS: TTSProvider = {
   id: 'qwen',
@@ -9,9 +10,10 @@ export const qwenTTS: TTSProvider = {
   defaultModel: 'qwen3-tts-flash',
   baseUrl: 'https://dashscope.aliyuncs.com',
 
-  async generate(text: string, { voice = 'Chelsie', apiKey, language = 'ru', model }: TTSOptions): Promise<ArrayBuffer> {
+  async generate(text: string, options: TTSOptions): Promise<ArrayBuffer> {
+    const { voice = 'Chelsie', apiKey, language = 'ru', model } = options;
     // Qwen TTS via DashScope API
-    const response = await fetch('https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation', {
+    const response = await ttsFetch('qwen', 'Qwen TTS', 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${apiKey}`,
@@ -28,18 +30,16 @@ export const qwenTTS: TTSProvider = {
           format: 'mp3'
         }
       })
-    });
-
-    if (!response.ok) {
-      const err = await response.text();
-      throw new Error(`Qwen TTS error: ${response.status} — ${err}`);
-    }
+    }, options);
 
     const data = await response.json();
     const audioUrl = data.output?.audio?.url || data.output?.audio_url;
     if (audioUrl) {
-      // Download audio from url
-      const audioRes = await fetch(audioUrl);
+      // Ссылка на файл живёт минуты: повторяем один раз, но не ждём долго.
+      const audioRes = await ttsFetch('qwen', 'Qwen TTS file', audioUrl, { method: 'GET' }, options, {
+        retries: 1,
+        timeoutMs: 20_000,
+      });
       return audioRes.arrayBuffer();
     }
     // If returns base64

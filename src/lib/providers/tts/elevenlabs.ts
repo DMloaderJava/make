@@ -1,4 +1,6 @@
 import { TTSProvider, TTSOptions, Voice } from './types';
+import { providerFetch } from '../http';
+import { ttsFetch } from './transport';
 
 export const elevenLabsTTS: TTSProvider = {
   id: 'elevenlabs',
@@ -9,8 +11,12 @@ export const elevenLabsTTS: TTSProvider = {
   defaultModel: 'eleven_multilingual_v2',
   baseUrl: 'https://api.elevenlabs.io/v1',
 
-  async generate(text: string, { voice = '21m00Tcm4TlvDq8ikWAM', apiKey, speed = 1.0, model }: TTSOptions): Promise<ArrayBuffer> {
-    const response = await fetch(
+  async generate(text: string, options: TTSOptions): Promise<ArrayBuffer> {
+    const { voice = '21m00Tcm4TlvDq8ikWAM', apiKey, speed = 1.0, model } = options;
+    // Таймаут/повторы/формат ошибки — в ttsFetch, тело запроса — здесь.
+    const response = await ttsFetch(
+      'elevenlabs',
+      'ElevenLabs',
       `https://api.elevenlabs.io/v1/text-to-speech/${voice}?output_format=mp3_44100_128`,
       {
         method: 'POST',
@@ -30,14 +36,10 @@ export const elevenLabsTTS: TTSProvider = {
             speed: speed
           }
         })
-      }
+      },
+      options
     );
-    
-    if (!response.ok) {
-      const err = await response.text();
-      throw new Error(`ElevenLabs error: ${response.status} — ${err}`);
-    }
-    
+
     return response.arrayBuffer();
   },
   
@@ -54,10 +56,11 @@ export const elevenLabsTTS: TTSProvider = {
       ];
     }
     try {
-      const response = await fetch('https://api.elevenlabs.io/v1/voices', {
+      // Список голосов — вспомогательный запрос: короткий таймаут и один повтор,
+      // чтобы экран настроек не ждал 30 секунд. Ошибка → демо-список ниже.
+      const response = await providerFetch('elevenlabs', 'https://api.elevenlabs.io/v1/voices', {
         headers: { 'xi-api-key': apiKey }
-      });
-      if (!response.ok) throw new Error('Failed to fetch voices');
+      }, { label: 'ElevenLabs voices', retries: 1, timeoutMs: 15_000 });
       const data = await response.json();
       return data.voices.map((v: any) => ({
         id: v.voice_id,

@@ -1,4 +1,5 @@
 import { TTSProvider, TTSOptions, Voice } from './types';
+import { ttsFetch } from './transport';
 
 export const humeTTS: TTSProvider = {
   id: 'hume',
@@ -10,9 +11,10 @@ export const humeTTS: TTSProvider = {
   experimental: true,
   baseUrl: 'https://api.hume.ai',
 
-  async generate(text: string, { voice = 'ITO', apiKey }: TTSOptions): Promise<ArrayBuffer> {
+  async generate(text: string, options: TTSOptions): Promise<ArrayBuffer> {
+    const { voice = 'ITO', apiKey } = options;
     // Hume TTS Octave - simplified, real endpoint may vary
-    const res = await fetch('https://api.hume.ai/v0/tts', {
+    const res = await ttsFetch('hume', 'Hume', 'https://api.hume.ai/v0/tts', {
       method: 'POST',
       headers: {
         'X-Hume-Api-Key': apiKey,
@@ -22,11 +24,7 @@ export const humeTTS: TTSProvider = {
         utterances: [{ text, voice: { name: voice } }],
         format: { type: 'mp3' }
       })
-    });
-    if (!res.ok) {
-      const err = await res.text();
-      throw new Error(`Hume error: ${res.status} — ${err.slice(0,500)}`);
-    }
+    }, options);
     const data = await res.json();
     const audio = data.generations?.[0]?.audio || data.audio;
     if (audio) {

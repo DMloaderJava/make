@@ -7,66 +7,115 @@ import {
   isProxyUnsupported,
   resolveLLMProxyUrl,
 } from '@/lib/providers/registry';
+import {
+  assertProviderTarget,
+  providerFailureCode,
+  providerFailureStatus,
+  providerFetch,
+  ProviderHttpError,
+} from '@/lib/providers/http';
+import { parseJsonBody, SEORequestSchema } from '@/lib/providers/schemas';
+
+/**
+ * SEO-пакет для обложки/описания: тот же LLM-провайдер, что и в /api/llm, но со
+ * своим промптом. Запрос идёт через общий транспорт (таймаут, повторы, бюджет),
+ * а пользовательский baseUrl проверяется `assertProviderTarget` — маршрут был
+ * вторым (после /api/llm) открытым SSRF-прокси с той же дырой.
+ */
 
 export const runtime = 'nodejs';
 export const maxDuration = 60;
 
 const GEMINI_DEFAULT_MODEL = 'gemini-3-flash-preview';
+const SEO_REQUEST_BUDGET_MS = 50_000;
+
+const json = (body: Record<string, unknown>, status: number) =>
+  NextResponse.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
 
 export async function POST(req: NextRequest) {
+  const parsed = await parseJsonBody(req, SEORequestSchema);
+  if (!parsed.ok) {
+    if (parsed.reason === 'invalid_json') {
+      return json({ error: 'Тело запроса должно быть JSON-объектом.', code: 'invalid_json' }, 400);
+    }
+    const first = parsed.issues[0];
+    return json(
+      {
+        error: first
+          ? `Некорректный запрос: поле «${first.path}» — ${first.message}`
+          : 'Некорректный запрос',
+        code: 'invalid_request',
+        issues: parsed.issues,
+      },
+      400
+    );
+  }
+
+  const { sceneDescription, characters, duration, providerId, apiKey, model, baseUrl, accountId } = parsed.data;
+
+  // SEO-генерация работает только через каталог LLM (там есть реализации и
+  // дефолтные модели). Реестр используется для URL/протокола, чтобы карта
+  // провайдеров больше не дублировалась в этом файле.
+  if (!getLLMProvider(providerId)) {
+    return json({ error: `Unknown LLM provider ${providerId}`, code: 'unknown_provider' }, 400);
+  }
+  const entry = getRegistryEntry('llm', providerId);
+  if (!entry) {
+    return json({ error: `Unknown LLM provider ${providerId}`, code: 'unknown_provider' }, 400);
+  }
+
+  if (entry.requiresAccountId && !String(accountId || '').trim()) {
+    return json({
+      error: mapLLMProviderError({ providerId, status: 400, responseBody: 'missing account_id' }),
+      code: 'missing_account_id',
+    }, 400);
+  }
+  if (isProxyUnsupported(providerId)) {
+    return json({
+      error: 'Anthropic API is not OpenAI-compatible (uses /v1/messages). Use direct browser call for SEO generation.',
+      code: 'proxy_unsupported',
+    }, 501);
+  }
+
+  const { SEO_SYSTEM_PROMPT, SEO_USER_PROMPT } = await import('@/lib/prompts/seo-prompt');
+  const userPrompt = SEO_USER_PROMPT(sceneDescription, characters || [], duration || 180);
+
   try {
-    const body = await req.json();
-    const { sceneDescription, characters, duration, providerId, apiKey, model, baseUrl, accountId } = body;
-
-    if (!sceneDescription || !apiKey || !providerId) {
-      return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
-    }
-    // SEO-генерация работает только через каталог LLM (там есть реализации и
-    // дефолтные модели). Реестр используется для URL/протокола, чтобы карта
-    // провайдеров больше не дублировалась в этом файле.
-    if (!getLLMProvider(providerId)) {
-      return NextResponse.json({ error: `Unknown LLM provider ${providerId}` }, { status: 400 });
-    }
-    const entry = getRegistryEntry('llm', providerId);
-    if (!entry) {
-      return NextResponse.json({ error: `Unknown LLM provider ${providerId}` }, { status: 400 });
-    }
-
-    const { SEO_SYSTEM_PROMPT, SEO_USER_PROMPT } = await import('@/lib/prompts/seo-prompt');
-
-    if (entry.requiresAccountId && !String(accountId || '').trim()) {
-      return NextResponse.json({ error: mapLLMProviderError({ providerId, status: 400, responseBody: 'missing account_id' }) }, { status: 400 });
-    }
-    if (isProxyUnsupported(providerId)) {
-      return NextResponse.json({ error: 'Anthropic API is not OpenAI-compatible (uses /v1/messages). Use direct browser call for SEO generation.' }, { status: 501 });
-    }
-
     let content: string;
 
     if (isGeminiApi(providerId)) {
       const modelName = model || entry.defaultModel || GEMINI_DEFAULT_MODEL;
-      const res = await fetch(`${entry.baseUrl}/models/${encodeURIComponent(modelName)}:generateContent`, {
+      const res = await providerFetch('gemini', `${entry.baseUrl}/models/${encodeURIComponent(modelName)}:generateContent`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
         body: JSON.stringify({
           systemInstruction: { parts: [{ text: SEO_SYSTEM_PROMPT }] },
-          contents: [{ role: 'user', parts: [{ text: SEO_USER_PROMPT(sceneDescription, characters || [], duration || 180) }] }],
+          contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
           generationConfig: { temperature: 0.7, maxOutputTokens: 4000 }
         })
+      }, {
+        label: 'Gemini',
+        retries: 1,
+        timeoutMs: 25_000,
+        deadlineMs: SEO_REQUEST_BUDGET_MS,
+        signal: req.signal,
+        throwOnHttpError: false,
       });
       if (!res.ok) {
         const err = await res.text();
-        return NextResponse.json({ error: mapLLMProviderError({ providerId, status: res.status, responseBody: err, model: modelName }) }, { status: res.status });
+        return json({ error: mapLLMProviderError({ providerId, status: res.status, responseBody: err, model: modelName }) }, res.status);
       }
       const data = await res.json();
       content = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
     } else {
       const target = resolveLLMProxyUrl(providerId, { baseUrl, accountId });
       if (!target) {
-        return NextResponse.json({ error: 'Custom provider requires baseUrl' }, { status: 400 });
+        return json({ error: 'Custom provider requires baseUrl', code: 'missing_base_url' }, 400);
       }
+      const endpoint = `${target}/chat/completions`;
+      assertProviderTarget(endpoint);
 
-      const res = await fetch(`${target}/chat/completions`, {
+      const res = await providerFetch(providerId, endpoint, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${apiKey}`,
@@ -77,16 +126,23 @@ export async function POST(req: NextRequest) {
           model: model || entry.defaultModel,
           messages: [
             { role: 'system', content: SEO_SYSTEM_PROMPT },
-            { role: 'user', content: SEO_USER_PROMPT(sceneDescription, characters || [], duration || 180) }
+            { role: 'user', content: userPrompt }
           ],
           temperature: 0.7,
           max_tokens: 4000
         })
+      }, {
+        label: entry.name,
+        retries: 1,
+        timeoutMs: 25_000,
+        deadlineMs: SEO_REQUEST_BUDGET_MS,
+        signal: req.signal,
+        throwOnHttpError: false,
       });
 
       if (!res.ok) {
         const err = await res.text();
-        return NextResponse.json({ error: mapLLMProviderError({ providerId, status: res.status, responseBody: err, model }) }, { status: res.status });
+        return json({ error: mapLLMProviderError({ providerId, status: res.status, responseBody: err, model }) }, res.status);
       }
 
       const data = await res.json();
@@ -103,17 +159,19 @@ export async function POST(req: NextRequest) {
         try {
           seoPackage = JSON.parse(match[0]);
         } catch {
-          return NextResponse.json({ error: 'LLM returned invalid JSON', raw: content }, { status: 500 });
+          return json({ error: 'LLM returned invalid JSON', raw: content }, 500);
         }
       } else {
-        return NextResponse.json({ error: 'No JSON found in LLM response', raw: content }, { status: 500 });
+        return json({ error: 'No JSON found in LLM response', raw: content }, 500);
       }
     }
 
-    return NextResponse.json({ seo: seoPackage, raw: content });
-
-  } catch (e: any) {
-    return NextResponse.json({ error: e.message || 'Internal error' }, { status: 500 });
+    return json({ seo: seoPackage, raw: content }, 200);
+  } catch (error) {
+    if (error instanceof ProviderHttpError) {
+      return json({ error: error.message, code: providerFailureCode(error) }, providerFailureStatus(error));
+    }
+    return json({ error: error instanceof Error ? error.message : 'Internal error', code: 'internal_error' }, 500);
   }
 }
 

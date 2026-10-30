@@ -1,4 +1,5 @@
 import { TTSProvider, TTSOptions, Voice } from './types';
+import { ttsFetch } from './transport';
 
 export const openAITTS: TTSProvider = {
   id: 'openai',
@@ -9,8 +10,9 @@ export const openAITTS: TTSProvider = {
   languages: ['ru', 'en', 'multi'],
   baseUrl: 'https://api.openai.com/v1',
 
-  async generate(text: string, { voice = 'alloy', apiKey, speed = 1.0, model }: TTSOptions): Promise<ArrayBuffer> {
-    const response = await fetch('https://api.openai.com/v1/audio/speech', {
+  async generate(text: string, options: TTSOptions): Promise<ArrayBuffer> {
+    const { voice = 'alloy', apiKey, speed = 1.0, model } = options;
+    const response = await ttsFetch('openai', 'OpenAI TTS', 'https://api.openai.com/v1/audio/speech', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${apiKey}`,
@@ -23,12 +25,7 @@ export const openAITTS: TTSProvider = {
         speed: speed,
         response_format: 'mp3'
       })
-    });
-
-    if (!response.ok) {
-      const err = await response.text();
-      throw new Error(`OpenAI TTS error: ${response.status} — ${err}`);
-    }
+    }, options);
 
     return response.arrayBuffer();
   },

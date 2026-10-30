@@ -1,4 +1,5 @@
 import { TTSProvider, TTSOptions, Voice } from './types';
+import { ttsFetch } from './transport';
 
 export const DEEPGRAM_FLUX_DEFAULT_MODEL = 'flux-hannah-en';
 export const DEEPGRAM_AURA_DEFAULT_MODEL = 'aura-2-thalia-en';
@@ -23,21 +24,16 @@ export async function generateDeepgramTTS(text: string, options: TTSOptions): Pr
     ? voice!
     : options.model || voice || DEEPGRAM_FLUX_DEFAULT_MODEL;
 
-  const response = await fetch(getDeepgramSpeakUrl(model), {
+  // Статус ошибки теперь несёт ProviderHttpError.status — ручное присваивание
+  // `error.status` больше не нужно, как и собственный разбор тела.
+  const response = await ttsFetch('deepgram', 'Deepgram', getDeepgramSpeakUrl(model), {
     method: 'POST',
     headers: {
       'Authorization': `Token ${options.apiKey}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({ text }),
-  });
-
-  if (!response.ok) {
-    const details = await response.text();
-    const error = new Error(`Deepgram error: ${response.status} — ${details.slice(0, 500)}`) as Error & { status: number };
-    error.status = response.status;
-    throw error;
-  }
+  }, options);
   return response.arrayBuffer();
 }
 

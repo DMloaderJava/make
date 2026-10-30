@@ -3,8 +3,8 @@ import { join } from "node:path";
 import type { NextConfig } from "next";
 
 // Версия приложения читается из package.json на этапе сборки и инлайнится в
-// клиентский бандл. Это единственный источник правды (см. src/lib/version.ts и
-// scripts/check-version.mjs): в исходниках номер версии не хардкодится.
+// клиентский бандл. Это единственный источник правды (см. src/lib/version.ts):
+// в исходниках номер версии не хардкодится.
 const packageJson = JSON.parse(
   readFileSync(join(__dirname, "package.json"), "utf8")
 ) as { version: string };

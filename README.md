@@ -19,7 +19,7 @@ Self-hosted веб-инструмент для автоматической ге
 - **Хранение и диагностика:** атомарная запись в OPFS через `.tmp`, оптимистическая блокировка `revision` (`StaleProjectRevisionError`), сверка и ремонт SHA-256 манифеста (`verifyAndRepairResourceManifest`), журнал восстановления прерванного импорта (`ImportJournal`), экспорт/импорт проекта в `.zip` и модалка диагностики `Проверка` (`ProjectHealthModal`, 6 категорий).
 
 ### 2. Что не работает (известные ограничения)
-Все платформенные, браузерные, инфраструктурные и архитектурные ограничения RC (L-1..L-17) с причинами и обходными путями задокументированы в [**`known-limits.md`**](./known-limits.md).
+Все платформенные, браузерные, инфраструктурные и архитектурные ограничения RC (L-1..L-18) с причинами и обходными путями задокументированы в [**`known-limits.md`**](./known-limits.md).
 - В частности, чистая математика и конечный автомат pointer-событий для drag-and-drop клипов (п. 51) и ручек обрезки `trimIn`/`trimOut` (п. 52) вынесены в `src/lib/pipeline/timelineDrag.ts` и покрыты unit-тестами `npm test`, а реальная браузерная симуляция `page.mouse` на DOM-элементах `[data-trim-handle="in"]` и `[data-video-clip-id]` с проверкой роста `timelineVersion` в `EditorPage`, снятием кадров Preview/Export и экспортом короткого клипа (≤ 3 с) выполняется в `npm run smoke:editor` (см. `L-11`, `L-13`, `L-14`).
 
 ### 3. Поддерживаемые браузеры
@@ -36,7 +36,7 @@ Self-hosted веб-инструмент для автоматической ге
 # 1. Установка зависимостей (с пропуском скачивания бинарника Electron при работе в веб-режиме)
 ELECTRON_SKIP_BINARY_DOWNLOAD=1 npm install
 
-# 2. Полная проверка репозитория (check:versions + check:launchers + typecheck + test + lint + build + smoke:server)
+# 2. Полная проверка репозитория (typecheck + test + lint + build + smoke:server)
 npm run verify
 
 # 3. Автоматический E2E браузерный smoke-тест редактора в headless Chromium
@@ -220,10 +220,9 @@ Electron. Для веб-режима Electron не требуется, для д
 
 CI (`.github/workflows/ci.yml`) гоняет typecheck/test/lint/build на
 **ubuntu-latest и windows-latest**, поэтому Windows-регрессии не доживают до релиза.
-Плюс кроссплатформенные node-проверки (`npm run check:versions`, `npm run check:providers`,
-`npm run check:launchers`): версия в `package.json` не разъехалась по баннерам
-лаунчеров/README/electron-моста, таблицы провайдеров в README совпадают с реестром,
-а `.bat` соблюдают правила npm-флагов, delayed expansion и `%ERRORLEVEL%` вне блоков.
+Тесты проверяют поведение (расчёты таймлайна, камеры, NLE, провайдеров, хранилища),
+браузерные пути — отдельными smoke-прогонами в Chromium. Структурных «поисков подстроки
+в исходнике» в наборе больше нет: они падали от рефакторинга и ничего не доказывали.
 
 Браузерный e2e входит в CI на обеих ОС: полный `smoke:editor` на Linux и
 сокращённый (`--quick`) на Windows. Отдельная job **desktop** собирает AppImage
@@ -253,10 +252,8 @@ CI (`.github/workflows/ci.yml`) гоняет typecheck/test/lint/build на
 
 ## 🧠 LLM-провайдеры (анализ изображений, SEO)
 
-Таблицы ниже **генерируются из реестра** `src/lib/providers/registry.ts`
-(`npm run gen:providers`), поэтому количество и состав строк совпадают с кодом.
-Если провайдер добавлен в реестр, но забыт в README — падает
-`npm run check:providers` в `verify` и CI.
+Таблицы ниже — снимок реестра `src/lib/providers/registry.ts`. Источник правды — код:
+состав провайдеров и CORS-политику задаёт только реестр, README может отставать.
 
 Что важно понимать:
 
@@ -365,7 +362,7 @@ STT-провайдеры доступны как справка и как опц
 
 - `lib/providers/links.ts` — 40+ провайдеров с keyUrl, docsUrl, limits, freeTier
 - `lib/providers/registry.ts` — **единственный источник правды** о провайдерах (43 записи: 25 LLM, 15 TTS, 3 STT) с моделями, CORS-политикой, free-tier и ссылками на ключи; `lib/providers/llm/catalog.ts` (13 реализованных LLM) и `lib/providers/tts/catalog.ts` (15 TTS) — его проекции
-- таблицы провайдеров ниже генерируются из реестра (`npm run gen:providers`), их совпадение проверяет `npm run check:providers`
+- таблицы провайдеров ниже — снимок реестра; источник правды — `src/lib/providers/registry.ts`
 - `components/settings/ProviderList.tsx` — строки вместо карточек, тест, ссылка на ключ, graphite+amber
 - `app/settings/page.tsx` — minimal header + ProviderList
 
@@ -584,18 +581,14 @@ npm run smoke:tts -- cartesia     # точечно по провайдеру
 `npm test` (`node scripts/run-tests.mjs` → `tsx --test`) — юнит-тесты в <!-- tests:files:start -->42<!-- tests:files:end --> файлах:
 WAV-обёртка, определение MIME, раскладка и подпись аудио, лента (включая прогон по
 сетке раскладок), политика проксирования TTS и голосов, тело Cartesia, часы рендера,
-планировщик Web Audio, реестр провайдеров (включая структурные guard-тесты),
-конфигурация desktop-сборки, `check-launchers` (структура `.bat`/`.sh`) и `.sh`-лаунчеры.
+планировщик Web Audio, реестр провайдеров и конфигурация desktop-сборки.
 
 Раннер сам находит `tests/**/*.test.ts` — новый файл подхватывается без правки
-скриптов (`npm test -- <подстрока>` фильтрует по имени файла). Число файлов в
-этом абзаце сверяет `npm run check:tests` (входит в `verify` и CI), поэтому
-документация не расходится с реальностью.
+скриптов (`npm test -- <подстрока>` фильтрует по имени файла).
 
-Полный прогон — `npm run verify`; то же самое CI делает на ubuntu и windows.
-Для локальной итерации «правлю — смотрю» есть `npm run verify:quick`:
-`check:versions → check:launchers → typecheck → lint → build → smoke:server`,
-без `npm test`. Тесты при этом не выброшены — они остаются в `verify` и в CI.
+Полный прогон — `npm run verify` (typecheck → test → lint → build → smoke:server);
+то же самое CI делает на ubuntu и windows. Для локальной итерации «правлю — смотрю»
+есть `npm run verify:quick` — тот же набор без `npm test`.
 
 ## 🧭 v1.3.9 — единый источник версии и тестируемые проверки
 
@@ -1049,8 +1042,7 @@ Copyright (c) 2026 DMloaderJava.
 
 Версия приложения — единственный источник правды `package.json`; в клиент она
 попадает через `NEXT_PUBLIC_APP_VERSION` (`next.config.ts` → `src/lib/version.ts`),
-поэтому номер версии в исходниках не хардкодится (`npm run check:versions`
-падает на любом `vX.Y.Z` в `src/`).
+поэтому номер версии в исходниках не хардкодится.
 
 ## 🛣️ Roadmap
 

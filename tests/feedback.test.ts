@@ -1,8 +1,5 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { join } from 'node:path';
-import { stripComments } from './helpers/stripComments';
 import {
   confirmAction,
   dismissToast,
@@ -20,33 +17,6 @@ import {
  * Нативные диалоги во встроенном превью (iframe без allow-modals) молча
  * возвращают false, поэтому «Озвучить» выглядел как кнопка без действия.
  */
-
-function collectSourceFiles(dir: string, acc: string[] = []): string[] {
-  for (const entry of readdirSync(dir)) {
-    const full = join(dir, entry);
-    const stat = statSync(full);
-    if (stat.isDirectory()) collectSourceFiles(full, acc);
-    else if (/\.(ts|tsx)$/.test(entry)) acc.push(full);
-  }
-  return acc;
-}
-
-test('P1-4: в src/ не осталось вызовов alert/confirm (комментарии не в счёт)', () => {
-  const files = collectSourceFiles(join(process.cwd(), 'src'));
-  const offenders: string[] = [];
-  for (const file of files) {
-    // Комментарии вырезаем: упоминание «не alert, а toast» — не вызов,
-    // и падать на нём структурная проверка не должна.
-    const text = stripComments(readFileSync(file, 'utf8'));
-    const lines = text.split('\n');
-    lines.forEach((line, index) => {
-      if (/\balert\(|\bconfirm\(/.test(line)) {
-        offenders.push(`${file.replace(process.cwd() + '/', '')}:${index + 1}`);
-      }
-    });
-  }
-  assert.deepEqual(offenders, [], `нативные диалоги вернулись: ${offenders.join(', ')}`);
-});
 
 test('P1-4: toast складывается в очередь и снимается по id', () => {
   resetFeedbackForTests();

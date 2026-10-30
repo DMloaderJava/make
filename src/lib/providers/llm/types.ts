@@ -15,6 +15,10 @@ export interface LLMOptions {
   accountId?: string;
   /** Ранее поле игнорировалось — openai-compatible.ts не клал его в тело запроса. */
   responseFormat?: ResponseFormatSchema;
+  /** Внешняя отмена (закрытие запроса пользователем) — прокидывается в транспорт. */
+  signal?: AbortSignal;
+  /** Бюджет запроса в мс; ставит серверный маршрут /api/llm. */
+  deadlineMs?: number;
 }
 
 export interface MessageContent {

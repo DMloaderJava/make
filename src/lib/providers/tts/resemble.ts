@@ -1,4 +1,5 @@
 import { TTSProvider, TTSOptions, Voice } from './types';
+import { ttsFetch } from './transport';
 
 export const resembleTTS: TTSProvider = {
   id: 'resemble',
@@ -10,8 +11,9 @@ export const resembleTTS: TTSProvider = {
   experimental: true,
   baseUrl: 'https://app.resemble.ai',
 
-  async generate(text: string, { voice = 'default', apiKey }: TTSOptions): Promise<ArrayBuffer> {
-    const res = await fetch('https://app.resemble.ai/api/v2/clips', {
+  async generate(text: string, options: TTSOptions): Promise<ArrayBuffer> {
+    const { voice = 'default', apiKey } = options;
+    const res = await ttsFetch('resemble', 'Resemble', 'https://app.resemble.ai/api/v2/clips', {
       method: 'POST',
       headers: {
         'Authorization': `Token ${apiKey}`,
@@ -25,15 +27,11 @@ export const resembleTTS: TTSProvider = {
           format: 'mp3'
         }
       })
-    });
-    if (!res.ok) {
-      const err = await res.text();
-      throw new Error(`Resemble error: ${res.status} — ${err.slice(0,500)}`);
-    }
+    }, options);
     const data = await res.json();
     const audioSrc = data.audio_src || data.clip?.audio_src || data.item?.audio_src;
     if (audioSrc) {
-      const audioRes = await fetch(audioSrc);
+      const audioRes = await ttsFetch('resemble', 'Resemble file', audioSrc, { method: 'GET' }, options, { retries: 1 });
       return audioRes.arrayBuffer();
     }
     throw new Error('Resemble: no audio_src');
