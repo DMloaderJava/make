@@ -236,6 +236,72 @@ test('leadingNumber: первый числовой фрагмент в имен�
   assert.equal(leadingNumber('voice_02_take.mp3'), 2);
 });
 
+// ---------- Номер панели в имени (panel-N) ----------
+
+test('panel-N — это номер панели по порядку, а не id: переставленные панели не дают ложный «Дубль»', () => {
+  // Реальная жалоба: «panel-0053.wav» и «panel-0054.wav» претендовали на одну
+  // панель. Причина — id 53 существует, а id 54 нет, и номер 54 молча падал
+  // на позицию 54, которой оказалась та же панель с id 53.
+  const reordered: PanelData[] = [];
+  for (let i = 1; i <= 52; i++) reordered.push(panel(i, Math.floor((i - 1) / 5), 0, 50, `Герой${i}`, i - 1));
+  reordered.push(panel(60, 9, 0, 20, 'Текст', 52));
+  reordered.push(panel(53, 9, 80, 20, 'Текст', 53));
+
+  const plan = planAudioImport(files('panel-0053.wav', 'panel-0054.wav'), reordered);
+  assert.deepEqual(plan.errors, []);
+  assert.deepEqual(pairs(plan), [[60, 'panel-0053.wav'], [53, 'panel-0054.wav']]);
+  assert.ok(
+    plan.warnings.some(w => w.includes('панель с id 53 другая')),
+    'если номер совпал с чужим id, пользователь должен видеть, какая панель выбрана'
+  );
+});
+
+test('panel-N: номер вне 1..N — явная ошибка с диапазоном, файл не уходит в порядок', () => {
+  const plan = planAudioImport(files('panel-0001.mp3', 'panel-0099.wav'), PANELS, { useOrder: false });
+  assert.deepEqual(plan.errors, [
+    'Файл «panel-0099.wav»: номер 99 вне 1..4 (панелей в проекте: 4) — переименуйте файл или сопоставьте вручную',
+  ]);
+  assert.deepEqual(pairs(plan), [[1, 'panel-0001.mp3']]);
+});
+
+test('panel-N: номер вне диапазона, но такой id есть — ошибка прямо называет эту панель', () => {
+  const weird = [panel(7, 0, null), panel(8, 1, null)]; // две панели с id 7 и 8
+  const plan = planAudioImport(files('panel-0007.wav'), weird, { useOrder: false });
+  assert.deepEqual(plan.errors, [
+    'Файл «panel-0007.wav»: номер 7 вне 1..2 (панелей в проекте: 2); панель с id 7 — это «Изображение 1 · Герой7», но id в именах файлов не используется — переименуйте файл или сопоставьте вручную',
+  ]);
+});
+
+test('манифест «panel-N» тоже понимает N как номер панели и предупреждает о совпадении с чужим id', () => {
+  // Панель с id 2 стоит первой, поэтому «panel-0002» — это вторая панель (id 7),
+  // а не панель с id 2: предупреждение обязано назвать обе.
+  const reordered = [panel(2, 0, 0, 30, 'Аня', 0), panel(7, 1, null, 100, 'Борис', 1)];
+  const plan = planAudioImport(files('a.mp3', 'b.mp3'), reordered, {
+    manifest: 'panel-0001 = a.mp3\npanel-0002 = b.mp3',
+    useOrder: false,
+  });
+  assert.deepEqual(plan.errors, []);
+  assert.deepEqual(pairs(plan), [[2, 'a.mp3'], [7, 'b.mp3']]);
+  assert.ok(plan.warnings.some(w => w.includes('Манифест, строка 2') && w.includes('id не используется')));
+});
+
+test('приоритет: номер в имени панели сильнее якоря, который подходит нескольким панелям', () => {
+  const same = [panel(1, 0, 0, 30, 'Аня'), panel(2, 0, 0, 30, 'Борис'), panel(3, 1, null)];
+  const plan = planAudioImport(files('panel-0001.mp3', 'Изображение 1 [0..30%].mp3'), same, { useOrder: false });
+  assert.deepEqual(plan.errors, []);
+  const byPanel = Object.fromEntries(plan.matches.map(m => [m.target.id, m.file]));
+  assert.equal(byPanel[1], 'panel-0001.mp3');
+  assert.equal(byPanel[2], 'Изображение 1 [0..30%].mp3');
+});
+
+test('длинная глава: панели без файла не заваливают предупреждения — хвост сворачивается в счётчик', () => {
+  const many = Array.from({ length: 12 }, (_, i) => panel(i + 1, i, null, 100, `Герой${i + 1}`, i));
+  const plan = planAudioImport(files('panel-0001.mp3'), many);
+  const withoutFile = plan.warnings.filter(w => w.startsWith('Панель «'));
+  assert.equal(withoutFile.length, 5, 'поимённо — только первые пять');
+  assert.ok(plan.warnings.includes('Ещё панелей без файла: 6 — останутся с текущим аудио или TTS'));
+});
+
 // ---------- Якорь в имени ----------
 
 test('имя-якорь: файл «Изображение 1 [0..30%].mp3» → панель; эквивалентные записи', () => {

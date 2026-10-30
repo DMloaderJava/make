@@ -13,12 +13,23 @@
  *   1. ручное назначение (manualOverrides) — явный выбор в таблице;
  *   2. манифест «Изображение N [X..Y%] = файл» или «panel-0007 = файл»;
  *   3. имя файла = якорь («Изображение 1 [0..30%].mp3» или «panel-0007.mp3»);
+ *      внутри уровня сначала идут явные номера «panel-N», потом якоря — номер
+ *      в имени файла не должен проигрывать якорю, который подходит нескольким
+ *      панелям сразу;
  *   4. числовой фрагмент в имени («003.mp3», «voice_01.wav») → N-я цель по порядку,
  *      если номер есть у ВСЕХ оставшихся файлов;
  *      иначе — natural sort оставшихся файлов 1:1 с оставшимися целями
  *      (количество обязано совпасть — иначе ошибка, а не усечение).
  * Этот порядок — контракт (тесты «приоритет: …» в tests/audioImport.test.ts);
  * менять только вместе с тестами и ТЗ.
+ *
+ * Номер в «panel-N» — это НОМЕР ПАНЕЛИ по порядку (тот же, что «Панель №N» в
+ * интерфейсе и что в «003.mp3»), а не id панели. Раньше здесь сначала
+ * искалась панель с id N и лишь потом — позиция; в проекте, где панели
+ * удаляли или переставляли, это давало ложные дубли (файл «panel-0053.wav» с
+ * id 53 и файл «panel-0054.wav», у которого id 54 нет и номер падал на
+ * позицию 54 = ту же панель). Один номер — одна панель, без смешивания
+ * трактовок.
  * Конфликт на одном уровне (два файла → одна цель, один файл → две цели,
  * дубль якоря) — ошибка. Более высокий уровень молча вытесняет более низкий.
  */
@@ -163,8 +174,10 @@ export function fileExtension(name: string): string {
 }
 
 /**
- * Распознаёт явный идентификатор панели вида `panel-0007`, `panel_7`, `панель 7`
- * (Этап 2, пункт 14). Возвращает неотрицательное целое число или null.
+ * Распознаёт номер панели в имени вида `panel-0007`, `panel_7`, `панель 7`
+ * (Этап 2, пункт 14). Возвращает номер (1-based позиция панели по порядку
+ * сценария) или null. Это НЕ id панели: id не совпадает с позицией после
+ * удаления/перестановки панелей, и трактовать одно как другое нельзя.
  */
 export function parsePanelIdAnchor(text: string): number | null {
   const m = nfc(text).trim().match(/^(?:panel|панель)[\s._\-:#]+0*(\d+)$/i);
@@ -259,14 +272,14 @@ export function planImport<TTarget>(opts: PlanImportOptions<TTarget>): ImportPla
   }
   const labelOf = (t: TTarget) => opts.targetLabel(t);
 
-  const resolvePanelIdTarget = (panelNum: number): TTarget | undefined => {
-    const byExplicitId = byId.get(String(panelNum));
-    if (byExplicitId) return byExplicitId;
-    if (panelNum >= 1 && panelNum <= sortedTargets.length) {
-      return sortedTargets[panelNum - 1];
-    }
-    return undefined;
-  };
+  /**
+   * Номер панели (1-based, порядок сценария) → цель. Единственная трактовка:
+   * никакого «сначала id, потом позиция» — иначе два разных номера в именах
+   * файлов приводили к одной панели и импорт ругался «Дубль», оставляя часть
+   * реплик без аудио.
+   */
+  const resolvePanelNumber = (panelNum: number): TTarget | undefined =>
+    panelNum >= 1 && panelNum <= sortedTargets.length ? sortedTargets[panelNum - 1] : undefined;
 
   // --- Файлы: нормализация, дубли имён, дубли по SHA-256 и ошибки декода ---
   const files = [...opts.files].sort((a, b) => naturalCompare(nfc(a.name), nfc(b.name)));
@@ -300,6 +313,16 @@ export function planImport<TTarget>(opts: PlanImportOptions<TTarget>): ImportPla
     errors.push(`В проекте нет ${nouns.genitivePlural} — сопоставлять файлы не с чем`);
     return { ...empty(), unmatchedFiles: fileNames };
   }
+
+  /**
+   * Подсказка к ошибке «номер вне диапазона»: если в проекте есть панель с
+   * таким id, это ровно та ловушка, из-за которой «panel-0053.wav» и
+   * «panel-0054.wav» дрались за одну панель. Молчать об этом нельзя.
+   */
+  const idHint = (n: number): string => {
+    const clash = byId.get(String(n));
+    return clash ? `; панель с id ${n} — это «${labelOf(clash)}», но id в именах файлов не используется` : '';
+  };
 
   /** Имя из манифеста/ручного выбора → загруженный файл (точно, затем без учёта регистра). */
   const resolveFile = (name: string): string | null => {
@@ -408,10 +431,18 @@ export function planImport<TTarget>(opts: PlanImportOptions<TTarget>): ImportPla
           errors.push(`Манифест: файл «${line.file}» не найден среди загруженных`);
           continue;
         }
-        const target = resolvePanelIdTarget(panelNum);
+        const target = resolvePanelNumber(panelNum);
         if (!target) {
-          errors.push(`${where}: нет ${nouns.genitiveSingular} «${line.anchorText}»`);
+          errors.push(
+            `${where}: нет ${nouns.genitiveSingular} «${line.anchorText}» — номер ${panelNum} вне 1..${sortedTargets.length}${idHint(panelNum)}`
+          );
           continue;
+        }
+        const clash = byId.get(String(panelNum));
+        if (clash && clash !== target) {
+          warnings.push(
+            `Манифест, строка ${line.lineNo}: ${panelNum} — номер панели «${labelOf(target)}»; панель с id ${panelNum} другая («${labelOf(clash)}») — id не используется`
+          );
         }
         if (fileTaken.get(file)?.via === 'manual') continue;
         claim(file, target, 'manifest');
@@ -434,22 +465,36 @@ export function planImport<TTarget>(opts: PlanImportOptions<TTarget>): ImportPla
     }
   }
 
-  // 3. Имя файла = якорь («Изображение 1 [0..30%].mp3» или «panel-0007.mp3»).
+  // 3. Имя файла = якорь («panel-0007.mp3» или «Изображение 1 [0..30%].mp3»).
   if (opts.allowNameAnchor !== false) {
+    // Сначала — явные номера панелей: номер в имени файла выбирает конкретную
+    // реплику и не должен проигрывать якорю, который подходит сразу
+    // нескольким панелям (иначе номер «panel-N» уезжал в «Дубль»).
+    for (const file of fileNames) {
+      if (fileTaken.has(file)) continue;
+      const panelNum = parsePanelIdAnchor(fileStem(nfc(file)));
+      if (panelNum === null) continue;
+      const target = resolvePanelNumber(panelNum);
+      if (!target) {
+        errors.push(
+          `Файл «${file}»: номер ${panelNum} вне 1..${sortedTargets.length} (панелей в проекте: ${sortedTargets.length})${idHint(panelNum)} — переименуйте файл или сопоставьте вручную`
+        );
+        continue;
+      }
+      const clash = byId.get(String(panelNum));
+      if (clash && clash !== target) {
+        warnings.push(
+          `Файл «${file}»: ${panelNum} — номер панели «${labelOf(target)}»; панель с id ${panelNum} другая («${labelOf(clash)}») — id не используется`
+        );
+      }
+      claim(file, target, 'name');
+    }
+
+    // Затем — якоря «Изображение N [X..Y%]» в имени файла.
     for (const file of fileNames) {
       if (fileTaken.has(file)) continue;
       const stem = fileStem(nfc(file));
-      const panelNum = parsePanelIdAnchor(stem);
-      if (panelNum !== null) {
-        const target = resolvePanelIdTarget(panelNum);
-        if (!target) {
-          errors.push(`Файл «${file}»: нет ${nouns.genitiveSingular} «${stem}»`);
-          continue;
-        }
-        claim(file, target, 'name');
-        continue;
-      }
-
+      if (parsePanelIdAnchor(stem) !== null) continue; // номер разобран (или ошибка) выше
       const anchor = parseImageAnchor(stem);
       if (!anchor) continue;
       if (anchor.kind === 'error') {
