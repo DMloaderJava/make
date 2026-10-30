@@ -208,3 +208,65 @@ test('реестр не содержит «маркетинговых» запи
     }
   }
 });
+
+/**
+ * Каталоги free-моделей меняются каждый месяц, поэтому список моделей без даты
+ * сверки — это слух, а не данные. Инвариант ловит три реальные поломки:
+ * defaultModel, которого нет в списке (провайдер молча уйдёт в 404),
+ * vision-модель вне списка (фильтр `getLLMProviderVisionModels` её выкинет)
+ * и бесплатный провайдер с моделями без пометки, когда сверяли.
+ */
+test('каталог моделей: default и vision входят в список, у free-записей есть дата сверки', () => {
+  for (const entry of getRegistryByKind('llm')) {
+    const models = entry.models ?? [];
+    if (entry.id === 'custom') continue; // модель задаёт пользователь
+
+    if (entry.defaultModel) {
+      assert.ok(
+        models.includes(entry.defaultModel),
+        `${entry.id}: defaultModel "${entry.defaultModel}" отсутствует в models`
+      );
+    }
+    for (const visionModel of entry.visionModels ?? []) {
+      assert.ok(
+        models.includes(visionModel),
+        `${entry.id}: vision-модель "${visionModel}" отсутствует в models`
+      );
+    }
+
+    if (models.length === 0 || entry.trialOnly || !entry.freeTier) continue;
+    assert.match(
+      entry.modelsCheckedAt ?? '',
+      /^\d{4}-\d{2}-\d{2}$/,
+      `${entry.id}: бесплатный провайдер с models обязан иметь modelsCheckedAt (YYYY-MM-DD)`
+    );
+    assert.match(
+      entry.modelsSource ?? '',
+      /^https:\/\//,
+      `${entry.id}: бесплатный провайдер с models обязан иметь modelsSource`
+    );
+  }
+});
+
+test('каталог моделей: удалённые и платные id не возвращаются', () => {
+  // Каждый id ниже проверен по каталогу провайдера в октябре 2026 и не должен
+  // появляться снова: qwen3-coder:free больше не бесплатен, Kimi K2.5 на
+  // Workers AI стал платным, kimi-k3 убрали из NVIDIA NIM, Scout убрали из
+  // бесплатного Groq, а GLM-5.x в Zhipu платный.
+  const deadModelIds = new Set([
+    'qwen/qwen3-coder:free',
+    '@cf/moonshotai/kimi-k2.5',
+    'moonshotai/kimi-k3',
+    'meta-llama/llama-4-scout-17b-16e-instruct',
+    'glm-5.3',
+    // Обрезанный id из старой записи: настоящий — nemotron-3-ultra-550b-a55b.
+    'nvidia/nemotron-3-ultra-55',
+    'Qwen/Qwen2-VL-72B-Instruct',
+  ]);
+  for (const entry of getRegistryByKind('llm')) {
+    for (const model of [entry.defaultModel, ...(entry.models ?? []), ...(entry.visionModels ?? [])]) {
+      if (!model) continue;
+      assert.ok(!deadModelIds.has(model), `${entry.id}: устаревший id "${model}" вернулся в каталог`);
+    }
+  }
+});
