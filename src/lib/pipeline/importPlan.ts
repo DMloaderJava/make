@@ -10,12 +10,16 @@
  * только id, каноничный якорь, подпись и ключ сортировки.
  *
  * Приоритет сопоставления (строгий, сверху вниз):
- *   1. ручное назначение (manualOverrides) — явный выбор в таблице;
+ *   1. ручные назначения (`manualOverrides`) — только API: модалка «Импорт
+ *      аудио» их не передаёт, поэтому в интерфейсе этого уровня нет и в
+ *      подсказках он не упоминается;
  *   2. манифест «Изображение N [X..Y%] = файл» или «panel-0007 = файл»;
- *   3. имя файла = якорь («Изображение 1 [0..30%].mp3» или «panel-0007.mp3»);
- *      внутри уровня сначала идут явные номера «panel-N», потом якоря — номер
- *      в имени файла не должен проигрывать якорю, который подходит нескольким
- *      панелям сразу;
+ *      НЕПУСТОЙ манифест выключает уровень 4 (`autoImportOptions` ставит
+ *      useOrder: false): файлы, которых в манифесте нет, остаются
+ *      несопоставленными, а не раскладываются по порядку;
+ *   3. имя файла: сначала номер панели («panel-0007.mp3», «7.mp3»), потом
+ *      якорь («Изображение 1 [0..30%].mp3») — номер в имени не должен
+ *      проигрывать якорю, который подходит нескольким панелям сразу;
  *   4. числовой фрагмент в имени («003.mp3», «voice_01.wav») → N-я цель по порядку,
  *      если номер есть у ВСЕХ оставшихся файлов;
  *      иначе — natural sort оставшихся файлов 1:1 с оставшимися целями
@@ -30,6 +34,12 @@
  * id 53 и файл «panel-0054.wav», у которого id 54 нет и номер падал на
  * позицию 54 = ту же панель). Один номер — одна панель, без смешивания
  * трактовок.
+ *
+ * «Номер» для имён без префикса — ПЕРВЫЙ числовой фрагмент где угодно в имени
+ * (`leadingNumber`): «Глава 2.mp3» → панель 2, «3d-voice.mp3» → панель 3,
+ * «qwen3.8-27b.wav» → панель 3. Это осознанная плата за угадывание: если в
+ * имени есть посторонние числа, файл надо переименовать (или задать строку в
+ * манифесте) — иначе он молча уедет не в ту реплику.
  * Конфликт на одном уровне (два файла → одна цель, один файл → две цели,
  * дубль якоря) — ошибка. Более высокий уровень молча вытесняет более низкий.
  */
@@ -365,7 +375,7 @@ export function planImport<TTarget>(opts: PlanImportOptions<TTarget>): ImportPla
       if (prevTarget.via === 'manual' && via !== 'manual') return false;
       const many = (byAnchor.get(anchorOf.get(target)!) ?? []).length;
       const hint = many > 1 && (via === 'manifest' || via === 'name')
-        ? ` (под этим якорем ${nouns.genitivePlural} ${many} — сопоставьте по номеру файла или вручную)`
+        ? ` (под этим якорем ${nouns.genitivePlural} ${many} — назовите файлы panel-N или добавьте строки в манифест)`
         : '';
       errors.push(`Дубль: «${prevTarget.file}» и «${file}» претендуют на «${labelOf(target)}»${hint}`);
       return false;
@@ -406,7 +416,7 @@ export function planImport<TTarget>(opts: PlanImportOptions<TTarget>): ImportPla
     const prev = anchorClaims.get(anchor);
     if (prev === file) return; // повтор той же строки — не конфликт
     if (prev) {
-      const many = list.length > 1 ? ` (под этим якорем ${nouns.genitivePlural} ${list.length} — сопоставьте по номеру файла или вручную)` : '';
+      const many = list.length > 1 ? ` (под этим якорем ${nouns.genitivePlural} ${list.length} — назовите файлы panel-N или добавьте строки в манифест)` : '';
       errors.push(`Дубль: «${prev}» и «${file}» претендуют на «${anchor}»${many}`);
       return;
     }
@@ -477,7 +487,7 @@ export function planImport<TTarget>(opts: PlanImportOptions<TTarget>): ImportPla
       const target = resolvePanelNumber(panelNum);
       if (!target) {
         errors.push(
-          `Файл «${file}»: номер ${panelNum} вне 1..${sortedTargets.length} (панелей в проекте: ${sortedTargets.length})${idHint(panelNum)} — переименуйте файл или сопоставьте вручную`
+          `Файл «${file}»: номер ${panelNum} вне 1..${sortedTargets.length} (панелей в проекте: ${sortedTargets.length})${idHint(panelNum)} — переименуйте файл или добавьте строку в манифест`
         );
         continue;
       }
@@ -541,7 +551,7 @@ export function planImport<TTarget>(opts: PlanImportOptions<TTarget>): ImportPla
           if (n < 1 || n > total) {
             const message = `Файл «${file}»: номер ${n} вне 1..${total} (${nouns.genitivePlural} в проекте: ${total})`;
             if (opts.ignoreUnmatchedNumbers) warnings.push(`${message} — файл исключён из импорта`);
-            else errors.push(`${message} — переименуйте файл или сопоставьте вручную`);
+            else errors.push(`${message} — переименуйте файл или добавьте строку в манифест`);
             return;
           }
           const numberedEntry = numberedTargets.find(entry => entry.number === n);
@@ -556,7 +566,7 @@ export function planImport<TTarget>(opts: PlanImportOptions<TTarget>): ImportPla
           if (!target) {
             const message = `Файл «${file}»: номер ${n} уже сопоставлен или не имеет свободной цели`;
             if (opts.ignoreUnmatchedNumbers) warnings.push(`${message} — файл исключён из импорта`);
-            else errors.push(`${message} — сопоставьте вручную`);
+            else errors.push(`${message} — добавьте строку в манифест`);
             return;
           }
           claim(file, target, 'number');
@@ -565,8 +575,8 @@ export function planImport<TTarget>(opts: PlanImportOptions<TTarget>): ImportPla
         if (free.length !== rest.length) {
           const partial = matches.length > 0;
           errors.push(partial
-            ? `Несопоставленных файлов ${rest.length}, ${nouns.genitivePlural} без файла ${free.length} — сопоставьте вручную или добавьте манифест`
-            : `Файлов ${rest.length}, ${nouns.genitivePlural} ${free.length} — сопоставьте вручную или добавьте манифест`);
+            ? `Несопоставленных файлов ${rest.length}, ${nouns.genitivePlural} без файла ${free.length} — добавьте строки в манифест или переименуйте файлы`
+            : `Файлов ${rest.length}, ${nouns.genitivePlural} ${free.length} — добавьте манифест или переименуйте файлы`);
         } else {
           rest.forEach((file, i) => claim(file, free[i], 'order'));
         }
