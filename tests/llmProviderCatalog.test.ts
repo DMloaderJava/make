@@ -55,17 +55,22 @@ test('legacy OpenRouter text models are rejected as vision models, with or witho
 });
 
 test('vision model allowlists reject text-only providers and resolve provider-specific vision defaults', () => {
-  for (const id of ['siliconflow', 'zhipu']) {
-    const provider = getLLMProvider(id)!;
-    assert.equal(provider.supportsVision, false);
-    assert.deepEqual(getLLMProviderVisionModels(provider), []);
-    assert.equal(resolveLLMVisionModel(provider, provider.defaultModel), null);
-  }
+  const siliconflow = getLLMProvider('siliconflow')!;
+  assert.equal(siliconflow.supportsVision, false);
+  assert.deepEqual(getLLMProviderVisionModels(siliconflow), []);
+  assert.equal(resolveLLMVisionModel(siliconflow, siliconflow.defaultModel), null);
+
+  // Zhipu отдаёт GLM-4.6V-Flash бесплатно, поэтому vision у него есть — но
+  // только у этой модели, текстовые Flash-модели картинки не принимают.
+  const zhipu = getLLMProvider('zhipu')!;
+  assert.equal(zhipu.supportsVision, true);
+  assert.deepEqual(getLLMProviderVisionModels(zhipu), ['glm-4.6v-flash']);
+  assert.equal(resolveLLMVisionModel(zhipu, zhipu.defaultModel), 'glm-4.6v-flash');
 
   const nvidia = getLLMProvider('nvidia-nim')!;
   assert.equal(isLLMModelVisionCapable(nvidia, 'deepseek-ai/deepseek-v4.1-flash'), false);
-  assert.equal(resolveLLMVisionModel(nvidia, nvidia.defaultModel), 'meta-llama/llama-3.2-90b-vision-instruct');
-  assert.equal(getDefaultLLMVisionModel(nvidia), 'meta-llama/llama-3.2-90b-vision-instruct');
+  assert.equal(resolveLLMVisionModel(nvidia, nvidia.defaultModel), 'meta/llama-3.2-90b-vision-instruct');
+  assert.equal(getDefaultLLMVisionModel(nvidia), 'meta/llama-3.2-90b-vision-instruct');
 
   const mistral = getLLMProvider('mistral')!;
   assert.equal(isLLMModelVisionCapable(mistral, 'mistral-small-latest'), false);
@@ -180,7 +185,7 @@ test('vision fallback selects a vision model instead of the provider text defaul
   assert.equal(result, 'vision fallback response');
   assert.deepEqual(calls, [
     { providerId: 'openrouter', model: primary.defaultModel },
-    { providerId: 'nvidia-nim', model: 'meta-llama/llama-3.2-90b-vision-instruct' },
+    { providerId: 'nvidia-nim', model: 'meta/llama-3.2-90b-vision-instruct' },
   ]);
 });
 
@@ -199,7 +204,7 @@ test('generateLLM resolves a text default to the provider vision model for a vis
   });
 
   assert.equal(result, 'vision result');
-  assert.equal(modelUsed, 'meta-llama/llama-3.2-90b-vision-instruct');
+  assert.equal(modelUsed, 'meta/llama-3.2-90b-vision-instruct');
 });
 
 test('generateLLM rejects a vision task for providers with no vision model', async () => {

@@ -45,6 +45,9 @@ export const AUDIO_IMPORT_EXTENSIONS = [
   'mp3', 'wav', 'wave', 'ogg', 'oga', 'opus', 'm4a', 'aac', 'mp4', 'flac', 'webm', 'weba', 'aif', 'aiff', 'caf',
 ] as const;
 
+/** Сколько панелей «без файла» перечислять поимённо, прежде чем свернуть в счётчик. */
+const MAX_UNMATCHED_PANEL_WARNINGS = 5;
+
 export function isAudioFileName(name: string): boolean {
   return (AUDIO_IMPORT_EXTENSIONS as readonly string[]).includes(fileExtension(name));
 }
@@ -169,11 +172,19 @@ export function planAudioImport(
     }
   }
   // Панели без файла — только если файлы вообще есть (пустая модалка без шума).
+  // Подробности по каждой панели полезны, пока их немного; в главе на 50+
+  // реплик такой список хоронил под собой настоящую ошибку, поэтому хвост
+  // сворачивается в одну строку.
   if (audioFiles.length > 0) {
-    for (const p of plan.unmatchedTargets) {
+    const head = plan.unmatchedTargets.slice(0, MAX_UNMATCHED_PANEL_WARNINGS);
+    for (const p of head) {
       warnings.push(existing.has(p.id)
         ? `Панель «${audioTargetLabel(p)}» без файла — останется текущее аудио`
         : `Панель «${audioTargetLabel(p)}» без файла — останется TTS`);
+    }
+    const hidden = plan.unmatchedTargets.length - head.length;
+    if (hidden > 0) {
+      warnings.push(`Ещё панелей без файла: ${hidden} — останутся с текущим аудио или TTS`);
     }
   }
 

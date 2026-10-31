@@ -184,12 +184,23 @@ Vercel Cron (`/api/cleanup`).
 ### Импорт аудиодорожек
 
 В редакторе кнопка **Импорт аудио** принимает MP3/WAV/OGG/Opus/M4A/AAC/FLAC и
-другие браузерно-декодируемые форматы. Сопоставление выполняется по манифесту,
-якорю в имени файла (`Изображение 1 [0..30%].mp3`), номеру изображения или порядку. Если
-в имени есть числовой фрагмент (`2.mp3`, `02 - voice.wav`, `voice_2_take.mp3`), он воспроизводится под
-изображением 2 в порядке сценария, а не под второй внутренней панелью. Для
-каждого файла проверяется декодирование и длительность, а импортированное аудио
-не перезаписывается обычной кнопкой TTS без явного действия.
+другие браузерно-декодируемые форматы. Привязка идёт по имени файла, строго по
+приоритету:
+
+1. **манифест** (`.txt` или поле в окне) — строки «якорь = файл»; непустой
+   манифест выключает раскладку по порядку, и файлы, которых в нём нет,
+   остаются без панели;
+2. **номер панели в имени**: `panel-0007.mp3`, `7.mp3`, `voice_7.wav` → 7-я
+   панель (реплика) в таблице — не изображение и не внутренний id; берётся
+   первое число в имени, поэтому `Глава 2.mp3` попадёт в панель 2;
+3. **якорь изображения**: `Изображение 1 [0..30%].mp3` — точная полоса;
+4. **порядок файлов** — только если в именах нет ни номера, ни якоря и манифест
+   пуст; количество файлов и панелей должно совпасть.
+
+Перепривязать файл вручную в окне нельзя: либо переименуйте файл, либо добавьте
+строку в манифест. Для каждого файла проверяется декодирование и длительность, а
+импортированное аудио не перезаписывается обычной кнопкой TTS без явного
+действия.
 
 ### Загрузка изображений
 
@@ -270,17 +281,17 @@ CI (`.github/workflows/ci.yml`) гоняет typecheck/test/lint/build на
 
 | Провайдер | Модели | Vision | Free tier | Лимиты | Ключ |
 |-----------|--------|--------|-----------|--------|------|
-| **OpenRouter** (`openrouter`) | google/gemma-4-31b-it:free, qwen/qwen3-coder:free, nvidia/nemotron-3-ultra-550b-a55b:free | да | да | Лимиты зависят от модели и провайдера | [ключ](https://openrouter.ai/keys) |
-| **NVIDIA NIM** (`nvidia-nim`) | deepseek-ai/deepseek-v4.1-flash, moonshotai/kimi-k3, nvidia/nemotron-3-nano-omni-30b | да | да | ~40 RPM | [ключ](https://build.nvidia.com) |
-| **Google Gemini** (`gemini`) | gemini-3-flash-preview, gemini-3.6-flash | да | да | ~10–15 RPM / ~30 промптов в день | [ключ](https://aistudio.google.com/apikey) |
-| **Groq** (`groq`) | meta-llama/llama-4-scout-17b-16e-instruct, qwen/qwen3.8-27b | да | да | 30 RPM / 1 000 RPD | [ключ](https://console.groq.com/keys) |
-| **Mistral AI** (`mistral`) | mistral-small-latest, mistral-medium-3.5, pixtral-12b-2409 | да | да | 500K TPM / 1B токенов в месяц | [ключ](https://console.mistral.ai/api-keys) |
-| **Cloudflare Workers AI** (`cloudflare`) | @cf/moonshotai/kimi-k2.5, @cf/meta/llama-4-scout-17b-16e-instruct | да | да | 10 000 Neurons/день | [ключ](https://dash.cloudflare.com/?to=/:account/workers/ai) |
-| **Hugging Face** (`huggingface`) | meta-llama/Llama-3.2-11B-Vision-Instruct, Qwen/Qwen2-VL-72B-Instruct | да | да | $0.10 кредитов/мес | [ключ](https://huggingface.co/settings/tokens) |
+| **OpenRouter** (`openrouter`) | 16 free-моделей: `google/gemma-4-31b-it:free`, `nvidia/nemotron-3.5-super-vl:free`, `thinkingmachines/inkling:free`, … | да | да | Лимиты зависят от модели и провайдера | [ключ](https://openrouter.ai/keys) |
+| **NVIDIA NIM** (`nvidia-nim`) | 14 моделей: `deepseek-ai/deepseek-v4.1-flash`, `z-ai/glm-5.3-flash`, `nvidia/nemotron-3.5-super-vl-120b-a12b`, … | да | да | ~1 000 кредитов, ~40 RPM | [ключ](https://build.nvidia.com) |
+| **Google Gemini** (`gemini`) | 10 моделей: `gemini-3.8-flash`, `gemini-3.1-flash-lite`, `gemini-2.5-pro`, … | да | да | 10–15 RPM, 1 000–1 500 RPD (Flash) | [ключ](https://aistudio.google.com/apikey) |
+| **Groq** (`groq`) | 9 моделей: `openai/gpt-oss-120b`, `qwen/qwen3.8-27b`, `groq/compound`, … | нет (Llama убрали 16.08.2026) | да | 30 RPM / 1 000 RPD | [ключ](https://console.groq.com/keys) |
+| **Mistral AI** (`mistral`) | 7 моделей Experiment: `open-mistral-nemo`, `ministral-8b-latest`, `codestral-latest`, `pixtral-12b-2409` | да | да | 500K TPM / 1B токенов в месяц | [ключ](https://console.mistral.ai/api-keys) |
+| **Cloudflare Workers AI** (`cloudflare`) | 13 моделей: `@cf/meta/llama-4-scout-17b-16e-instruct`, `@cf/zai-org/glm-4.7-flash`, `@cf/qwen/qwen3-30b-a3b-fp8`, … | да | да | 10 000 Neurons/день | [ключ](https://dash.cloudflare.com/?to=/:account/workers/ai) |
+| **Hugging Face** (`huggingface`) | 6 моделей из 135 в каталоге: `Qwen/Qwen3-VL-30B-A3B-Instruct`, `Qwen/Qwen3-VL-235B-A22B-Instruct`, `zai-org/GLM-4.5V`, … | да | да | $0.10 кредитов/мес | [ключ](https://huggingface.co/settings/tokens) |
 | **AI21 Labs** (`ai21`) | jamba-large, jamba-mini | нет | trial | $10 на 3 месяца | [ключ](https://studio.ai21.com/account/api-key) |
 | **Novita AI** (`novita`) | inclusionai/ling-3.0-flash-vl, deepseek/deepseek-v4.1-flash | да | trial | $100 promotional credits | [ключ](https://novita.ai/settings/key-management) |
-| **SiliconFlow** (`siliconflow`) | Qwen/Qwen3-8B, deepseek-ai/DeepSeek-R1-Distill-Qwen-7B | нет | да | $1 при регистрации + free models | [ключ](https://cloud.siliconflow.cn/account/ak) |
-| **Zhipu AI (GLM)** (`zhipu`) | glm-4.7-flash, glm-5.3 | нет | да | Полностью бесплатная модель GLM-4.7-Flash | [ключ](https://open.bigmodel.cn/usercenter/apikeys) |
+| **SiliconFlow** (`siliconflow`) | `Qwen/Qwen3-8B`, `deepseek-ai/DeepSeek-R1-Distill-Qwen-7B`, `THUDM/GLM-4-9B-0414` | нет | да | $1 при регистрации + free models | [ключ](https://cloud.siliconflow.cn/account/ak) |
+| **Zhipu AI (GLM)** (`zhipu`) | `glm-4.7-flash`, `glm-4.5-flash`, `glm-4.6v-flash` | да (`glm-4.6v-flash`) | да | Flash-модели бесплатны | [ключ](https://open.bigmodel.cn/usercenter/apikeys) |
 | **Moonshot AI (Kimi)** (`moonshot`) | kimi-k2.6, moonshot-v1-8k-vision-preview | да | trial | $5 кредитов каждые 30 дней | [ключ](https://platform.moonshot.ai/console/api-keys) |
 | **Custom OpenAI-compatible** (`custom`) | custom-model | да | платно | — | — |
 

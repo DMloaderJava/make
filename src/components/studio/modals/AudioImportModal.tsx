@@ -261,7 +261,7 @@ export function AudioImportModal({
           <div>
             <h2 className="text-[15px] font-medium">Импорт аудио</h2>
             <p className="text-[11px] text-[#8A8A93] mt-0.5">
-              Свои записи для реплик · по манифесту, точному якорю, идентификатору panel-0007, номеру панели или порядку файлов
+              Свои записи для реплик · номер панели в имени: panel-0007 или 7.mp3 → Панель №7 · манифест важнее имён
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -334,27 +334,49 @@ export function AudioImportModal({
 
               <details className="rounded-[10px] bg-[#0B0B0C] border border-[#26262C] px-4 py-3">
                 <summary className="cursor-pointer text-[12px] text-[#A1A1AA] select-none">
-                  Правила сопоставления аудио
+                  Правила: манифест → номер панели → якорь изображения → порядок файлов
                 </summary>
                 <div className="mt-3 space-y-2 text-[11px] leading-5 text-[#8A8A93]">
                   <p>
-                    <span className="text-[#E8B44C]">1. Простая нумерация или ID панели:</span>{' '}
-                    <span className="font-mono text-[#F5F5F7]">
-                      1.mp3 → Панель №1, panel-0007.mp3 → Панель №7
-                    </span>
-                    . Номер панели (реплики) и номер изображения разделены.
+                    <span className="text-[#E8B44C]">1. Манифест главнее имён.</span> Строки вида{' '}
+                    <span className="font-mono text-[#F5F5F7]">Изображение 2 [0..30%] = файл.mp3</span> или{' '}
+                    <span className="font-mono text-[#F5F5F7]">panel-0007 = файл.mp3</span>. Пока поле манифеста не
+                    пусто, файлы, которых в нём нет, <span className="text-[#F5F5F7]">не</span> раскладываются по
+                    порядку: они остаются несопоставленными и попадают в предупреждения.
                   </p>
                   <p>
-                    <span className="text-[#E8B44C]">2. Точная привязка — по якорю:</span>{' '}
-                    <span className="font-mono text-[#F5F5F7]">Изображение 1 [30..60%].mp3</span>. Проценты считаются
-                    внутри этого изображения.
+                    <span className="text-[#E8B44C]">2. Номер панели в имени.</span>{' '}
+                    <span className="font-mono text-[#F5F5F7]">panel-0007.mp3</span>,{' '}
+                    <span className="font-mono text-[#F5F5F7]">7.mp3</span>,{' '}
+                    <span className="font-mono text-[#F5F5F7]">voice_7.wav</span> → Панель №7. Это номер панели в
+                    таблице (реплики), а не внутренний id. Берётся{' '}
+                    <span className="text-[#F5F5F7]">первое число в имени</span>, поэтому{' '}
+                    <span className="font-mono text-[#F5F5F7]">Глава 2.mp3</span> станет панелью №2, а{' '}
+                    <span className="font-mono text-[#F5F5F7]">3d-voice.mp3</span> — панелью №3: посторонние числа в
+                    имени надо убрать.
                   </p>
                   <p>
-                    <span className="text-[#E8B44C]">3. Самый надёжный способ — манифест:</span>
+                    <span className="text-[#E8B44C]">3. Якорь изображения.</span>{' '}
+                    <span className="font-mono text-[#F5F5F7]">Изображение 2 [30..60%].mp3</span> — точная полоса на
+                    изображении (проценты внутри этого изображения). Если под одним якорем несколько панелей, файл без
+                    номера получает первую по порядку и появляется предупреждение.
                   </p>
-                  <pre className="rounded-[6px] bg-[#16161A] px-3 py-2 font-mono text-[11px] leading-5 text-[#F5F5F7] whitespace-pre-wrap">
-                    {'Изображение 1 [0..30%] = voice-01.mp3\npanel-0002 = voice-02.mp3\nИзображение 2 [0..100%] = voice-03.wav'}
-                  </pre>
+                  <p>
+                    <span className="text-[#E8B44C]">4. Порядок файлов — последний.</span> Работает, только если в именах
+                    нет ни номера, ни якоря и манифест пуст: файлы раскладываются в естественном порядке имён 1:1. Если
+                    файлов и панелей не поровну, это ошибка, а не усечение.
+                  </p>
+                  <p>
+                    <span className="text-[#E8B44C]">Проверка до применения.</span> Справа от каждого файла написано
+                    «Панель №N · Стр. M» — это и есть панель, в которую файл попадёт. Если не туда — переименуйте файл
+                    или добавьте строку в манифест: другого способа перепривязать файл в этом окне нет.
+                  </p>
+                  <p>
+                    <span className="text-[#E8B44C]">Почему подпись панели может повторяться.</span> Имя панели — это
+                    «Изображение N [полоса] · персонаж». У двух панелей одной полосы и с одним персонажем оно совпадает
+                    буквально, поэтому в предупреждениях ориентируйтесь на номер панели: «Изображение 10 [80..100%] ·
+                    Текст» может относиться к разным репликам.
+                  </p>
                 </div>
               </details>
 

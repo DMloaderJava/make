@@ -9,6 +9,14 @@ export const elevenLabsTTS: TTSProvider = {
   freeTier: true,
   languages: ['ru', 'en', 'multi'],
   defaultModel: 'eleven_multilingual_v2',
+  // Free-план (10 000 кредитов/мес) открывает все модели, поэтому список —
+  // не «что можно на free», а весь актуальный каталог ElevenLabs.
+  supportedModels: [
+    'eleven_v3',
+    'eleven_multilingual_v2',
+    'eleven_flash_v2_5',
+    'eleven_turbo_v2_5',
+  ],
   baseUrl: 'https://api.elevenlabs.io/v1',
 
   async generate(text: string, options: TTSOptions): Promise<ArrayBuffer> {
